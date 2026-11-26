@@ -153,12 +153,12 @@ _MPI_ENV = ("OMPI_", "PMIX_", "OPAL_", "ORTE_", "PRTE_")
 class _Server:
     """One chip's device server (tt_relion/device_server.py) and the shared memory it reads."""
 
-    def __init__(self, chip=None):
+    def __init__(self, chip=None, module="tt_relion.device_server"):
         import subprocess
         env = {k: v for k, v in os.environ.items() if not k.startswith(_MPI_ENV)}
         if chip is not None:
             env["TT_VISIBLE_DEVICES"] = chip
-        self.p = subprocess.Popen([_PYTHON, "-m", "tt_relion.device_server", _FIDELITY],
+        self.p = subprocess.Popen([_PYTHON, "-m", module, _FIDELITY],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
         self.shm = None
