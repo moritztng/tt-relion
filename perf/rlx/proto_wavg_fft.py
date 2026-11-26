@@ -33,6 +33,7 @@ ap.add_argument("--fids", default="HiFi4,HiFi2")
 ap.add_argument("--fft_batch", default="8,64")
 ap.add_argument("--wavg", default="256x84x360,1024x37x100")   # O x T x image size
 ap.add_argument("--reps", type=int, default=3)
+ap.add_argument("--nsig", type=int, default=200, help="samples above 1e-6 of the best weight (random refs alone give 1)")
 a = ap.parse_args()
 
 from tt_bio.main import ensure_p300_mesh_descriptor  # noqa: E402
@@ -162,7 +163,11 @@ for spec in a.wavg.split(","):
     sh = (ref[np.arange(T) % O] + g.standard_normal((T, 2 * P))).astype(np.float32)
     r64, s64 = ref.astype(np.float64), sh.astype(np.float64)
     d2 = 0.5 * ((r64 ** 2).sum(1)[:, None] + (s64 ** 2).sum(1)[None] - 2 * r64 @ s64.T)
-    W64 = np.exp(-(d2 - d2.min()))
+    # Random references are mutually independent, so the raw posterior is one-hot and wavg degenerates to a
+    # copy. Temper it so the nsig-th best sample sits at 1e-6 of the best, as a real fine search spreads it.
+    dd = (d2 - d2.min()).ravel()
+    tau = np.partition(dd, a.nsig)[a.nsig] / np.log(1e6)
+    W64 = np.exp(-(d2 - d2.min()) / tau)
     W64 /= W64.sum()
     W = W64.astype(np.float32)
     W64 = W.astype(np.float64)

@@ -7,4 +7,5 @@ PY=~/tt-bio-dev/env/bin/python
 timeout 1200 $PY perf/rlx/probe_acc.py "$R/acc.jsonl"; echo "probe rc=$?"
 timeout 2400 $PY perf/rlx/proj_proto.py --sizes 50,100,146 --out "$R/proj.jsonl"; echo "proj rc=$?"
 timeout 2400 $PY perf/rlx/proj_proto.py --sizes 360 --oc 32 --out "$R/proj.jsonl"; echo "proj360 rc=$?"
+timeout 1800 $PY perf/rlx/proto_wavg_fft.py --out "$R/proto.jsonl" --fft_batch 8; echo "wavg rc=$?"
 echo P2-DONE
