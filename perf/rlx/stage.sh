@@ -7,8 +7,10 @@
 set -uo pipefail
 D=$1 LIST=$(realpath "$2") CHK=$(dirname "$(realpath "$0")")/check_stacks.py; U=https://ftp.ebi.ac.uk/empiar/world_availability/10028/data
 mkdir -p "$D" && cd "$D" || exit 1; t0=$(date +%s)
-[ -s emd_2660.map ] || { curl -sf https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-2660/map/emd_2660.map.gz | gunzip > map.part &&
-  mv map.part emd_2660.map; } &   # one slow stream, so it runs beside the stacks; a cut-off download never looks complete
+# One slow stream beside the stacks. A cut-off .gz fails gunzip -t and is fetched again, so it never looks complete.
+[ -s emd_2660.map ] || for t in 1 2 3 4 5 6; do curl -sf --retry 5 -o map.gz \
+  https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-2660/map/emd_2660.map.gz && gunzip -t map.gz &&
+  gunzip -c map.gz > map.part && mv map.part emd_2660.map && rm map.gz && break; sleep 30; done &
 for t in 1 2 3 4 5 6 7 8; do
   m=$(while read -r p; do { [ -s "$p" ] && [ ! -e "$p.aria2" ]; } || echo "$p"; done < "$LIST")
   if [ -z "$m" ]; then   # all present: a stack holding EBI's error body is re-fetched whole
