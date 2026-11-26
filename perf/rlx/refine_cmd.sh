@@ -1,14 +1,15 @@
 #!/bin/bash
 # RLX frozen job (state PROTOCOL.md): RELION 3D auto-refine of EMPIAR-10028, RELION's own GUI recipe for
 # Refine3D plus the 3dem benchmark settings. Only ranks, --j, --pool, --gpu and the seed vary between runs.
-#   refine_cmd.sh <relion prefix> <data dir> <star> <out name> <ranks> <j> <pool> <seed> [gpu map] [extra] [mpirun opts]
+#   refine_cmd.sh <relion prefix> <data dir> <star> <out name> <ranks> <j> <pool> <seed> [gpu map] [extra] [mpirun opts] [images: auto|ram|cache]
 set -uo pipefail
-R=$1 D=$2 STAR=$3 O=$4 N=$5 J=$6 P=$7 S=$8 G=${9:-} X=${10:-} M=${11:-}
+R=$1 D=$2 STAR=$3 O=$4 N=$5 J=$6 P=$7 S=$8 G=${9:-} X=${10:-} M=${11:-} IM=${12:-auto}
 mkdir -p "$PWD/$O"; OUT=$PWD/$O
 RD=--preread_images; case "$X" in *--scratch_dir*) RD=;; esac   # scratch replaces RAM only when RAM is short
+case "$IM" in cache) RD=;; ram|auto) ;; *) echo "bad images mode $IM"; exit 2;; esac
 # Every follower holds ALL images with --preread_images, so it is on only while (ranks-1) x set fits 60 % of RAM;
 # otherwise images come from the page cache (the box has the RAM for one copy).
-[ -n "$RD" ] && python3 - "$D" "$STAR" "$N" <<'PY' || RD=
+[ -n "$RD" ] && [ "$IM" = auto ] && python3 - "$D" "$STAR" "$N" <<'PY' || RD=
 import sys, os, glob
 d, star, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
 rows = sum(1 for l in open(os.path.join(d, star)) if '.mrcs' in l)
