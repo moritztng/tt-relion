@@ -36,50 +36,18 @@ ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--nsig", type=int, default=200, help="samples above 1e-6 of the best weight (random refs alone give 1)")
 a = ap.parse_args()
 
-from tt_bio.main import ensure_p300_mesh_descriptor  # noqa: E402
-ensure_p300_mesh_descriptor()
 import ttnn  # noqa: E402
 
 torch.set_num_threads(8)
-dev = ttnn.open_device(device_id=0)
+from _tt import Clock, open_dev  # noqa: E402
+
+dev, NODES = open_dev()
 
 
-def tt_nodes():
-    n = set()
-    for f in os.listdir("/proc/self/fd"):
-        try:
-            t = os.readlink("/proc/self/fd/" + f)
-        except OSError:
-            continue
-        if t.startswith("/dev/tenstorrent/"):
-            n.add(int(t.rsplit("/", 1)[1]))
-    return sorted(n)
 
 
-NODES = tt_nodes()
-print("device nodes opened:", NODES, flush=True)
 
 
-class Clock:
-    def __init__(self):
-        self.paths = ["/sys/class/tenstorrent/tenstorrent!%d/tt_aiclk" % n for n in NODES]
-        self.v, self.run = [], True
-        self.th = threading.Thread(target=self.loop, daemon=True)
-        self.th.start()
-
-    def loop(self):
-        while self.run:
-            for p in self.paths:
-                try:
-                    self.v.append(int(open(p).read().split()[0]))
-                except (OSError, ValueError):
-                    pass
-            time.sleep(0.25)
-
-    def stop(self):
-        self.run = False
-        self.th.join()
-        return (min(self.v), int(np.median(self.v))) if self.v else (None, None)
 
 
 def up(x, dt=ttnn.float32):
@@ -122,7 +90,7 @@ def mm_split(A, B, k, cfg):
 
 
 def timed(fn, reps):
-    clk = Clock()
+    clk = Clock(NODES)
     ts = []
     out = None
     for r in range(reps + 1):

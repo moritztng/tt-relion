@@ -105,26 +105,6 @@ def emulate(T, x, y, e, gm):
     return torch.where(inside, F[0], zero), torch.where(inside, F[1] * sg, zero)
 
 
-class Clock:
-    def __init__(self, nodes):
-        self.paths = ["/sys/class/tenstorrent/tenstorrent!%d/tt_aiclk" % n for n in nodes]
-        self.v, self.run = [], True
-        self.th = threading.Thread(target=self.loop, daemon=True)
-        self.th.start()
-
-    def loop(self):
-        while self.run:
-            for p in self.paths:
-                try:
-                    self.v.append(int(open(p).read().split()[0]))
-                except (OSError, ValueError):
-                    pass
-            time.sleep(0.25)
-
-    def stop(self):
-        self.run = False
-        self.th.join()
-        return (min(self.v), int(np.median(self.v))) if self.v else (None, None)
 
 
 def rel(a, b):
@@ -141,15 +121,11 @@ def emit(**k):
 
 
 if not a.cpu_only:
-    from tt_bio.main import ensure_p300_mesh_descriptor
-
-    ensure_p300_mesh_descriptor()
     import ttnn
 
-    dev = ttnn.open_device(device_id=0)
-    nodes = sorted({int(os.readlink("/proc/self/fd/" + f).rsplit("/", 1)[1]) for f in os.listdir("/proc/self/fd")
-                    if os.readlink("/proc/self/fd/" + f).startswith("/dev/tenstorrent/")})
-    print("device nodes:", nodes, flush=True)
+    from _tt import Clock, open_dev
+
+    dev, nodes = open_dev()
 
     def up(t, layout=None, dtype=None):
         return ttnn.from_torch(t, dtype=dtype or ttnn.float32, layout=layout or ttnn.TILE_LAYOUT, device=dev)
@@ -162,7 +138,7 @@ if not a.cpu_only:
         zp = ttnn.multiply(ttnn.add(ttnn.multiply(e6, Xd), ttnn.multiply(e7, Yd)), float(PF))
         r2 = ttnn.add(ttnn.add(ttnn.multiply(xp, xp), ttnn.multiply(yp, yp)), ttnn.multiply(zp, zp))
         inside = ttnn.lt(r2, float(gm["maxR2"] + 1))
-        sg = ttnn.subtract(1.0, ttnn.multiply(ttnn.ltz(xp), 2.0))
+        sg = ttnn.add(ttnn.multiply(ttnn.ltz(xp), -2.0), 1.0)
         xp, yp, zp = ttnn.multiply(xp, sg), ttnn.multiply(yp, sg), ttnn.multiply(zp, sg)
         x0, y0, z0 = ttnn.floor(xp), ttnn.floor(yp), ttnn.floor(zp)
         fx, fy, fz = ttnn.subtract(xp, x0), ttnn.subtract(yp, y0), ttnn.subtract(zp, z0)

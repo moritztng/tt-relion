@@ -50,8 +50,6 @@ ap.add_argument("--sums", default="host,dev")
 ap.add_argument("--reps", type=int, default=3)
 a = ap.parse_args()
 
-from tt_bio.main import ensure_p300_mesh_descriptor  # noqa: E402  (a lone p300 chip needs the 1x1 MGD)
-ensure_p300_mesh_descriptor()
 import ttnn  # noqa: E402
 
 torch.set_num_threads(8)
@@ -106,48 +104,15 @@ def build(ref, shw, k, kc):
     return lhs, rhs, nb
 
 
-class Clock:
-    """Samples tt_aiclk of the given /dev/tenstorrent nodes until stopped."""
-
-    def __init__(self, nodes):
-        self.paths = ["/sys/class/tenstorrent/tenstorrent!%d/tt_aiclk" % n for n in nodes]
-        self.v, self.run = [], True
-        self.th = threading.Thread(target=self.loop, daemon=True)
-        self.th.start()
-
-    def loop(self):
-        while self.run:
-            for p in self.paths:
-                try:
-                    self.v.append(int(open(p).read().split()[0]))
-                except (OSError, ValueError):
-                    pass
-            time.sleep(0.25)
-
-    def stop(self):
-        self.run = False
-        self.th.join()
-        return (min(self.v), int(np.median(self.v))) if self.v else (None, None)
 
 
-dev = ttnn.open_device(device_id=0)
+from _tt import Clock, open_dev  # noqa: E402
+
+dev, nodes = open_dev()
 
 
-def tt_nodes():
-    """/dev/tenstorrent/N nodes this process holds open (UMD may open a p300 board's partner chip too)."""
-    n = set()
-    for f in os.listdir("/proc/self/fd"):
-        try:
-            t = os.readlink("/proc/self/fd/" + f)
-        except OSError:
-            continue
-        if t.startswith("/dev/tenstorrent/"):
-            n.add(int(t.rsplit("/", 1)[1]))
-    return sorted(n)
 
 
-nodes = tt_nodes()
-print("device nodes opened:", nodes, flush=True)
 DT = {"fp32": (torch.float32, ttnn.float32), "bf16": (torch.bfloat16, ttnn.bfloat16)}
 
 

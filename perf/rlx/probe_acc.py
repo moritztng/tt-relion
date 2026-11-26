@@ -14,25 +14,15 @@ import time
 import numpy as np
 import torch
 
-from tt_bio.main import ensure_p300_mesh_descriptor
+import ttnn
 
-ensure_p300_mesh_descriptor()
-import ttnn  # noqa: E402
+from _tt import open_dev
+from probe_acc_util import bits_split
 
-dev = ttnn.open_device(device_id=0)
+dev, _ = open_dev()
 out = open(sys.argv[1], "a") if len(sys.argv) > 1 else sys.stdout
 
 
-def bits_split(a, nbits, npieces):
-    """a (float64) -> pieces each with <= nbits significant bits (incl. the leading one), exact in bf16."""
-    parts, r = [], a.copy()
-    for _ in range(npieces):
-        e = np.floor(np.log2(np.abs(r) + 1e-300))
-        q = np.ldexp(np.trunc(np.ldexp(r, -(e - nbits + 1).astype(int))), (e - nbits + 1).astype(int))
-        q[np.abs(r) < 1e-300] = 0
-        parts.append(q)
-        r = r - q
-    return parts
 
 
 def mm(A, B, fid, dest32, l1acc=True):
