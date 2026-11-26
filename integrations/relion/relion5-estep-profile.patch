@@ -1,0 +1,26 @@
+Give RELION's ALTCPU CTIC/CTOC macros a thread-safe body, so the E-step's stage split is observable.
+
+Applies on top of relion5-tt.patch (it needs src/acc/tt/ to exist). One file changes. Accumulation is
+always compiled in; TT_RELION_PROFILE=1 gates the report, so the same binary serves a timed arm and a
+profiled arm. See src_acc_tt/tt_profile.h for why neither RELION's -DTIMING timers nor its own CTIC
+macros can produce this number.
+
+diff --git a/src/acc/cpu/cpu_benchmark_utils.h b/src/acc/cpu/cpu_benchmark_utils.h
+index a8daa31..baab47b 100644
+--- a/src/acc/cpu/cpu_benchmark_utils.h
++++ b/src/acc/cpu/cpu_benchmark_utils.h
+@@ -2,10 +2,11 @@
+ #ifndef CPU_BENCHMARK_UTILS_H_
+ #define CPU_BENCHMARK_UTILS_H_
+ 
+-#define	CTIC(timer,timing)
+-#define	CTOC(timer,timing)  
++#include "src/acc/tt/tt_profile.h"
++#define	CTIC(timer,timing) (TTProf::tic(timing))
++#define	CTOC(timer,timing) (TTProf::toc(timing))
+ #define	GTIC(timer,timing)
+-#define	GTOC(timer,timing) 
++#define	GTOC(timer,timing)
+ #define	GATHERGPUTIMINGS(timer) 
+ 
+ namespace CpuKernels
