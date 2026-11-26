@@ -20,7 +20,9 @@ apt-get update -qq && apt-get install -y -qq git cmake build-essential libopenmp
 python3 subset.py shiny_2sets.star dev.star > dev.txt && python3 subset.py shiny_2sets.star full.star --n 0 > full.txt || fail subset
 if [ -s relion-builds.tgz ]; then tar -C /opt -xzf relion-builds.tgz || fail untar; BP=
 else ARCH=80; [ $KIND = b200 ] && ARCH=100; bash build.sh fair:$ARCH stock:$ARCH:stock > build.log 2>&1 & BP=$!; fi
-bash stage.sh data full.txt || fail stage; cp dev.star full.star data/
+# The dev cell (1/8) stages first and the sweep runs on it while nothing else is paid for, so a config that cannot run
+# costs minutes, not the 2 h full staging (11-26: 51 GB staged, then every config aborted at iteration 2).
+bash stage.sh data dev.txt || fail stage; cp dev.star full.star data/
 [ -z "$BP" ] || { wait $BP || { tail -30 build.log; fail build; }; cat build.log; st built; }
 FAIR=/opt/relion-fair; [ $KIND = b200 ] && [ -d /opt/relion-fair100 ] && FAIR=/opt/relion-fair100
 nvidia-cuda-mps-control -d && st "MPS on" || st "MPS unavailable"
@@ -39,6 +41,7 @@ for c in "${CS[@]}"; do set -- $c; name=dev-n$1-j$2-p$3
   st "config $c dev wall ${t}s"; if [ -z "$bt" ] || python3 -c "import sys;sys.exit(0 if $t < $bt else 1)"; then best=$c bt=$t; fi
 done
 [ -n "$best" ] || fail "no config ran"; st "BEST $best (${bt}s on the dev cell)"; set -- $best
+bash stage.sh data full.txt || fail stage
 X=
 full(){ run $1 $2 full.star $3 $4 $5 $6 "$X" && return; [ -n "$X" ] && return 1
   X="--scratch_dir $W/scratch"; mkdir -p $W/scratch; st "$1 failed with images in RAM, repeating with $X"; run $1 $2 full.star $3 $4 $5 $6 "$X"; }
