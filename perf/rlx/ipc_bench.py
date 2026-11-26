@@ -12,7 +12,8 @@ the same protocol and does no matmul, and reports per call:
   cross  the whole _device_cross: bf16 split, operand build, K-chunk permute, xfer, float64 chunk sum
 
 Shapes follow box 360 at the dev cell's operating points (dev_ref refine.log): coarse O = 1024 per call
-(the bridge's TT_RELION_DEV_CHUNK), T = 21 at healpix 2 / 37 at healpix 3; fine T = 84 (oversampling 1),
+(the bridge's TT_RELION_DEV_CHUNK), T = 21 at healpix 2 / 37 at healpix 3 (4608 / 36864
+orientations per particle); fine T = 84 (oversampling 1),
 O = the significant orientations, which only a run can tell, so a range. image_size = Fourier pixels,
 size x (size/2 + 1).
 
@@ -39,10 +40,12 @@ def sizes(n):
 
 
 CASES = [  # name, O per call, T, image size (Fourier pixels)
-    ("coarse h2 s64", 1024, 21, sizes(64)),
-    ("coarse h2 s146", 1024, 21, sizes(146)),
-    ("coarse h3 s146", 1024, 37, sizes(146)),
-    ("coarse h3 s256", 1024, 37, sizes(256)),
+    # Coarse runs at RELION's coarse_size, 2 * ceil(pixel * box / (angle/360 * pi * diameter / 1.2))
+    # (ml_optimiser.cpp): 26 px at healpix 2 (15 deg), 50 at 3, 100 at 4; never above the current size.
+    ("coarse h2 s26", 1024, 21, sizes(26)),
+    ("coarse h3 s50", 1024, 37, sizes(50)),
+    ("coarse h4 s100", 1024, 37, sizes(100)),
+    # Fine runs at the current size: 146 at it13 of the dev cell, toward 360 on the full job.
     ("fine O64 s146", 64, 84, sizes(146)),
     ("fine O256 s146", 256, 84, sizes(146)),
     ("fine O256 s256", 256, 84, sizes(256)),
@@ -85,7 +88,7 @@ def run(pairs, reps, copy, max_mb):
 
         a = np.zeros((1, 32, 32), np.float32)
         out["rt"] = par(lambda i: timed(lambda: srv[i].matmul(a, a), reps * 200))
-        import torch
+        torch = relion._torch()            # honours --torch-threads, as RELION's calls do
         g = torch.Generator().manual_seed(0)
         for name, o, t, isz in CASES:
             nc, m, kc, n = shapes(o, t, isz)
@@ -136,20 +139,24 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--pairs", type=int, default=1)
     ap.add_argument("--json")
+    ap.add_argument("--torch-threads", type=int, default=0,
+                    help="torch intra-op threads in the bridge (relion.py's TT_RELION_TORCH_THREADS); 0 = torch default")
     ap.add_argument("--max-mb", type=float, default=1e9, help="skip cases whose shm segment is larger")
     a = ap.parse_args()
     os.environ.setdefault("TT_RELION_PYTHON", sys.executable)
     relion._PYTHON = os.environ["TT_RELION_PYTHON"]
+    relion._TORCH_THREADS = a.torch_threads
     big = np.ones(64 << 20, np.float32)           # 256 MB, plain single-thread copy: the bandwidth to scale by
     dst = np.empty_like(big)
     bw = 2 * big.nbytes / 1e9 / timed(lambda: np.copyto(dst, big), a.reps)   # read + write
     del big, dst
-    res = {"host": {"nproc": os.cpu_count(), "load1": os.getloadavg()[0], "memcpy_GBps": bw}, "pairs": a.pairs}
+    res = {"host": {"nproc": os.cpu_count(), "load1": os.getloadavg()[0], "memcpy_GBps": bw}, "pairs": a.pairs,
+           "torch_threads": a.torch_threads}
     for copy in (False, True):
         res["copy" if copy else "nocopy"] = run(a.pairs, a.reps, copy, a.max_mb)
     r0, r1 = res["nocopy"], res["copy"]
-    print("pairs=%d nproc=%d load1=%.1f memcpy %.1f GB/s (r+w)  rt (32x32) %.1f us"
-          % (a.pairs, os.cpu_count(), os.getloadavg()[0], bw, 1e6 * r0["rt"]))
+    print("pairs=%d torch_threads=%d nproc=%d load1=%.1f memcpy %.1f GB/s (r+w)  rt (32x32) %.1f us"
+          % (a.pairs, a.torch_threads, os.cpu_count(), os.getloadavg()[0], bw, 1e6 * r0["rt"]))
     print("%-16s %18s %8s %9s %9s %9s %8s" % ("case", "nc,O,kc,n", "MB", "xfer ms", "xferc ms", "cross ms",
                                                "GB/s"))
     for name, *_ in CASES:
