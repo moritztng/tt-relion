@@ -259,7 +259,7 @@ def _progress():
     the device servers (chip + transport), copy_s the shared-memory copies around it."""
     tot = {}
     for s in _srv:
-        for k, v in s.c.items():
+        for k, v in list(s.c.items()):     # copy: other threads insert keys
             tot[k] = tot.get(k, 0) + v
     keys = ("handled", "fine_handled", "proj_hit", "proj_miss")
     return (f"tt_relion pid {os.getpid()} " + " ".join(f"{k} {_stats[k]}" for k in keys)
