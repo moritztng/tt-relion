@@ -64,7 +64,16 @@ _SHAPE = os.environ.get("TT_RELION_SHAPE", "")
 _DUMP = os.environ.get("TT_RELION_DUMP", "")
 _DUMP_N = int(os.environ.get("TT_RELION_DUMP_N", "1"))
 _dumped = [0]
-_stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0}
+_stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
+          "proj_hit": 0, "proj_miss": 0}
+# TT_RELION_PROJ_CACHE_MB: per-rank cap on cached coarse projections (device path). In a global
+# search every particle's coarse pass asks for the same orientation set against the same reference,
+# so the projection and its bf16 lhs operand are per-iteration constants: _project was 66-86 % of a
+# coarse call's host wall (perf/rlx/bridge_prof.py). An entry is kept only on its second sighting,
+# so local searches (per-particle orientations) cache nothing. 0 disables.
+_PCACHE_MB = int(os.environ.get("TT_RELION_PROJ_CACHE_MB", "4096"))
+_pc = {"model": None, "seen": set(), "hit": {}, "bytes": 0}
+_pc_lock = threading.Lock()
 
 
 # TT_RELION_TORCH_THREADS=<n>: torch's intra-op thread count inside the bridge. RELION already
@@ -153,12 +162,12 @@ _MPI_ENV = ("OMPI_", "PMIX_", "OPAL_", "ORTE_", "PRTE_")
 class _Server:
     """One chip's device server (tt_relion/device_server.py) and the shared memory it reads."""
 
-    def __init__(self, chip=None):
+    def __init__(self, chip=None, module="tt_relion.device_server"):
         import subprocess
         env = {k: v for k, v in os.environ.items() if not k.startswith(_MPI_ENV)}
         if chip is not None:
             env["TT_VISIBLE_DEVICES"] = chip
-        self.p = subprocess.Popen([_PYTHON, "-m", "tt_relion.device_server", _FIDELITY],
+        self.p = subprocess.Popen([_PYTHON, "-m", module, _FIDELITY],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
         self.shm = None
@@ -238,16 +247,56 @@ def _bf16_split(t, a, k):
     return parts + [a]
 
 
-def _device_cross(t, ref, shw):
-    """C[o, t] = sum_p ref[o, p] * shw[t, p] on the chip, fp32 in, fp32 accumulate.
+def _lhs_operand(t, ref):
+    """ref [O, K] -> the chip's left operand [nc, O, kc]: the _SPLIT bf16 parts side by side, K cut
+    into _KCHUNK runs (see _device_cross). Depends on ref only, so it is cached with the projection."""
+    lhs = t.cat(_bf16_split(t, ref, _SPLIT), 1)
+    kc = _KCHUNK if _KCHUNK > 0 else lhs.shape[1]
+    nc = -(-lhs.shape[1] // kc)
+    pad = nc * kc - lhs.shape[1]
+    if pad:
+        lhs = t.nn.functional.pad(lhs, (0, pad))
+    return lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous()
+
+
+def _coarse_refs(t, key, o0, project):
+    """(ref_r, ref_i, lhs) for orientations [o0, o1), from the cache when this orientation set has
+    been asked for before against the same reference. key is None to bypass."""
+    if key is None:
+        r, i = project()
+        return r, i, _lhs_operand(t, t.cat([r, i], 1))
+    mkey, ekey = key
+    k = (ekey, o0)
+    with _pc_lock:
+        if _pc["model"] != mkey:                    # new iteration or half: drop the old reference
+            _pc.update(model=mkey, seen=set(), hit={}, bytes=0)
+        got = _pc["hit"].get(k)
+        keep = k in _pc["seen"]
+        _pc["seen"].add(k)
+    if got is not None:
+        _stats["proj_hit"] += 1
+        return got
+    _stats["proj_miss"] += 1
+    r, i = project()
+    lhs = _lhs_operand(t, t.cat([r, i], 1))
+    nb = (r.numel() + i.numel() + lhs.numel()) * 4
+    if keep:
+        with _pc_lock:
+            if _pc["model"] == mkey and _pc["bytes"] + nb <= _PCACHE_MB << 20:
+                _pc["hit"][k] = (r, i, lhs)
+                _pc["bytes"] += nb
+    return r, i, lhs
+
+
+def _device_cross(t, lhs, shw):
+    """C[o, t] = sum_p ref[o, p] * shw[t, p] on the chip, fp32 in, fp32 accumulate; lhs = _lhs_operand(ref).
 
     ref [O, K] and shw [T, K] are real (real and imaginary parts concatenated along K). Both are
     split into _SPLIT bf16 parts and C = sum over i + j < _SPLIT of a_i . b_j, which drops terms of
     relative size 2^-24 at _SPLIT=3. All of it is ONE matmul: the left operand is [a_0 | a_1 | ...]
     and output column block j collects b_j against every a_i with i + j < _SPLIT.
     """
-    k, n, kk = _SPLIT, shw.shape[0], ref.shape[1]
-    lhs = t.cat(_bf16_split(t, ref, k), 1)
+    k, n, kk = _SPLIT, shw.shape[0], shw.shape[1]
     bs = _bf16_split(t, shw, k)
     rhs = t.zeros(k * kk, k * n, dtype=t.float32)
     for i in range(k):
@@ -256,13 +305,10 @@ def _device_cross(t, ref, shw):
     # With exact products the chip still loses bits in accumulation, so K is cut into _KCHUNK runs,
     # each its own batch entry, summed on the host in float64. Measured at box 64 (parity_cross.py):
     # max |d2 error| 0.54 unchunked, 0.35 at 256, 0.25 at 64; fp32 torch is 0.005.
-    kc = _KCHUNK if _KCHUNK > 0 else lhs.shape[1]
-    nc = -(-lhs.shape[1] // kc)
-    pad = nc * kc - lhs.shape[1]
+    nc, kc = lhs.shape[0], lhs.shape[2]
+    pad = nc * kc - rhs.shape[0]
     if pad:
-        lhs = t.nn.functional.pad(lhs, (0, pad))
         rhs = t.nn.functional.pad(rhs, (0, 0, 0, pad))
-    lhs = lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous()
     rhs = rhs.reshape(nc, kc, rhs.shape[1])
     out = _matmul(lhs.numpy(), rhs.numpy())
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
@@ -306,15 +352,23 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         shw = t.cat([sh_r * w, sh_i * w], 1)
         sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * w.double()).sum(-1)
     chunk = _DEV_CHUNK if device else _ORI_CHUNK
+    ckey = None
+    if device and tag == "C" and _PCACHE_MB > 0:
+        import hashlib
+        ckey = (_model_key(mdl_mv),
+                (hashlib.sha1(eul_mv).digest(), mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
+                 maxR2_padded, padding_factor, imgX, imgY, image_size, chunk))
     for o0 in range(0, orientation_num, chunk):
         o1 = min(o0 + chunk, orientation_num)
-        ref_r, ref_i = _project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY, mdlZ,
-                                mdlInitY, mdlInitZ, maxR2_padded, padding_factor)
+        project = lambda: _project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY, mdlZ,  # noqa: E731
+                                   mdlInitY, mdlInitZ, maxR2_padded, padding_factor)
         if device:
+            ref_r, ref_i, lhs = _coarse_refs(t, ckey, o0, project)
             ref2 = ((ref_r.double() ** 2 + ref_i.double() ** 2) * w.double()).sum(-1)
-            cross = _device_cross(t, t.cat([ref_r, ref_i], 1), shw).double()
+            cross = _device_cross(t, lhs, shw).double()
             d2 = ref2.unsqueeze(1) + sh2.unsqueeze(0) - 2.0 * cross
         else:
+            ref_r, ref_i = project()
             dr = ref_r.unsqueeze(1) - sh_r.unsqueeze(0)
             di = ref_i.unsqueeze(1) - sh_i.unsqueeze(0)
             d2 = ((dr * dr + di * di) * w).sum(-1)
