@@ -1,6 +1,6 @@
 #!/bin/bash
 # Timed RLX runs on a rented 8-GPU box. Runs as root in /work, detached; progress in /work/box.log, DONE/FAILED marker.
-# Inputs in /work: subset.py, stage.sh, refine_cmd.sh, and either relion-builds.tgz or build.sh
+# Inputs in /work: subset.py, stage.sh, check_stacks.py, refine_cmd.sh, and either relion-builds.tgz or build.sh
 # plus the two patches (then it builds while the data stages).
 #   box_timed.sh <a100|b200> "<ranks j pool;...>|auto" <seeds> [stock]
 # auto = 1, 2, 3 ranks per GPU plus a leader, --j min(6, cores/ranks), --pool 100 (NVIDIA's run_relion.sh), and
