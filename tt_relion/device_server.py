@@ -13,6 +13,7 @@ EOF on stdin closes the device and exits.
 import json
 import os
 import sys
+import time
 
 
 def main():
@@ -29,8 +30,10 @@ def main():
                                           math_approx_mode=False, fp32_dest_acc_en=True,
                                           packer_l1_acc=True)
     shm = None
+    t_open, busy, calls = time.time(), 0.0, 0
     for line in sys.stdin:
         req = json.loads(line)
+        t0 = time.time()
         if shm is None or shm.name != req["shm"].lstrip("/"):
             if shm is not None:
                 shm.close()
@@ -49,10 +52,16 @@ def main():
         ttnn.deallocate(b)
         ttnn.deallocate(c)
         del lhs, rhs, out, buf
+        busy += time.time() - t0
+        calls += 1
         reply.write("ok\n")
     if shm is not None:
         shm.close()
     ttnn.close_device(dev)
+    # The WALLMAP reads this: how much of its life the rank's chip spent on requests (upload, matmul,
+    # readback), against the life of the server.
+    print("TTDEV chip=%s calls=%d busy_s=%.3f life_s=%.3f" % (os.environ.get("TT_VISIBLE_DEVICES", "?"),
+          calls, busy, time.time() - t_open), file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
