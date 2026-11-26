@@ -6,6 +6,17 @@ set -uo pipefail
 R=$1 D=$2 STAR=$3 O=$4 N=$5 J=$6 P=$7 S=$8 G=${9:-} X=${10:-}
 mkdir -p "$PWD/$O"; OUT=$PWD/$O
 RD=--preread_images; case "$X" in *--scratch_dir*) RD=;; esac   # scratch replaces RAM only when RAM is short
+# Every follower holds ALL images with --preread_images, so it is on only while (ranks-1) x set fits 60 % of RAM;
+# otherwise images come from the page cache (the box has the RAM for one copy).
+[ -n "$RD" ] && python3 - "$D" "$STAR" "$N" <<'PY' || RD=
+import sys, os, glob
+d, star, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+rows = sum(1 for l in open(os.path.join(d, star)) if '.mrcs' in l)
+stacks = glob.glob(os.path.join(d, '**', '*.mrcs'), recursive=True); per = sum(os.path.getsize(f) for f in stacks) / 105247
+mem = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+need = (n - 1) * rows * per; print(f"preread need {need/1e9:.0f} GB of {mem/1e9:.0f} GB RAM"); sys.exit(0 if need < 0.6 * mem else 1)
+PY
+echo "images: ${RD:-page cache}"
 cd "$D"; export LD_LIBRARY_PATH=$R/lib:${LD_LIBRARY_PATH:-}
 sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || echo "WARN page cache not dropped"
 /usr/bin/time -v -o "$OUT/time-v.txt" mpirun --allow-run-as-root --bind-to none -x LD_LIBRARY_PATH -n "$N" \
