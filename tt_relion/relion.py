@@ -283,10 +283,13 @@ def _coarse_refs(t, key, o0, project):
     nb = ref.nbytes + rr.numel() * 8
     if keep:
         with _pc_lock:
-            if _pc["model"] == mkey and _pc["bytes"] + nb <= _PCACHE_MB << 20:
-                got = _pc["hit"][k] = (ref, rr, str(len(_pc["hit"])))
-                _pc["bytes"] += nb
-                return got
+            if _pc["model"] == mkey:
+                if k in _pc["hit"]:                 # another thread built it meanwhile: one entry, one chip key
+                    return _pc["hit"][k]
+                if _pc["bytes"] + nb <= _PCACHE_MB << 20:
+                    got = _pc["hit"][k] = (ref, rr, str(len(_pc["hit"])))
+                    _pc["bytes"] += nb
+                    return got
     return ref, rr, None
 
 
