@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import sys
 import threading
 import time
 
@@ -271,6 +272,9 @@ def _coarse_refs(t, key, o0, project):
     k = (ekey, o0)
     with _pc_lock:
         if _pc["model"] != mkey:                    # new iteration or half: drop the old reference
+            if _pc["model"] is not None:            # one line per reference, so a run log shows hit rates
+                print(f"tt_relion pid {os.getpid()} proj_hit {_stats['proj_hit']} proj_miss {_stats['proj_miss']}"
+                      f" cached_mb {_pc['bytes'] >> 20}", file=sys.stderr, flush=True)
             _pc.update(model=mkey, gen=_pc["gen"] + 1, seen=set(), hit={}, bytes=0)
         got = _pc["hit"].get(k)
         keep = k in _pc["seen"]
