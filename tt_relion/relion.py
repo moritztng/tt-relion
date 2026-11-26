@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import numpy as np
 
@@ -155,6 +156,7 @@ class _Server:
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
         self.shm = None
+        self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
 
     def matmul(self, lhs, rhs):
         """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip."""
@@ -168,15 +170,24 @@ class _Server:
                     self.shm.close()
                     self.shm.unlink()
                 self.shm = shared_memory.SharedMemory(create=True, size=need)
+            t0 = time.time()
             buf = np.ndarray((need // 4,), np.float32, self.shm.buf)
             buf[:lhs.size] = lhs.reshape(-1)
             buf[lhs.size:lhs.size + rhs.size] = rhs.reshape(-1)
-            self.p.stdin.write(json.dumps({"shm": self.shm.name, "shape": [nc, m, kc, n]}) + "\n")
+            t1 = time.time()
+            self.p.stdin.write(json.dumps({"shm": self.shm.name, "shape": [nc, m, kc, n], "client": self.c},
+                                          separators=(",", ":")) + "\n")
             self.p.stdin.flush()
             if self.p.stdout.readline().strip() != "ok":
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
+            t2 = time.time()
             out = buf[lhs.size + rhs.size:].reshape(nc, m, n).copy()
             del buf
+            c = self.c
+            c["calls"] += 1
+            c["bytes"] += need
+            c["rt_s"] = round(c["rt_s"] + t2 - t1, 4)
+            c["copy_s"] = round(c["copy_s"] + t1 - t0 + time.time() - t2, 4)
         return out
 
 
@@ -339,11 +350,13 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         _stats["declined"] += 1
         return False
     try:
+        t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
         acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                            mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                            padding_factor, imgX, imgY,
                            orientation_num, translation_num, image_size, "C")
+        _srv[0].c["C_s"] = round(_srv[0].c.get("C_s", 0.0) + time.time() - t0, 4)
         out = np.frombuffer(out_mv, dtype=np.float32)
         out += acc
         _stats["handled"] += 1
@@ -382,11 +395,13 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         _stats["fine_declined"] += 1
         return False
     try:
+        t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
         acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                            mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                            padding_factor, imgX, imgY,
                            orientation_num, translation_num, image_size, "F")
+        _srv[0].c["F_s"] = round(_srv[0].c.get("F_s", 0.0) + time.time() - t0, 4)
         rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
         trans_idx = np.frombuffer(trans_idx_mv, dtype=np.uint64)
         take = rot_idx * np.uint64(translation_num) + trans_idx
