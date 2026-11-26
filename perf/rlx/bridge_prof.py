@@ -1,14 +1,13 @@
 """Split one bridge diff2 call into its host terms, with no device: where the dev_ttnn E-step goes.
 
 Runs the real tt_relion/relion.py _dense_diff2 (TT_RELION_BACKEND=ttnn path) against
-tt_relion/stub_server.py, which speaks device_server.py's protocol and does no matmul, so every
+tt_relion/stub_server.py, which runs device_server.py's loop with a zero matmul, so every
 second measured here is host work the chip waits on. Per call it books:
 
   project  _project: the reference projection (gather + trilinear), torch on the host
-  norms    |ref|^2_w in float64
-  lhs      _lhs_operand: bf16 split + K-chunk permute of the projected references
-  split    _device_cross minus the transport: rhs build, float64 chunk sum
-  xfer     _Server.matmul: copy into shm, pipe round trip, copy out (stub only replies)
+  xfer     relion._cross: copy into shm, the server's whole turn (bf16 split, operand build, matmul,
+           float64 chunk sum; tt_relion/cross.py), copy out. The bridge thread waits on all of it,
+           but it runs in the server's process, outside the bridge's GIL.
   rest     the call wall minus the above: shift stack, norms, d2 assembly, numpy marshal
 
 Every thread shares one reference and one orientation set (a global search: every particle's coarse
@@ -37,7 +36,7 @@ import numpy as np  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from tt_relion import relion  # noqa: E402
 
-CASES = [  # name, O per call, T, size (Fourier px = size*(size/2+1)); as perf/rlx/ipc_bench.py
+CASES = [  # name, O per call, T, size (Fourier px = size*(size/2+1)); coarse size = RELION's rule
     ("coarse h2 s26", 1024, 21, 26),
     ("coarse h3 s50", 1024, 37, 50),
     ("fine O256 s146", 256, 84, 146),
@@ -60,10 +59,7 @@ def _timed(name, fn):
 
 
 relion._project = _timed("project", relion._project)
-_cross = relion._device_cross
-relion._device_cross = _timed("cross", _cross)
-relion._matmul = _timed("xfer", relion._matmul)
-relion._lhs_operand = _timed("lhs", relion._lhs_operand)
+relion._cross = _timed("xfer", relion._cross)
 
 
 def shared(o, rng):
@@ -100,9 +96,11 @@ def run(case, threads, calls, rng):
     name, o, t, s = case
     sh = shared(o, rng)
     data = [inputs(sh, t, s, rng) for _ in range(threads)]
-    relion._pc.update(model=None)                    # cold cache per case
-    one(data[0], s)                                  # warm: server spawn, shm, allocator
-    one(data[0], s)                                  # second sighting: the cache (if on) fills here
+    relion._pc.update(model=None)                    # cold cache per case (new gen on first call)
+    # Warm: server spawn, shm, allocator; the second sighting fills the host cache, and the calls after
+    # it reach every server once, so each chip keeps the operand (a once-per-iteration cost, see --check).
+    for _ in range(2 + len(relion._srv)):
+        one(data[0], s)
     _acc.clear()
     walls = []
 
@@ -125,11 +123,9 @@ def run(case, threads, calls, rng):
     per = {k: 1e3 * v / n for k, v in _acc.items()}
     r = dict(case=name, threads=threads, calls=n, span_s=round(span, 3),
              calls_per_s=round(n / span, 2), wall_ms=round(1e3 * wall / n, 1),
-             project_ms=round(per.get("project", 0), 1), lhs_ms=round(per.get("lhs", 0), 1),
-             xfer_ms=round(per.get("xfer", 0), 1),
-             split_ms=round(per.get("cross", 0) - per.get("xfer", 0), 1),
+             project_ms=round(per.get("project", 0), 1), xfer_ms=round(per.get("xfer", 0), 1),
              cache_mb=relion._PCACHE_MB, cached_mb=round(relion._pc["bytes"] / 2 ** 20))
-    r["rest_ms"] = round(r["wall_ms"] - r["project_ms"] - r["lhs_ms"] - r["split_ms"] - r["xfer_ms"], 1)
+    r["rest_ms"] = round(r["wall_ms"] - r["project_ms"] - r["xfer_ms"], 1)
     return r
 
 

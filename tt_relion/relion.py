@@ -19,7 +19,7 @@ core, _dense_diff2, and two entry points.
 Backend selected by TT_RELION_BACKEND:
   torch     torch on the host. Exact, slow, and the arm that proves the plumbing.
   ttnn      the device path: projection on the host (the torch code below), the orientation x
-            translation cross term on the chip. See _device_cross.
+            translation cross term on the chip. See tt_relion/cross.py.
   nullbase  decline the instant the hook is entered. Computes nothing, touches no buffer.
   null      do the buffer traffic the device path will do, then decline.
 
@@ -48,7 +48,6 @@ _CHECK = os.environ.get("TT_RELION_CHECK", "") not in ("", "0")
 # the host copy of the projected references.
 _DEV_CHUNK = int(os.environ.get("TT_RELION_DEV_CHUNK", "1024"))
 _FIDELITY = os.environ.get("TT_RELION_FIDELITY", "HiFi3")
-_SPLIT = int(os.environ.get("TT_RELION_SPLIT", "3"))
 _KCHUNK = int(os.environ.get("TT_RELION_KCHUNK", "256"))
 # TT_RELION_TRACE=<path>: append one line per call with the shape, a hash of the euler set and a
 # hash of the reference. Answers "is the coarse orientation set shared across particles" from a
@@ -67,13 +66,15 @@ _DUMP_N = int(os.environ.get("TT_RELION_DUMP_N", "1"))
 _dumped = [0]
 _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
           "proj_hit": 0, "proj_miss": 0}
-# TT_RELION_PROJ_CACHE_MB: per-rank cap on cached coarse projections (device path). In a global
-# search every particle's coarse pass asks for the same orientation set against the same reference,
-# so the projection and its bf16 lhs operand are per-iteration constants: _project was 66-86 % of a
-# coarse call's host wall (perf/rlx/bridge_prof.py). An entry is kept only on its second sighting,
-# so local searches (per-particle orientations) cache nothing. 0 disables.
+# TT_RELION_PROJ_CACHE_MB: cap on kept coarse references (device path), per rank on the host and per
+# chip on the device. In a global search every particle's coarse pass asks for the same orientation set
+# against the same reference, so the projection and its left operand are per-iteration constants:
+# _project was 66-86 % of a coarse call's host wall (perf/rlx/bridge_prof.py). The host keeps the
+# projection, each chip keeps the operand, so a kept coarse call ships only the shifted image. An entry
+# is kept only on its second sighting, so local searches (per-particle orientations) keep nothing.
+# 0 disables.
 _PCACHE_MB = int(os.environ.get("TT_RELION_PROJ_CACHE_MB", "4096"))
-_pc = {"model": None, "seen": set(), "hit": {}, "bytes": 0}
+_pc = {"model": None, "gen": 0, "seen": set(), "hit": {}, "bytes": 0}
 _pc_lock = threading.Lock()
 
 
@@ -158,6 +159,8 @@ _tl = threading.local()   # the server this thread used last (its bridge seconds
 # The python the device server runs on. RELION embeds CPython, so sys.executable is RELION itself.
 _PYTHON = os.environ.get("TT_RELION_PYTHON", "python3")
 _MPI_ENV = ("OMPI_", "PMIX_", "OPAL_", "ORTE_", "PRTE_")
+_MALLOC_ENV = {"MALLOC_MMAP_THRESHOLD_": "2147483647", "MALLOC_TRIM_THRESHOLD_": "68719476736",
+               "MALLOC_TOP_PAD_": "1073741824"}
 
 
 class _Server:
@@ -168,37 +171,59 @@ class _Server:
         env = {k: v for k, v in os.environ.items() if not k.startswith(_MPI_ENV)}
         if chip is not None:
             env["TT_VISIBLE_DEVICES"] = chip
+        # glibc hands every allocation over 32 MB back to the kernel on free, so each call's operands
+        # are page-faulted in afresh: 640 vs 28 ms for one fine-size operand build on pc. Keep them.
+        for k, v in _MALLOC_ENV.items():
+            env.setdefault(k, v)
         self.p = subprocess.Popen([_PYTHON, "-m", module, _FIDELITY],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
         self.shm = None
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
+        self.gen, self.kept, self.kept_bytes = None, set(), 0            # operands this chip keeps
 
-    def matmul(self, lhs, rhs):
-        """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip."""
+    def cross(self, ref, o, shw, key, gen, kbytes):
+        """C [O, T] float64 = ref [O, K] . shw [T, K]^T on the chip (tt_relion/cross.py).
+
+        ref is a callable giving the fp32 [O, K] references. It is only called, and the references
+        only shipped, when this server does not already keep key (key None: one-off). kbytes is what
+        keeping the operand costs the chip, capped per server by TT_RELION_PROJ_CACHE_MB."""
         from multiprocessing import shared_memory
-        nc, m, kc = lhs.shape
-        n = rhs.shape[2]
-        need = 4 * (lhs.size + rhs.size + nc * m * n)
         with self.lock:
+            if self.gen != gen:
+                self.gen, self.kept, self.kept_bytes = gen, set(), 0
+            have = key is not None and key in self.kept
+            r = None if have else np.ascontiguousarray(ref(), np.float32)
+            t, k = shw.shape
+            nref = 0 if have else o * k
+            need = 4 * (nref + t * k) + 8 * o * t
             if self.shm is None or self.shm.size < need:
                 if self.shm is not None:
                     self.shm.close()
                     self.shm.unlink()
                 self.shm = shared_memory.SharedMemory(create=True, size=need)
+            keep = None
+            if have:
+                keep = key
+            elif key is not None and self.kept_bytes + kbytes <= _PCACHE_MB << 20:
+                keep = key
+                self.kept.add(key)
+                self.kept_bytes += kbytes
             t0 = time.time()
-            buf = np.ndarray((need // 4,), np.float32, self.shm.buf)
-            buf[:lhs.size] = lhs.reshape(-1)
-            buf[lhs.size:lhs.size + rhs.size] = rhs.reshape(-1)
+            f32 = np.ndarray((nref + t * k,), np.float32, self.shm.buf)
+            if not have:
+                f32[:nref] = r.reshape(-1)
+            f32[nref:] = shw.reshape(-1)
             t1 = time.time()
-            self.p.stdin.write(json.dumps({"shm": self.shm.name, "shape": [nc, m, kc, n], "client": self.c},
+            self.p.stdin.write(json.dumps({"shm": self.shm.name, "O": o, "T": t, "K": k, "ref": not have,
+                                           "key": keep, "gen": gen, "client": self.c},
                                           separators=(",", ":")) + "\n")
             self.p.stdin.flush()
             if self.p.stdout.readline().strip() != "ok":
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
             t2 = time.time()
-            out = buf[lhs.size + rhs.size:].reshape(nc, m, n).copy()
-            del buf
+            out = np.ndarray((o, t), np.float64, self.shm.buf, offset=4 * (nref + t * k)).copy()
+            del f32
             c = self.c
             c["calls"] += 1
             c["bytes"] += need
@@ -207,8 +232,8 @@ class _Server:
         return out
 
 
-def _matmul(lhs, rhs):
-    """On whichever of this rank's chips is idle. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
+def _cross(ref, o, shw, key, kbytes):
+    """C [O, T] float64 on whichever of this rank's chips is idle. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
     (one server each), so fewer ranks, and so less host memory, can still drive every chip."""
     global _free
     if _free is None:
@@ -223,7 +248,7 @@ def _matmul(lhs, rhs):
     s = _free.get()
     try:
         _tl.srv = s
-        return s.matmul(lhs, rhs)
+        return s.cross(ref, o, shw, key, _pc["gen"], kbytes)
     finally:
         _free.put(s)
 
@@ -233,39 +258,16 @@ def _book(key, dt):
     c[key] = round(c.get(key, 0.0) + dt, 4)
 
 
-def _bf16_split(t, a, k):
-    """a = a[0] + ... + a[k-1], every part exactly representable in bf16.
-
-    Measured on Wormhole (perf/rlx/parity_cross.py): fp32 operands that are exact in tf32 still come
-    out of the matrix unit with a fidelity-dependent error (HiFi4 9e-5 relative, HiFi2 1e-3), so it
-    does not multiply tf32 exactly. bf16 parts are exact in whatever format the unit reads.
-    """
-    parts = []
-    for _ in range(k - 1):
-        hi = (a.view(t.int32) & ~0xFFFF).view(t.float32)
-        parts.append(hi)
-        a = a - hi
-    return parts + [a]
-
-
-def _lhs_operand(t, ref):
-    """ref [O, K] -> the chip's left operand [nc, O, kc]: the _SPLIT bf16 parts side by side, K cut
-    into _KCHUNK runs (see _device_cross). Depends on ref only, so it is cached with the projection."""
-    lhs = t.cat(_bf16_split(t, ref, _SPLIT), 1)
-    kc = _KCHUNK if _KCHUNK > 0 else lhs.shape[1]
-    nc = -(-lhs.shape[1] // kc)
-    pad = nc * kc - lhs.shape[1]
-    if pad:
-        lhs = t.nn.functional.pad(lhs, (0, pad))
-    return lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous()
-
-
 def _coarse_refs(t, key, o0, project):
-    """(ref_r, ref_i, lhs) for orientations [o0, o1), from the cache when this orientation set has
-    been asked for before against the same reference. key is None to bypass."""
-    if key is None:
+    """(ref, rr, key) for orientations [o0, o1): ref the fp32 [O, 2P] operand (real | imag), rr the
+    float64 |ref|^2 per pixel [O, P], key the name the chips may keep the operand under (None: they
+    must not). From the host cache when this orientation set was asked for before against the same
+    reference; an entry is kept on its second sighting. key is None to bypass."""
+    def build():
         r, i = project()
-        return r, i, _lhs_operand(t, t.cat([r, i], 1))
+        return t.cat([r, i], 1).numpy(), r.double() ** 2 + i.double() ** 2
+    if key is None:
+        return build() + (None,)
     mkey, ekey = key
     k = (ekey, o0)
     with _pc_lock:
@@ -273,7 +275,7 @@ def _coarse_refs(t, key, o0, project):
             if _pc["model"] is not None:            # one line per reference, so a run log shows hit rates
                 print(f"tt_relion pid {os.getpid()} proj_hit {_stats['proj_hit']} proj_miss {_stats['proj_miss']}"
                       f" cached_mb {_pc['bytes'] >> 20}", file=sys.stderr, flush=True)
-            _pc.update(model=mkey, seen=set(), hit={}, bytes=0)
+            _pc.update(model=mkey, gen=_pc["gen"] + 1, seen=set(), hit={}, bytes=0)
         got = _pc["hit"].get(k)
         keep = k in _pc["seen"]
         _pc["seen"].add(k)
@@ -281,41 +283,15 @@ def _coarse_refs(t, key, o0, project):
         _stats["proj_hit"] += 1
         return got
     _stats["proj_miss"] += 1
-    r, i = project()
-    lhs = _lhs_operand(t, t.cat([r, i], 1))
-    nb = (r.numel() + i.numel() + lhs.numel()) * 4
+    ref, rr = build()
+    nb = ref.nbytes + rr.numel() * 8
     if keep:
         with _pc_lock:
             if _pc["model"] == mkey and _pc["bytes"] + nb <= _PCACHE_MB << 20:
-                _pc["hit"][k] = (r, i, lhs)
+                got = _pc["hit"][k] = (ref, rr, str(len(_pc["hit"])))
                 _pc["bytes"] += nb
-    return r, i, lhs
-
-
-def _device_cross(t, lhs, shw):
-    """C[o, t] = sum_p ref[o, p] * shw[t, p] on the chip, fp32 in, fp32 accumulate; lhs = _lhs_operand(ref).
-
-    ref [O, K] and shw [T, K] are real (real and imaginary parts concatenated along K). Both are
-    split into _SPLIT bf16 parts and C = sum over i + j < _SPLIT of a_i . b_j, which drops terms of
-    relative size 2^-24 at _SPLIT=3. All of it is ONE matmul: the left operand is [a_0 | a_1 | ...]
-    and output column block j collects b_j against every a_i with i + j < _SPLIT.
-    """
-    k, n, kk = _SPLIT, shw.shape[0], shw.shape[1]
-    bs = _bf16_split(t, shw, k)
-    rhs = t.zeros(k * kk, k * n, dtype=t.float32)
-    for i in range(k):
-        for j in range(k - i):
-            rhs[i * kk:(i + 1) * kk, j * n:(j + 1) * n] = bs[j].T
-    # With exact products the chip still loses bits in accumulation, so K is cut into _KCHUNK runs,
-    # each its own batch entry, summed on the host in float64. Measured at box 64 (parity_cross.py):
-    # max |d2 error| 0.54 unchunked, 0.35 at 256, 0.25 at 64; fp32 torch is 0.005.
-    nc, kc = lhs.shape[0], lhs.shape[2]
-    pad = nc * kc - rhs.shape[0]
-    if pad:
-        rhs = t.nn.functional.pad(rhs, (0, 0, 0, pad))
-    rhs = rhs.reshape(nc, kc, rhs.shape[1])
-    out = _matmul(lhs.numpy(), rhs.numpy())
-    return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
+                return got
+    return ref, rr, None
 
 
 def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
@@ -353,7 +329,7 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     if device:
         # |ref - sh|^2_w = |ref|^2_w + |sh|^2_w - 2 ref.(w sh). The two norms are cheap and stay
         # on the host in float64; only the O x T cross term goes to the chip.
-        shw = t.cat([sh_r * w, sh_i * w], 1)
+        shw_np = t.cat([sh_r * w, sh_i * w], 1).numpy()
         sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * w.double()).sum(-1)
     chunk = _DEV_CHUNK if device else _ORI_CHUNK
     ckey = None
@@ -367,9 +343,11 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         project = lambda: _project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY, mdlZ,  # noqa: E731
                                    mdlInitY, mdlInitZ, maxR2_padded, padding_factor)
         if device:
-            ref_r, ref_i, lhs = _coarse_refs(t, ckey, o0, project)
-            ref2 = ((ref_r.double() ** 2 + ref_i.double() ** 2) * w.double()).sum(-1)
-            cross = _device_cross(t, lhs, shw).double()
+            ref, rr, key = _coarse_refs(t, ckey, o0, project)
+            ref2 = (rr * w.double()).sum(-1)
+            # Kept on the chip: the left operand is 3 bf16 parts (fp32 on device) padded to _KCHUNK.
+            kbytes = 3 * ref.nbytes + (o1 - o0) * _KCHUNK * 4
+            cross = t.from_numpy(_cross(lambda: ref, o1 - o0, shw_np, key, kbytes))
             d2 = ref2.unsqueeze(1) + sh2.unsqueeze(0) - 2.0 * cross
         else:
             ref_r, ref_i = project()

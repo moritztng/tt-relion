@@ -1,47 +1,41 @@
-"""device_server.py's protocol with no device, so perf/rlx/ipc_bench.py can price the transport alone.
+"""device_server.py with no device, so the bridge can be timed and checked on any host.
 
-argv[1] is the fidelity (ignored). RLX_STUB_COPY=1 makes the server read every input float and write
-every output float once, the host-memory traffic the real server's from_torch / to_torch must do anyway;
-without it the server only maps the segment and replies. RLX_STUB_MATMUL=1 does the matmul in fp32 numpy,
-so bridge-side changes can be checked for identical output with no device.
+Runs the same tt_relion/cross.py server loop (bf16 split, operand build, float64 chunk sum, kept
+operands). RLX_STUB_MATMUL=1 does the matmul in fp32 numpy, so bridge-side changes can be checked for
+identical output; without it mm returns zeros of the right shape and the timing is host work only.
+argv[1] is the fidelity (ignored).
 """
-import json
 import os
 import sys
 
 import numpy as np
-from multiprocessing import resource_tracker, shared_memory
+
+
+class _Numpy:
+    def __init__(self):
+        self.real = os.environ.get("RLX_STUB_MATMUL") == "1"
+
+    def upload(self, lhs):
+        return lhs
+
+    def shape(self, a):
+        return a.shape[0], a.shape[2]
+
+    def mm(self, a, rhs):
+        if self.real:
+            return np.matmul(a, rhs)
+        return np.zeros((a.shape[0], a.shape[1], rhs.shape[2]), np.float32)
+
+    def free(self, a):
+        pass
+
+    def close(self):
+        pass
 
 
 def main():
-    copy = os.environ.get("RLX_STUB_COPY") == "1"
-    mm = os.environ.get("RLX_STUB_MATMUL") == "1"
-    shm = None
-    for line in sys.stdin:
-        req = json.loads(line)
-        if shm is None or shm.name != req["shm"].lstrip("/"):
-            if shm is not None:
-                shm.close()
-            shm = shared_memory.SharedMemory(name=req["shm"])
-            resource_tracker.unregister(shm._name, "shared_memory")
-        if mm:
-            nc, m, kc, n = req["shape"]
-            buf = np.ndarray((nc * m * kc + nc * kc * n + nc * m * n,), np.float32, shm.buf)
-            a = buf[:nc * m * kc].reshape(nc, m, kc)
-            b = buf[nc * m * kc:nc * m * kc + nc * kc * n].reshape(nc, kc, n)
-            buf[nc * m * kc + nc * kc * n:] = np.matmul(a, b).reshape(-1)
-            del a, b, buf
-        elif copy:
-            nc, m, kc, n = req["shape"]
-            buf = np.ndarray((nc * m * kc + nc * kc * n + nc * m * n,), np.float32, shm.buf)
-            a = buf[:nc * m * kc].copy()
-            b = buf[nc * m * kc:nc * m * kc + nc * kc * n].copy()
-            buf[nc * m * kc + nc * kc * n:] = 0.0
-            del a, b, buf
-        sys.stdout.write("ok\n")
-        sys.stdout.flush()
-    if shm is not None:
-        shm.close()
+    from tt_relion.cross import serve
+    serve(_Numpy(), sys.stdout)
 
 
 if __name__ == "__main__":

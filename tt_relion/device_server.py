@@ -3,75 +3,54 @@
 RELION's ranks run on the system Open MPI, and ttnn ships a second Open MPI that tt-metal always
 initialises. Both in one address space abort the rank ("MPI_Init invoked more than once"). So each rank's
 bridge starts one of these servers with mpirun's variables removed; it owns the rank's chip (the inherited
-TT_VISIBLE_DEVICES) and does the matmuls.
-
-Protocol, one JSON line per request on stdin, one line back:
-    {"shm": <name>, "shape": [nc, m, kc, n], "client": {...}}  ->  "ok"
-"client" carries the bridge's cumulative counters (round trips, copies, bytes); the server only echoes the
-last one in its exit line, so the WALLMAP gets the client side without RELION having to flush anything.
-The shared-memory segment holds lhs [nc, m, kc], rhs [nc, kc, n] and out [nc, m, n], float32, back to back.
-EOF on stdin closes the device and exits.
+TT_VISIBLE_DEVICES) and computes the cross term. Protocol and numerics: tt_relion/cross.py. Kept left
+operands stay on the chip as device tensors, so a coarse call ships only the shifted image up.
 """
-import json
 import os
 import sys
-import time
+
+
+class _Ttnn:
+    def __init__(self, fidelity):
+        import torch
+        import ttnn
+        self.torch, self.ttnn = torch, ttnn
+        self.dev = ttnn.open_device(device_id=0)
+        self.cfg = ttnn.WormholeComputeKernelConfig(math_fidelity=getattr(ttnn.MathFidelity, fidelity),
+                                                    math_approx_mode=False, fp32_dest_acc_en=True,
+                                                    packer_l1_acc=True)
+
+    def _put(self, a):
+        return self.ttnn.from_torch(self.torch.from_numpy(a), dtype=self.ttnn.float32,
+                                    layout=self.ttnn.TILE_LAYOUT, device=self.dev)
+
+    def upload(self, lhs):
+        return (self._put(lhs), lhs.shape[0], lhs.shape[2])
+
+    def shape(self, a):
+        return a[1], a[2]
+
+    def mm(self, a, rhs):
+        ttnn = self.ttnn
+        b = self._put(rhs)
+        c = ttnn.matmul(a[0], b, compute_kernel_config=self.cfg)
+        out = ttnn.to_torch(c).numpy()
+        ttnn.deallocate(b)
+        ttnn.deallocate(c)
+        return out
+
+    def free(self, a):
+        self.ttnn.deallocate(a[0])
+
+    def close(self):
+        self.ttnn.close_device(self.dev)
 
 
 def main():
     reply = os.fdopen(os.dup(1), "w", buffering=1)
     os.dup2(2, 1)                       # library chatter goes to stderr, never into the protocol
-    from multiprocessing import resource_tracker, shared_memory
-
-    import numpy as np
-    import torch
-    import ttnn
-
-    dev = ttnn.open_device(device_id=0)
-    cfg = ttnn.WormholeComputeKernelConfig(math_fidelity=getattr(ttnn.MathFidelity, sys.argv[1]),
-                                          math_approx_mode=False, fp32_dest_acc_en=True,
-                                          packer_l1_acc=True)
-    shm = None
-    t_open, calls, client = time.time(), 0, {}
-    up = mm = down = 0.0
-    for line in sys.stdin:
-        req = json.loads(line)
-        t0 = time.time()
-        if shm is None or shm.name != req["shm"].lstrip("/"):
-            if shm is not None:
-                shm.close()
-            shm = shared_memory.SharedMemory(name=req["shm"])
-            resource_tracker.unregister(shm._name, "shared_memory")   # the bridge owns it
-        nc, m, kc, n = req["shape"]
-        buf = np.ndarray((nc * m * kc + nc * kc * n + nc * m * n,), np.float32, shm.buf)
-        lhs = buf[:nc * m * kc].reshape(nc, m, kc)
-        rhs = buf[nc * m * kc:nc * m * kc + nc * kc * n].reshape(nc, kc, n)
-        out = buf[nc * m * kc + nc * kc * n:].reshape(nc, m, n)
-        a = ttnn.from_torch(torch.from_numpy(lhs), dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
-        b = ttnn.from_torch(torch.from_numpy(rhs), dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
-        ttnn.synchronize_device(dev)
-        t1 = time.time()
-        c = ttnn.matmul(a, b, compute_kernel_config=cfg)
-        ttnn.synchronize_device(dev)
-        t2 = time.time()
-        out[...] = ttnn.to_torch(c).numpy()
-        ttnn.deallocate(a)
-        ttnn.deallocate(b)
-        ttnn.deallocate(c)
-        del lhs, rhs, out, buf
-        t3 = time.time()
-        up, mm, down = up + t1 - t0, mm + t2 - t1, down + t3 - t2
-        client = req.get("client", client)
-        calls += 1
-        reply.write("ok\n")
-    if shm is not None:
-        shm.close()
-    ttnn.close_device(dev)
-    # The WALLMAP reads this (perf/rlx/wallmap.py). busy_s = up + mm + down; mm_s is the matmul alone,
-    # synchronised; the client fields are the bridge's (round trip incl. the server, shm copies, bytes).
-    print("TTDEV chip=%s calls=%d busy_s=%.3f up_s=%.3f mm_s=%.3f down_s=%.3f life_s=%.3f client=%s"
-          % (os.environ.get("TT_VISIBLE_DEVICES", "?"), calls, up + mm + down, up, mm, down,
-             time.time() - t_open, json.dumps(client, separators=(",", ":"))), file=sys.stderr, flush=True)
+    from tt_relion.cross import serve
+    serve(_Ttnn(sys.argv[1]), reply)
 
 
 if __name__ == "__main__":
