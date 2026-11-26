@@ -105,7 +105,7 @@ def run(pairs, reps, copy, max_mb):
             # _device_cross goes through relion._matmul's queue; point it at this thread's server.
             def cross(i):
                 relion._free = _One(srv[i])
-                return relion._device_cross(torch, ref, shw)
+                return relion._device_cross(torch, relion._lhs_operand(torch, ref), shw)
             if pairs == 1:
                 xc = timed(lambda: cross(0), reps)
             else:

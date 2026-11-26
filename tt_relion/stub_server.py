@@ -2,7 +2,8 @@
 
 argv[1] is the fidelity (ignored). RLX_STUB_COPY=1 makes the server read every input float and write
 every output float once, the host-memory traffic the real server's from_torch / to_torch must do anyway;
-without it the server only maps the segment and replies.
+without it the server only maps the segment and replies. RLX_STUB_MATMUL=1 does the matmul in fp32 numpy,
+so bridge-side changes can be checked for identical output with no device.
 """
 import json
 import os
@@ -14,6 +15,7 @@ from multiprocessing import resource_tracker, shared_memory
 
 def main():
     copy = os.environ.get("RLX_STUB_COPY") == "1"
+    mm = os.environ.get("RLX_STUB_MATMUL") == "1"
     shm = None
     for line in sys.stdin:
         req = json.loads(line)
@@ -22,7 +24,14 @@ def main():
                 shm.close()
             shm = shared_memory.SharedMemory(name=req["shm"])
             resource_tracker.unregister(shm._name, "shared_memory")
-        if copy:
+        if mm:
+            nc, m, kc, n = req["shape"]
+            buf = np.ndarray((nc * m * kc + nc * kc * n + nc * m * n,), np.float32, shm.buf)
+            a = buf[:nc * m * kc].reshape(nc, m, kc)
+            b = buf[nc * m * kc:nc * m * kc + nc * kc * n].reshape(nc, kc, n)
+            buf[nc * m * kc + nc * kc * n:] = np.matmul(a, b).reshape(-1)
+            del a, b, buf
+        elif copy:
             nc, m, kc, n = req["shape"]
             buf = np.ndarray((nc * m * kc + nc * kc * n + nc * m * n,), np.float32, shm.buf)
             a = buf[:nc * m * kc].copy()
