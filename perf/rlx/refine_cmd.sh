@@ -1,9 +1,9 @@
 #!/bin/bash
 # RLX frozen job (state PROTOCOL.md): RELION 3D auto-refine of EMPIAR-10028, RELION's own GUI recipe for
 # Refine3D plus the 3dem benchmark settings. Only ranks, --j, --pool, --gpu and the seed vary between runs.
-#   refine_cmd.sh <relion prefix> <data dir> <star> <out name> <ranks> <j> <pool> <seed> [gpu map] [extra]
+#   refine_cmd.sh <relion prefix> <data dir> <star> <out name> <ranks> <j> <pool> <seed> [gpu map] [extra] [mpirun opts]
 set -uo pipefail
-R=$1 D=$2 STAR=$3 O=$4 N=$5 J=$6 P=$7 S=$8 G=${9:-} X=${10:-}
+R=$1 D=$2 STAR=$3 O=$4 N=$5 J=$6 P=$7 S=$8 G=${9:-} X=${10:-} M=${11:-}
 mkdir -p "$PWD/$O"; OUT=$PWD/$O
 RD=--preread_images; case "$X" in *--scratch_dir*) RD=;; esac   # scratch replaces RAM only when RAM is short
 # Every follower holds ALL images with --preread_images, so it is on only while (ranks-1) x set fits 60 % of RAM;
@@ -19,7 +19,7 @@ PY
 echo "images: ${RD:-page cache}"
 cd "$D"; export LD_LIBRARY_PATH=$R/lib:${LD_LIBRARY_PATH:-}
 sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || echo "WARN page cache not dropped"
-/usr/bin/time -v -o "$OUT/time-v.txt" mpirun --allow-run-as-root --bind-to none -x LD_LIBRARY_PATH -n "$N" \
+/usr/bin/time -v -o "$OUT/time-v.txt" mpirun --allow-run-as-root --bind-to none -x LD_LIBRARY_PATH $M -n "$N" \
   "$R/bin/relion_refine_mpi" --o "$OUT/run" --auto_refine --split_random_halves --i "$STAR" \
   --ref emd_2660.map:mrc --firstiter_cc --ini_high 60 --dont_combine_weights_via_disc $RD \
   --pool "$P" --pad 2 --ctf --particle_diameter 360 --flatten_solvent --zero_mask --oversampling 1 \
