@@ -253,6 +253,20 @@ def _cross(ref, o, shw, key, kbytes):
         _free.put(s)
 
 
+def _progress():
+    """One cumulative line per reference change: hit rates and where this rank's bridge seconds went.
+    C_s/F_s are bridge wall per coarse/fine call summed over threads; rt_s is the part spent waiting on
+    the device servers (chip + transport), copy_s the shared-memory copies around it."""
+    tot = {}
+    for s in _srv:
+        for k, v in s.c.items():
+            tot[k] = tot.get(k, 0) + v
+    keys = ("handled", "fine_handled", "proj_hit", "proj_miss")
+    return (f"tt_relion pid {os.getpid()} " + " ".join(f"{k} {_stats[k]}" for k in keys)
+            + f" cached_mb {_pc['bytes'] >> 20} "
+            + " ".join(f"{k} {tot.get(k, 0):.1f}" for k in ("C_s", "F_s", "rt_s", "copy_s", "calls")))
+
+
 def _book(key, dt):
     c = _tl.srv.c
     c[key] = round(c.get(key, 0.0) + dt, 4)
@@ -273,8 +287,7 @@ def _coarse_refs(t, key, o0, project):
     with _pc_lock:
         if _pc["model"] != mkey:                    # new iteration or half: drop the old reference
             if _pc["model"] is not None:            # one line per reference, so a run log shows hit rates
-                print(f"tt_relion pid {os.getpid()} proj_hit {_stats['proj_hit']} proj_miss {_stats['proj_miss']}"
-                      f" cached_mb {_pc['bytes'] >> 20}", file=sys.stderr, flush=True)
+                print(_progress(), file=sys.stderr, flush=True)
             _pc.update(model=mkey, gen=_pc["gen"] + 1, seen=set(), hit={}, bytes=0)
         got = _pc["hit"].get(k)
         keep = k in _pc["seen"]
