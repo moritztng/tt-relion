@@ -5,15 +5,16 @@
 # downloads resume (-c). EBI caps each host's rate, so it opens many connections.
 #   stage.sh <dir> <list>
 set -uo pipefail
-D=$1 LIST=$(realpath "$2"); U=https://ftp.ebi.ac.uk/empiar/world_availability/10028/data
+D=$1 LIST=$(realpath "$2") CHK=$(dirname "$(realpath "$0")")/check_stacks.py; U=https://ftp.ebi.ac.uk/empiar/world_availability/10028/data
 mkdir -p "$D" && cd "$D" || exit 1; t0=$(date +%s)
 [ -s emd_2660.map ] || { curl -sf https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-2660/map/emd_2660.map.gz | gunzip > map.part &&
   mv map.part emd_2660.map; } &   # one slow stream, so it runs beside the stacks; a cut-off download never looks complete
-CHK=$(dirname "$(realpath "$0")")/check_stacks.py
 for t in 1 2 3 4 5 6 7 8; do
   m=$(while read -r p; do { [ -s "$p" ] && [ ! -e "$p.aria2" ]; } || echo "$p"; done < "$LIST")
   if [ -z "$m" ]; then   # all present: a stack holding EBI's error body is re-fetched whole
-    m=$(python3 "$CHK" Particles | tee /dev/stderr | awk '/^BAD /{print $2}'); [ -z "$m" ] && break
+    c=$(python3 "$CHK" Particles); echo "$c" | tail -1
+    echo "$c" | grep -q '^stacks checked' || { echo "STAGE FAILED: check_stacks.py did not run"; exit 1; }
+    m=$(echo "$c" | awk '/^BAD /{print $2}'); [ -z "$m" ] && break
     echo "$m" | xargs rm -f; fi
   echo "stage pass $t: $(echo "$m" | wc -l) stacks missing or bad"
   echo "$m" | awk -v u=$U '{print u"/"$1"\n  out="$1}' > aria.txt
