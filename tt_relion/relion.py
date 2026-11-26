@@ -268,7 +268,10 @@ def _progress():
 
 
 def _book(key, dt):
-    c = _tl.srv.c
+    s = getattr(_tl, "srv", None)                   # None on the torch backend: no servers to book to
+    if s is None:
+        return
+    c = s.c
     c[key] = round(c.get(key, 0.0) + dt, 4)
 
 
@@ -278,8 +281,9 @@ def _coarse_refs(t, key, o0, project):
     must not). From the host cache when this orientation set was asked for before against the same
     reference; an entry is kept on its second sighting. key is None to bypass."""
     def build():
-        r, i = project()
-        return t.cat([r, i], 1).numpy(), r.double() ** 2 + i.double() ** 2
+        ref = project()
+        r, i = ref.double().chunk(2, 1)
+        return ref.numpy(), r ** 2 + i ** 2
     if key is None:
         return build() + (None,)
     mkey, ekey = key
@@ -313,13 +317,17 @@ def _coarse_refs(t, key, o0, project):
 def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                  mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                  padding_factor, imgX, imgY,
-                 orientation_num, translation_num, image_size, tag):
+                 orientation_num, translation_num, image_size, tag, ref_mv=None):
     """The whole orientation x translation squared-difference matrix, flat [O*T] float32.
 
     This is the body of RELION's diff2_coarse_2D and, entry for entry, of diff2_fine_2D as well:
     the fine kernel differs only in which entries it is asked for and in the constant it adds.
     """
-    mdl = t.from_numpy(np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy())
+    # ref_mv: the fine pass hands over RELION's own projection, [O, 2P] real | imag, and no model.
+    mdl = None if mdl_mv is None else t.from_numpy(
+        np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy())
+    given = None if ref_mv is None else t.from_numpy(
+        np.frombuffer(ref_mv, dtype=np.float32).reshape(orientation_num, 2 * image_size))
     eul = t.from_numpy(np.frombuffer(eul_mv, dtype=np.float32)
                        .reshape(orientation_num, 9).copy())
     tx = t.from_numpy(np.frombuffer(tx_mv, dtype=np.float32).copy())
@@ -356,8 +364,12 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                  maxR2_padded, padding_factor, imgX, imgY, image_size, chunk))
     for o0 in range(0, orientation_num, chunk):
         o1 = min(o0 + chunk, orientation_num)
-        project = lambda: _project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY, mdlZ,  # noqa: E731
-                                   mdlInitY, mdlInitZ, maxR2_padded, padding_factor)
+        if given is not None:
+            project = lambda: given[o0:o1]          # noqa: E731
+        else:
+            project = lambda: t.cat(_project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY,  # noqa: E731
+                                             mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
+                                             padding_factor), 1)
         if device:
             ref, rr, key = _coarse_refs(t, ckey, o0, project)
             ref2 = (rr * w.double()).sum(-1)
@@ -366,7 +378,8 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
             cross = t.from_numpy(_cross(lambda: ref, o1 - o0, shw_np, key, kbytes))
             d2 = ref2.unsqueeze(1) + sh2.unsqueeze(0) - 2.0 * cross
         else:
-            ref_r, ref_i = project()
+            ref = project()
+            ref_r, ref_i = ref[:, :image_size], ref[:, image_size:]
             dr = ref_r.unsqueeze(1) - sh_r.unsqueeze(0)
             di = ref_i.unsqueeze(1) - sh_i.unsqueeze(0)
             d2 = ((dr * dr + di * di) * w).sum(-1)
@@ -375,7 +388,7 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     if _DUMP and _dumped[0] < _DUMP_N:
         _dumped[0] += 1
         np.savez("%s.%s.%d.%d.npz" % (_DUMP, tag, os.getpid(), _dumped[0]),
-                 mdl=mdl.numpy(), eul=eul.numpy(), tx=tx.numpy(), ty=ty.numpy(),
+                 mdl=(mdl if mdl is not None else given).numpy(), eul=eul.numpy(), tx=tx.numpy(), ty=ty.numpy(),
                  img_r=img_r.numpy(), img_i=img_i.numpy(), w=w.numpy(),
                  diff2=acc,
                  geom=np.array([mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
@@ -384,7 +397,7 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     if _TRACE:
         import hashlib
         eh = hashlib.sha256(np.frombuffer(eul_mv, dtype=np.float32).tobytes()).hexdigest()[:16]
-        mh = hashlib.sha256(np.frombuffer(mdl_mv, dtype=np.float32).tobytes()).hexdigest()[:16]
+        mh = hashlib.sha256(mdl_mv if mdl_mv is not None else ref_mv).hexdigest()[:16]
         with open("%s.%d" % (_TRACE, os.getpid()), "a") as fh:
             fh.write("%s %d %d %d %s %s\n"
                      % (tag, orientation_num, translation_num, image_size, eh, mh))
@@ -447,13 +460,16 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         return False
 
 
-def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
+def diff2_fine(ref_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                rot_idx_mv, trans_idx_mv, out_mv,
-               mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-               padding_factor, imgX, imgY, sum_init,
+               maxR, imgX, imgY, sum_init,
                orientation_num, translation_num, significant_num, image_size,
                job_num_count):
     """runDiff2KernelFine, 3D reference and 2D data. Accumulates onto out_mv.
+
+    ref_mv is the reference already projected by RELION's own AccProjectorKernel in the calling
+    thread, [orientation_num, 2 * image_size] float32, real | imag: in torch that projection was
+    65-80 % of a fine call's host wall and held this rank's interpreter while it ran.
 
     RELION's fine kernel is written as a list of jobs, each job one orientation and a run of at
     most D2F_CHUNK_REF3D consecutive translations, and it re-projects the reference once per job.
@@ -475,10 +491,9 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
-        acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
-                           mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-                           padding_factor, imgX, imgY,
-                           orientation_num, translation_num, image_size, "F")
+        acc = _dense_diff2(t, None, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
+                           0, 0, 0, 0, 0, maxR, 0, 0, imgX, imgY,
+                           orientation_num, translation_num, image_size, "F", ref_mv=ref_mv)
         _book("F_s", time.time() - t0)
         rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
         trans_idx = np.frombuffer(trans_idx_mv, dtype=np.uint64)

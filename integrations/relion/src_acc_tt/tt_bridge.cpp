@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <vector>
 
@@ -94,6 +95,16 @@ namespace
 		PyObject *fn = PyObject_GetAttrString(mod, "diff2_coarse");
 		PyObject *fnf = PyObject_GetAttrString(mod, "diff2_fine");
 		PyErr_Clear();                   // a tt_bio without the fine entry point is not an error
+		// The CPU-reference arms decline the fine pass; knowing it here spares them the projection.
+		PyObject *be = PyObject_GetAttrString(mod, "_BACKEND");
+		const char *bes = (be && PyUnicode_Check(be)) ? PyUnicode_AsUTF8(be) : nullptr;
+		if (bes && (std::strcmp(bes, "nullbase") == 0 || std::strcmp(bes, "null") == 0))
+		{
+			Py_XDECREF(fnf);
+			fnf = nullptr;
+		}
+		Py_XDECREF(be);
+		PyErr_Clear();
 		Py_DECREF(mod);
 		if (fn == nullptr || !PyCallable_Check(fn))
 		{
@@ -191,11 +202,14 @@ bool diff2Coarse(
 	return handled;
 }
 
+bool fineWanted()
+{
+	return ensureReady() && g_fine_usable.load(std::memory_order_acquire);
+}
+
 bool diff2Fine(
-		const float *mdlComplex,
-		int mdlX, int mdlY, int mdlZ, int mdlInitY, int mdlInitZ,
-		int maxR, int maxR2_padded, float padding_factor,
-		int imgX, int imgY,
+		const float *ref,
+		int maxR, int imgX, int imgY,
 		const float *eulers,
 		const float *trans_x, const float *trans_y,
 		const float *Fimg_real, const float *Fimg_imag, const float *corr_img,
@@ -222,11 +236,10 @@ bool diff2Fine(
 
 	PyGILState_STATE gil = PyGILState_Ensure();
 
-	const long nvox = (long)mdlX * (long)mdlY * (long)mdlZ;
 	const Py_ssize_t f = (Py_ssize_t)sizeof(float);
 	const Py_ssize_t u = (Py_ssize_t)sizeof(unsigned long);
 
-	PyObject *a_mdl  = PyMemoryView_FromMemory((char*)mdlComplex, nvox * 2 * f, PyBUF_READ);
+	PyObject *a_ref  = PyMemoryView_FromMemory((char*)ref, orientation_num * 2 * image_size * f, PyBUF_READ);
 	PyObject *a_eul  = PyMemoryView_FromMemory((char*)eulers,     orientation_num * 9 * f, PyBUF_READ);
 	PyObject *a_tx   = PyMemoryView_FromMemory((char*)trans_x,    translation_num * f, PyBUF_READ);
 	PyObject *a_ty   = PyMemoryView_FromMemory((char*)trans_y,    translation_num * f, PyBUF_READ);
@@ -238,14 +251,13 @@ bool diff2Fine(
 	PyObject *a_out  = PyMemoryView_FromMemory((char*)dst,        significant_num * f, PyBUF_WRITE);
 
 	PyObject *res = nullptr;
-	if (a_mdl && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_ri && a_ti && a_out)
-		res = PyObject_CallFunction(g_diff2f, "OOOOOOOOOOiiiiiiifiiflllll",
-				a_mdl, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_ri, a_ti, a_out,
-				mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-				(double)padding_factor, imgX, imgY, (double)sum_init,
+	if (a_ref && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_ri && a_ti && a_out)
+		res = PyObject_CallFunction(g_diff2f, "OOOOOOOOOOiiidlllll",
+				a_ref, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_ri, a_ti, a_out,
+				maxR, imgX, imgY, (double)sum_init,
 				orientation_num, translation_num, significant_num, image_size, job_num_count);
 
-	Py_XDECREF(a_mdl); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
+	Py_XDECREF(a_ref); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
 	Py_XDECREF(a_re);  Py_XDECREF(a_im);  Py_XDECREF(a_corr);
 	Py_XDECREF(a_ri);  Py_XDECREF(a_ti);  Py_XDECREF(a_out);
 
