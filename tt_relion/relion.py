@@ -32,6 +32,7 @@ from the compute.
 """
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
@@ -137,19 +138,52 @@ def _project(t, mdl, x, y, e, mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
     return t.where(inside, ref_r, zero), t.where(inside, ref_i, zero)
 
 
-_dev = [None]
-_dev_lock = None
+_srv = [None]
+# The python the device server runs on. RELION embeds CPython, so sys.executable is RELION itself.
+_PYTHON = os.environ.get("TT_RELION_PYTHON", "python3")
+_MPI_ENV = ("OMPI_", "PMIX_", "OPAL_", "ORTE_", "PRTE_")
 
 
-def _device():
-    """The rank's one chip, opened on first use. The launcher pins it with TT_VISIBLE_DEVICES."""
-    global _dev_lock
-    if _dev[0] is None:
+class _Server:
+    """This rank's device server (tt_relion/device_server.py) and the shared memory it reads."""
+
+    def __init__(self):
+        import subprocess
         import threading
-        import ttnn
-        _dev_lock = threading.Lock()
-        _dev[0] = ttnn.open_device(device_id=0)
-    return _dev[0]
+        env = {k: v for k, v in os.environ.items() if not k.startswith(_MPI_ENV)}
+        self.p = subprocess.Popen([_PYTHON, "-m", "tt_relion.device_server", _FIDELITY],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
+        self.lock = threading.Lock()
+        self.shm = None
+
+    def matmul(self, lhs, rhs):
+        """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip."""
+        from multiprocessing import shared_memory
+        nc, m, kc = lhs.shape
+        n = rhs.shape[2]
+        need = 4 * (lhs.size + rhs.size + nc * m * n)
+        with self.lock:
+            if self.shm is None or self.shm.size < need:
+                if self.shm is not None:
+                    self.shm.close()
+                    self.shm.unlink()
+                self.shm = shared_memory.SharedMemory(create=True, size=need)
+            buf = np.ndarray((need // 4,), np.float32, self.shm.buf)
+            buf[:lhs.size] = lhs.reshape(-1)
+            buf[lhs.size:lhs.size + rhs.size] = rhs.reshape(-1)
+            self.p.stdin.write(json.dumps({"shm": self.shm.name, "shape": [nc, m, kc, n]}) + "\n")
+            self.p.stdin.flush()
+            if self.p.stdout.readline().strip() != "ok":
+                raise RuntimeError("device server died, rc=%s" % self.p.poll())
+            out = buf[lhs.size + rhs.size:].reshape(nc, m, n).copy()
+            del buf
+        return out
+
+
+def _server():
+    if _srv[0] is None:
+        _srv[0] = _Server()
+    return _srv[0]
 
 
 def _bf16_split(t, a, k):
@@ -175,8 +209,6 @@ def _device_cross(t, ref, shw):
     relative size 2^-24 at _SPLIT=3. All of it is ONE matmul: the left operand is [a_0 | a_1 | ...]
     and output column block j collects b_j against every a_i with i + j < _SPLIT.
     """
-    import ttnn
-    dev = _device()
     k, n, kk = _SPLIT, shw.shape[0], ref.shape[1]
     lhs = t.cat(_bf16_split(t, ref, k), 1)
     bs = _bf16_split(t, shw, k)
@@ -184,12 +216,9 @@ def _device_cross(t, ref, shw):
     for i in range(k):
         for j in range(k - i):
             rhs[i * kk:(i + 1) * kk, j * n:(j + 1) * n] = bs[j].T
-    cfg = ttnn.WormholeComputeKernelConfig(math_fidelity=getattr(ttnn.MathFidelity, _FIDELITY),
-                                          math_approx_mode=False, fp32_dest_acc_en=True,
-                                          packer_l1_acc=True)
-    # The chip's fp32 accumulator loses bits over a long reduction (measured: 5e-5 relative at
-    # K = 12.7k even with exact products), so K is cut into _KCHUNK runs, each its own batch entry,
-    # and the partial sums are added on the host in float64.
+    # With exact products the chip still loses bits in accumulation, so K is cut into _KCHUNK runs,
+    # each its own batch entry, summed on the host in float64. Measured at box 64 (parity_cross.py):
+    # max |d2 error| 0.54 unchunked, 0.35 at 256, 0.25 at 64; fp32 torch is 0.005.
     kc = _KCHUNK if _KCHUNK > 0 else lhs.shape[1]
     nc = -(-lhs.shape[1] // kc)
     pad = nc * kc - lhs.shape[1]
@@ -198,13 +227,8 @@ def _device_cross(t, ref, shw):
         rhs = t.nn.functional.pad(rhs, (0, 0, 0, pad))
     lhs = lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous()
     rhs = rhs.reshape(nc, kc, rhs.shape[1])
-    with _dev_lock:
-        a = ttnn.from_torch(lhs, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
-        b = ttnn.from_torch(rhs, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
-        c = ttnn.matmul(a, b, compute_kernel_config=cfg)
-        out = ttnn.to_torch(c)
-        ttnn.deallocate(a); ttnn.deallocate(b); ttnn.deallocate(c)
-    return out.double().sum(0).reshape(-1, k, n).sum(1)
+    out = _server().matmul(lhs.numpy(), rhs.numpy())
+    return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 
 def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
