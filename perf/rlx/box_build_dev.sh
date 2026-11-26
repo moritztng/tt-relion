@@ -36,7 +36,7 @@ open('/work/aria.txt','w').write(''.join(f"https://ftp.ebi.ac.uk/empiar/world_av
 P
 t0=$(date +%s); aria2c -q -j 16 -x 4 -i ../aria.txt --auto-file-renaming=false
 curl -s https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-2660/map/emd_2660.map.gz | gunzip > emd_2660.map
-t1=$(date +%s); du -sb Particles | awk -v s=$((t1-t0)) '{printf "DOWNLOAD %d bytes in %d s = %.1f MB/s\n",$1,s,$1/s/1e6}' | tee ../download.txt
+t1=$(date +%s); du -sb Particles | awk -v s=$((t1-t0)) '{printf "DOWNLOAD %.0f bytes in %d s = %.1f MB/s\n",$1,s,$1/s/1e6}' | tee ../download.txt
 cd $W
 st dev run start
 nvidia-smi --query-gpu=timestamp,index,clocks.sm,power.draw,utilization.gpu,memory.used --format=csv -l 1 > smi-dev.csv 2>&1 & SMI=$!
