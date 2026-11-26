@@ -158,6 +158,8 @@ _tl = threading.local()   # the server this thread used last (its bridge seconds
 # The python the device server runs on. RELION embeds CPython, so sys.executable is RELION itself.
 _PYTHON = os.environ.get("TT_RELION_PYTHON", "python3")
 _MPI_ENV = ("OMPI_", "PMIX_", "OPAL_", "ORTE_", "PRTE_")
+_MALLOC_ENV = {"MALLOC_MMAP_THRESHOLD_": "2147483647", "MALLOC_TRIM_THRESHOLD_": "68719476736",
+               "MALLOC_TOP_PAD_": "1073741824"}
 
 
 class _Server:
@@ -168,6 +170,10 @@ class _Server:
         env = {k: v for k, v in os.environ.items() if not k.startswith(_MPI_ENV)}
         if chip is not None:
             env["TT_VISIBLE_DEVICES"] = chip
+        # glibc hands every allocation over 32 MB back to the kernel on free, so each call's operands
+        # are page-faulted in afresh: 640 vs 28 ms for one fine-size operand build on pc. Keep them.
+        for k, v in _MALLOC_ENV.items():
+            env.setdefault(k, v)
         self.p = subprocess.Popen([_PYTHON, "-m", module, _FIDELITY],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()

@@ -97,8 +97,10 @@ def run(case, threads, calls, rng):
     sh = shared(o, rng)
     data = [inputs(sh, t, s, rng) for _ in range(threads)]
     relion._pc.update(model=None)                    # cold cache per case (new gen on first call)
-    one(data[0], s)                                  # warm: server spawn, shm, allocator
-    one(data[0], s)                                  # second sighting: the cache (if on) fills here
+    # Warm: server spawn, shm, allocator; the second sighting fills the host cache, and the calls after
+    # it reach every server once, so each chip keeps the operand (a once-per-iteration cost, see --check).
+    for _ in range(2 + len(relion._srv)):
+        one(data[0], s)
     _acc.clear()
     walls = []
 
