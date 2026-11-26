@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# One MPI rank. Rank 0 (RELION's leader) runs no expectation step and opens no chip; follower rank r
-# gets chip r-1 (UMD logical id), pinned with TT_VISIBLE_DEVICES, and holds that chip's tt-bio lease
-# flock for its whole life so co-tenants see it taken.
+# One MPI rank. Rank 0 (RELION's leader) runs no expectation step and opens no chip. Follower rank r
+# gets RLX_CHIPS_PER_RANK consecutive chips (UMD logical ids) starting at (r-1)*K, mod RLX_CHIPS, one
+# device server each (RLX_RANK_CHIPS), and holds every one of their tt-bio lease flocks for its whole
+# life so co-tenants see them taken. K > 1 keeps the rank count, and so RELION's host memory, down.
 r=${OMPI_COMM_WORLD_RANK:?not under mpirun}
 if [ "$r" -gt 0 ] && [ "${TT_RELION_BACKEND:-}" = ttnn ]; then
-    chip=$(( (r - 1) % ${RLX_CHIPS:-32} ))
-    export TT_VISIBLE_DEVICES=$chip
+    k=${RLX_CHIPS_PER_RANK:-1} chips=()
+    for i in $(seq 0 $((k - 1))); do chips+=($(( ((r - 1) * k + i) % ${RLX_CHIPS:-32} ))); done
+    export RLX_RANK_CHIPS=$(IFS=,; echo "${chips[*]}") TT_VISIBLE_DEVICES=${chips[0]}
     if [ -n "${RLX_LEASE_DIR:-}" ]; then
-        exec 9>"$RLX_LEASE_DIR/${RLX_LEASE_HOST}-card$chip.json"
-        flock -n 9 || { echo "rank $r: chip $chip is leased by someone else" >&2; exit 3; }
-        printf '{"host":"%s","card":"%s","holder":"worker:rlx-galaxy-floor","pid":%d,"acquired":%d,"released":null}\n' \
-            "$RLX_LEASE_HOST" "$chip" $$ "$(date +%s)" >&9
+        for chip in "${chips[@]}"; do
+            exec {fd}>"$RLX_LEASE_DIR/${RLX_LEASE_HOST}-card$chip.json"
+            flock -n "$fd" || { echo "rank $r: chip $chip is leased by someone else" >&2; exit 3; }
+            printf '{"host":"%s","card":"%s","holder":"worker:rlx-galaxy-floor","pid":%d,"acquired":%d,"released":null}\n' \
+                "$RLX_LEASE_HOST" "$chip" $$ "$(date +%s)" >&"$fd"
+        done
     fi
 fi
 exec "$@"

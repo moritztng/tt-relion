@@ -28,8 +28,10 @@ DEV=(--i dev.star --ref emd_2660.map --ini_high 60 --firstiter_cc --auto_refine 
      --particle_diameter 360 --ctf --flatten_solvent --zero_mask --oversampling 1 --healpix_order 2
      --auto_local_healpix_order 4 --offset_range 5 --offset_step 2 --norm --scale --pad 2 --sym C1
      --low_resol_join_halves 40 --dont_combine_weights_via_disc --preread_images --pool 3 --random_seed 0)
-TT_RELION_BACKEND=nullbase stage dev_ref "$R/tt-relion-wk/perf/rlx/run.sh" "$runs/dev_ref" 33 2 \
+# 32 ranks OOM'd the host at box 360, pad 2 (~15.5 GB a follower, 2026-11-26), so 16 followers with
+# 2 chips and 4 threads each: same 64 cores, same 32 chips, half the RELION host memory.
+TT_RELION_BACKEND=nullbase stage dev_ref "$R/tt-relion-wk/perf/rlx/run.sh" "$runs/dev_ref" 17 4 \
     "${DEV[@]}" --o "$runs/dev_ref/run"
-TT_RELION_BACKEND=ttnn RLX_CHIPS=32 stage dev_ttnn "$R/tt-relion-wk/perf/rlx/run.sh" "$runs/dev_ttnn" 33 2 \
+TT_RELION_BACKEND=ttnn RLX_CHIPS=32 RLX_CHIPS_PER_RANK=2 stage dev_ttnn "$R/tt-relion-wk/perf/rlx/run.sh" "$runs/dev_ttnn" 17 4 \
     "${DEV[@]}" --o "$runs/dev_ttnn/run"
 echo "$(date -u +%T) CHAIN-DONE"

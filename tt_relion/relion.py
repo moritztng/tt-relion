@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 
 import numpy as np
@@ -139,19 +141,23 @@ def _project(t, mdl, x, y, e, mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
     return t.where(inside, ref_r, zero), t.where(inside, ref_i, zero)
 
 
-_srv = [None]
+_srv = []            # this rank's device servers, one per chip
+_free = None         # queue of idle servers; a --j thread takes one for one matmul
+_lock = threading.Lock()
+_tl = threading.local()   # the server this thread used last (its bridge seconds are booked to it)
 # The python the device server runs on. RELION embeds CPython, so sys.executable is RELION itself.
 _PYTHON = os.environ.get("TT_RELION_PYTHON", "python3")
 _MPI_ENV = ("OMPI_", "PMIX_", "OPAL_", "ORTE_", "PRTE_")
 
 
 class _Server:
-    """This rank's device server (tt_relion/device_server.py) and the shared memory it reads."""
+    """One chip's device server (tt_relion/device_server.py) and the shared memory it reads."""
 
-    def __init__(self):
+    def __init__(self, chip=None):
         import subprocess
-        import threading
         env = {k: v for k, v in os.environ.items() if not k.startswith(_MPI_ENV)}
+        if chip is not None:
+            env["TT_VISIBLE_DEVICES"] = chip
         self.p = subprocess.Popen([_PYTHON, "-m", "tt_relion.device_server", _FIDELITY],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
@@ -191,10 +197,30 @@ class _Server:
         return out
 
 
-def _server():
-    if _srv[0] is None:
-        _srv[0] = _Server()
-    return _srv[0]
+def _matmul(lhs, rhs):
+    """On whichever of this rank's chips is idle. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
+    (one server each), so fewer ranks, and so less host memory, can still drive every chip."""
+    global _free
+    if _free is None:
+        with _lock:
+            if _free is None:
+                chips = [c for c in os.environ.get("RLX_RANK_CHIPS", "").split(",") if c] or [None]
+                _srv.extend(_Server(c) for c in chips)
+                q = queue.Queue()
+                for s in _srv:
+                    q.put(s)
+                _free = q
+    s = _free.get()
+    try:
+        _tl.srv = s
+        return s.matmul(lhs, rhs)
+    finally:
+        _free.put(s)
+
+
+def _book(key, dt):
+    c = _tl.srv.c
+    c[key] = round(c.get(key, 0.0) + dt, 4)
 
 
 def _bf16_split(t, a, k):
@@ -238,7 +264,7 @@ def _device_cross(t, ref, shw):
         rhs = t.nn.functional.pad(rhs, (0, 0, 0, pad))
     lhs = lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous()
     rhs = rhs.reshape(nc, kc, rhs.shape[1])
-    out = _server().matmul(lhs.numpy(), rhs.numpy())
+    out = _matmul(lhs.numpy(), rhs.numpy())
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 
@@ -356,7 +382,7 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
                            mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                            padding_factor, imgX, imgY,
                            orientation_num, translation_num, image_size, "C")
-        _srv[0].c["C_s"] = round(_srv[0].c.get("C_s", 0.0) + time.time() - t0, 4)
+        _book("C_s", time.time() - t0)
         out = np.frombuffer(out_mv, dtype=np.float32)
         out += acc
         _stats["handled"] += 1
@@ -401,7 +427,7 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                            mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                            padding_factor, imgX, imgY,
                            orientation_num, translation_num, image_size, "F")
-        _srv[0].c["F_s"] = round(_srv[0].c.get("F_s", 0.0) + time.time() - t0, 4)
+        _book("F_s", time.time() - t0)
         rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
         trans_idx = np.frombuffer(trans_idx_mv, dtype=np.uint64)
         take = rot_idx * np.uint64(translation_num) + trans_idx

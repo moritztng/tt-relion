@@ -12,7 +12,7 @@ sampler=$!
 trap 'kill $sampler 2>/dev/null' EXIT
 date -u +%FT%TZ > "$out/start"
 /usr/bin/time -v -o "$out/time.txt" mpirun -n "$n" --oversubscribe --bind-to none \
-    -x PYTHONPATH -x TT_RELION_BACKEND -x RLX_CHIPS -x RLX_LEASE_DIR -x RLX_LEASE_HOST \
+    -x PYTHONPATH -x TT_RELION_BACKEND -x RLX_CHIPS -x RLX_CHIPS_PER_RANK -x RLX_LEASE_DIR -x RLX_LEASE_HOST \
     -x TT_RELION_KCHUNK -x TT_RELION_SPLIT -x TT_RELION_FIDELITY -x TT_RELION_DEV_CHUNK -x TT_RELION_PROFILE -x LD_LIBRARY_PATH \
     "$here/rank.sh" "$RELION_BIN" "$@" --j "$j" --cpu > "$out/refine.log" 2>&1
 rc=$?
