@@ -18,7 +18,8 @@ core, _dense_diff2, and two entry points.
 
 Backend selected by TT_RELION_BACKEND:
   torch     torch on the host. Exact, slow, and the arm that proves the plumbing.
-  ttnn      the device path.
+  ttnn      the device path: projection on the host (the torch code below), the orientation x
+            translation cross term on the chip. See _device_cross.
   nullbase  decline the instant the hook is entered. Computes nothing, touches no buffer.
   null      do the buffer traffic the device path will do, then decline.
 
@@ -38,6 +39,12 @@ import numpy as np
 _BACKEND = os.environ.get("TT_RELION_BACKEND", "torch")
 _ORI_CHUNK = int(os.environ.get("TT_RELION_ORI_CHUNK", "32"))
 _CHECK = os.environ.get("TT_RELION_CHECK", "") not in ("", "0")
+# TT_RELION_DEV_CHUNK: orientations per device matmul. Larger amortises the launch, smaller bounds
+# the host copy of the projected references.
+_DEV_CHUNK = int(os.environ.get("TT_RELION_DEV_CHUNK", "1024"))
+_FIDELITY = os.environ.get("TT_RELION_FIDELITY", "HiFi3")
+_SPLIT = int(os.environ.get("TT_RELION_SPLIT", "3"))
+_KCHUNK = int(os.environ.get("TT_RELION_KCHUNK", "256"))
 # TT_RELION_TRACE=<path>: append one line per call with the shape, a hash of the euler set and a
 # hash of the reference. Answers "is the coarse orientation set shared across particles" from a
 # real run rather than from reading RELION's sampling code.
@@ -130,6 +137,76 @@ def _project(t, mdl, x, y, e, mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
     return t.where(inside, ref_r, zero), t.where(inside, ref_i, zero)
 
 
+_dev = [None]
+_dev_lock = None
+
+
+def _device():
+    """The rank's one chip, opened on first use. The launcher pins it with TT_VISIBLE_DEVICES."""
+    global _dev_lock
+    if _dev[0] is None:
+        import threading
+        import ttnn
+        _dev_lock = threading.Lock()
+        _dev[0] = ttnn.open_device(device_id=0)
+    return _dev[0]
+
+
+def _bf16_split(t, a, k):
+    """a = a[0] + ... + a[k-1], every part exactly representable in bf16.
+
+    Measured on Wormhole (perf/rlx/parity_cross.py): fp32 operands that are exact in tf32 still come
+    out of the matrix unit with a fidelity-dependent error (HiFi4 9e-5 relative, HiFi2 1e-3), so it
+    does not multiply tf32 exactly. bf16 parts are exact in whatever format the unit reads.
+    """
+    parts = []
+    for _ in range(k - 1):
+        hi = (a.view(t.int32) & ~0xFFFF).view(t.float32)
+        parts.append(hi)
+        a = a - hi
+    return parts + [a]
+
+
+def _device_cross(t, ref, shw):
+    """C[o, t] = sum_p ref[o, p] * shw[t, p] on the chip, fp32 in, fp32 accumulate.
+
+    ref [O, K] and shw [T, K] are real (real and imaginary parts concatenated along K). Both are
+    split into _SPLIT bf16 parts and C = sum over i + j < _SPLIT of a_i . b_j, which drops terms of
+    relative size 2^-24 at _SPLIT=3. All of it is ONE matmul: the left operand is [a_0 | a_1 | ...]
+    and output column block j collects b_j against every a_i with i + j < _SPLIT.
+    """
+    import ttnn
+    dev = _device()
+    k, n, kk = _SPLIT, shw.shape[0], ref.shape[1]
+    lhs = t.cat(_bf16_split(t, ref, k), 1)
+    bs = _bf16_split(t, shw, k)
+    rhs = t.zeros(k * kk, k * n, dtype=t.float32)
+    for i in range(k):
+        for j in range(k - i):
+            rhs[i * kk:(i + 1) * kk, j * n:(j + 1) * n] = bs[j].T
+    cfg = ttnn.WormholeComputeKernelConfig(math_fidelity=getattr(ttnn.MathFidelity, _FIDELITY),
+                                          math_approx_mode=False, fp32_dest_acc_en=True,
+                                          packer_l1_acc=True)
+    # The chip's fp32 accumulator loses bits over a long reduction (measured: 5e-5 relative at
+    # K = 12.7k even with exact products), so K is cut into _KCHUNK runs, each its own batch entry,
+    # and the partial sums are added on the host in float64.
+    kc = _KCHUNK if _KCHUNK > 0 else lhs.shape[1]
+    nc = -(-lhs.shape[1] // kc)
+    pad = nc * kc - lhs.shape[1]
+    if pad:
+        lhs = t.nn.functional.pad(lhs, (0, pad))
+        rhs = t.nn.functional.pad(rhs, (0, 0, 0, pad))
+    lhs = lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous()
+    rhs = rhs.reshape(nc, kc, rhs.shape[1])
+    with _dev_lock:
+        a = ttnn.from_torch(lhs, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
+        b = ttnn.from_torch(rhs, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
+        c = ttnn.matmul(a, b, compute_kernel_config=cfg)
+        out = ttnn.to_torch(c)
+        ttnn.deallocate(a); ttnn.deallocate(b); ttnn.deallocate(c)
+    return out.double().sum(0).reshape(-1, k, n).sum(1)
+
+
 def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                  mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                  padding_factor, imgX, imgY,
@@ -161,14 +238,26 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     sh_i = c * img_i + s * img_r
 
     acc = np.empty(orientation_num * translation_num, dtype=np.float32)
-    for o0 in range(0, orientation_num, _ORI_CHUNK):
-        o1 = min(o0 + _ORI_CHUNK, orientation_num)
+    device = _BACKEND == "ttnn"
+    if device:
+        # |ref - sh|^2_w = |ref|^2_w + |sh|^2_w - 2 ref.(w sh). The two norms are cheap and stay
+        # on the host in float64; only the O x T cross term goes to the chip.
+        shw = t.cat([sh_r * w, sh_i * w], 1)
+        sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * w.double()).sum(-1)
+    chunk = _DEV_CHUNK if device else _ORI_CHUNK
+    for o0 in range(0, orientation_num, chunk):
+        o1 = min(o0 + chunk, orientation_num)
         ref_r, ref_i = _project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY, mdlZ,
                                 mdlInitY, mdlInitZ, maxR2_padded, padding_factor)
-        dr = ref_r.unsqueeze(1) - sh_r.unsqueeze(0)
-        di = ref_i.unsqueeze(1) - sh_i.unsqueeze(0)
-        d2 = ((dr * dr + di * di) * w).sum(-1)
-        acc[o0 * translation_num:o1 * translation_num] = d2.reshape(-1).numpy()
+        if device:
+            ref2 = ((ref_r.double() ** 2 + ref_i.double() ** 2) * w.double()).sum(-1)
+            cross = _device_cross(t, t.cat([ref_r, ref_i], 1), shw).double()
+            d2 = ref2.unsqueeze(1) + sh2.unsqueeze(0) - 2.0 * cross
+        else:
+            dr = ref_r.unsqueeze(1) - sh_r.unsqueeze(0)
+            di = ref_i.unsqueeze(1) - sh_i.unsqueeze(0)
+            d2 = ((dr * dr + di * di) * w).sum(-1)
+        acc[o0 * translation_num:o1 * translation_num] = d2.reshape(-1).float().numpy()
 
     if _DUMP and _dumped[0] < _DUMP_N:
         _dumped[0] += 1
@@ -225,9 +314,6 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
             _marshal(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, orientation_num)
         _stats["declined"] += 1
         return False
-    if _BACKEND == "ttnn":
-        _stats["declined"] += 1
-        return False        # not wired yet, so RELION keeps its own kernel
     try:
         t = _torch()
         acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
@@ -267,9 +353,8 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
             fh.write("F %d %d %d %d %d %d\n"
                      % (orientation_num, translation_num, significant_num, job_num_count,
                         image_size, len(np.unique(rot_idx))))
-    if _BACKEND in ("ttnn", "nullbase", "null"):
-        # The fine hook is leg 1's territory; here it only has to cost what an entry-and-decline
-        # costs, so that the coarse arms differ in one term.
+    if _BACKEND in ("nullbase", "null"):
+        # Only has to cost what an entry-and-decline costs, so that the coarse arms differ in one term.
         _stats["fine_declined"] += 1
         return False
     try:
