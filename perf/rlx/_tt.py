@@ -1,7 +1,7 @@
 """Device open + AICLK sampling shared by the perf/rlx prototypes.
 
 The chip is opened through tt-bio's own path (tt_bio.tenstorrent.get_device), which sets whatever the box needs
-(the p300 1x1 mesh descriptor on qb2, nothing extra on a Galaxy chip). A bare ttnn.open_device either spins or
+(the 1x1 mesh descriptor on a p300 board, nothing extra on a Galaxy chip). A bare ttnn.open_device either spins or
 TT_FATALs on a p300 and TT_THROWs in UMD on some boxes. Pin the chip with TT_VISIBLE_DEVICES.
 """
 import os
