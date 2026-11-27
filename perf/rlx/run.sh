@@ -8,8 +8,10 @@ mkdir -p "$out"
 # One torch thread per bridge: RELION already runs ranks x --j threads on every core.
 export TT_RELION_TORCH_THREADS=${TT_RELION_TORCH_THREADS:-1}
 here=$(cd "$(dirname "$0")" && pwd)
+# Columns follow the sysfs glob; the header names each column's device node (map ids with ttvd_nodes.sh).
+{ printf 'epoch'; for f in /sys/class/tenstorrent/*/tt_aiclk; do d=${f%/tt_aiclk}; printf '\tnode%s' "${d##*!}"; done; echo; } > "$out/aiclk.tsv"
 ( while :; do printf '%s' "$(date +%s.%N)"; for f in /sys/class/tenstorrent/*/tt_aiclk; do
-      printf '\t%s' "$(cat "$f")"; done; echo; sleep 1; done ) > "$out/aiclk.tsv" &
+      printf '\t%s' "$(cat "$f")"; done; echo; sleep 1; done ) >> "$out/aiclk.tsv" &
 sampler=$!
 trap 'kill $sampler 2>/dev/null' EXIT
 date -u +%FT%TZ > "$out/start"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Whole-pipeline wall map of one run.sh run directory (state/rlx/WALLMAP.md is built from this).
 
-    python3 wallmap.py <rundir> [--chips N]
+    python3 wallmap.py <rundir> [--nodes 24,25,...]
 
 Sources, all written by the run itself:
   start / end              wall clock of mpirun (UTC, from run.sh)
@@ -9,7 +9,8 @@ Sources, all written by the run itself:
   refine.log               E-step progress "a/b min" (the leader's clock, last value before "Maximization...");
                            TTPROF tables (one per follower at exit, thread-summed CPU seconds, shares only);
                            TTDEV lines (one per device server at exit: chip up/mm/down seconds + bridge counters)
-  aiclk.tsv                every chip's AICLK at 1 Hz during the run
+  aiclk.tsv                every chip's AICLK at 1 Hz during the run; --nodes keeps only the run's own device
+                           nodes (ttvd_nodes.sh maps chip ids to nodes) so a shared box's other tenants drop out
 
 Per follower rank, inside the E-step:
   device busy   = mm_s (matmul, synchronised) + up_s + down_s (host<->chip transfers)
@@ -26,6 +27,7 @@ from pathlib import Path
 
 ap = argparse.ArgumentParser()
 ap.add_argument("run")
+ap.add_argument("--nodes", help="device node numbers whose AICLK counts (default: all)")
 a = ap.parse_args()
 d = Path(a.run)
 utc = lambda s: dt.datetime.strptime(s.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).timestamp()
@@ -50,12 +52,18 @@ for m in re.finditer(r"^TTDEV chip=(\S+) calls=(\d+) busy_s=([0-9.]+) up_s=([0-9
     dev.append(dict(chip=m.group(1), calls=int(m.group(2)), busy=float(m.group(3)), up=float(m.group(4)),
                     mm=float(m.group(5)), down=float(m.group(6)), life=float(m.group(7)), **c))
 
-clk = []
+clk, cols = [], None
 for line in (d / "aiclk.tsv").read_text().splitlines():
     f = line.split("\t")
-    if len(f) > 1:
+    if f[0] == "epoch":
+        cols = [c.removeprefix("node") for c in f[1:]]
+    elif len(f) > 1:
         clk.append([int(x) for x in f[1:]])
-busy_clk = [x for row in clk for x in row if x > 600]   # chips that were computing (idle WH sits at 500)
+keep = range(len(clk[0]) if clk else 0)
+if a.nodes:
+    assert cols, "aiclk.tsv has no node header (written before run.sh named its columns)"
+    keep = [cols.index(n) for n in a.nodes.split(",")]
+busy_clk = [row[i] for row in clk for i in keep if row[i] > 600]   # computing (idle WH sits at 500)
 
 print(f"# WALLMAP {d}")
 print(f"mpirun wall: {t1 - t0:.0f} s" if t1 else "mpirun wall: (running)")
