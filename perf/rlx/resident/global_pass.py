@@ -42,6 +42,7 @@ ap.add_argument("--kc", type=int, default=480)
 ap.add_argument("--out", required=True)
 ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
+ap.add_argument("--balance", type=int, default=1)
 a = ap.parse_args()
 APIX, ORI = 1.34, 360
 
@@ -320,6 +321,10 @@ if not a.nodev:
     # particle side (v0 built on host, uploaded once; resident version builds it on chip from the resident stack)
     Ah = kchip(Ar[:, :P], Ar[:, P:])                                          # [R, K] w ctf X
     A2h = kchip(np.array([w * cf ** 2 for x, cf in rows[::T]]), np.array([w * cf ** 2 for x, cf in rows[::T]]))  # [B, K]
+    # device rows are translation-major (t B + b) so the per-particle |CTF P|^2 [B, O] expands by a pure-copy concat;
+    # ttnn.repeat_interleave on fp32 measured 3e-3 relative error (bf16-class), so it is not used
+    perm = np.array([b * T + t for t in range(T) for b in range(a.B)])
+    Ah = Ah[perm]
     t_A, t_A2 = put(Ah), put(A2h)
     Kp = -(-K // KC) * KC
     nc = Kp // KC
@@ -335,12 +340,16 @@ if not a.nodev:
         m = ttnn.to_torch(ttnn.max(ttnn.abs(X_), dim=-1)).double().numpy().reshape(-1)[:X_.shape[0]]
         return np.where(m > 0, np.floor(np.log2(np.maximum(m, 1e-300))) + 1, 0).astype(np.int32)
 
-    def cut_dev(Xr, sc_b, n):   # Xr runs layout fp32, sc_b broadcastable 2^-e; -> n bf16 digit tensors, exact
+    def cut_dev(Xr, sc_b, n, kmajor=False):
+        """Xr runs layout [nc, n, KC] fp32, sc_b [1, n, 1] = 2^-e; -> n bf16 digit tensors, exact. kmajor: each digit
+        transposed to [nc, KC, n] AFTER the cut (an fp32 transpose on chip truncates to ~2^-11, measured: cutB 4.9e-4;
+        the digits are small integers, exact in any format)."""
         r = ttnn.multiply(Xr, sc_b)
         out = []
         for i in range(n):
             q = ttnn.round(ttnn.multiply(r, 2.0 ** (2 * i + 1)))
-            out.append(ttnn.typecast(q, ttnn.bfloat16))
+            qb = ttnn.typecast(q, ttnn.bfloat16)
+            out.append(ttnn.permute(qb, (0, 2, 1)) if kmajor else qb)
             if i + 1 < n:
                 r = ttnn.subtract(r, ttnn.multiply(q, 2.0 ** -(2 * i + 1)))
         return out
@@ -361,6 +370,17 @@ if not a.nodev:
                 lo = ttnn.add(lo, e_)
         return hi, lo
 
+    def balance(XA, XB):
+        """Exact K-diagonal rebalance A diag(d), diag(1/d) B with d = powers of 2: the weights (w CTF, w CTF^2) peak at high
+        frequency and the reference (P, |P|^2) at low, so per-row Ozaki scaling wastes digits on the mismatch (measured:
+        |CTF P|^2 at 8e-6 relative before). Column maxima come back (K floats per side); d goes up as one [1, K] row."""
+        ma = ttnn.to_torch(ttnn.max(ttnn.abs(XA), dim=0)).double().numpy().reshape(-1)[:K]
+        mb = ttnn.to_torch(ttnn.max(ttnn.abs(XB), dim=0)).double().numpy().reshape(-1)[:K]
+        ok = (ma > 0) & (mb > 0)
+        e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mb, 1)) - np.log2(np.where(ok, ma, 1)))), 0)
+        return ttnn.multiply(XA, put(np.ldexp(1.0, e.astype(int)).reshape(1, -1))), \
+            ttnn.multiply(XB, put(np.ldexp(1.0, -e.astype(int)).reshape(1, -1)))
+
     def chip_pass(n, check=False):
         t = {}
         t0 = time.perf_counter()
@@ -369,20 +389,25 @@ if not a.nodev:
         ttnn.synchronize_device(dev); t["proj"] = time.perf_counter() - t0
         t0 = time.perf_counter()
         B2 = ttnn.multiply(B_, B_)                                               # |P|^2 parts (fp32, RELION's rounding)
-        ea_, eb_ = row_exp_dev(t_A), row_exp_dev(B_)
-        ea2, eb2 = row_exp_dev(t_A2), row_exp_dev(B2)
-        Ad = cut_dev(runs_dev(t_A, True), put(np.ldexp(1.0, -ea_).reshape(1, -1, 1)), n)
-        Bd = cut_dev(runs_dev(B_, False), put(np.ldexp(1.0, -eb_).reshape(1, 1, -1)), n)
-        A2d = cut_dev(runs_dev(t_A2, True), put(np.ldexp(1.0, -ea2).reshape(1, -1, 1)), n)
-        B2d = cut_dev(runs_dev(B2, False), put(np.ldexp(1.0, -eb2).reshape(1, 1, -1)), n)
+        B2raw, Braw = B2, B_
+        tA, B_ = balance(t_A, B_) if a.balance else (t_A, B_)
+        tA2, B2 = balance(t_A2, B2) if a.balance else (t_A2, B2)
+        ea_, eb_ = row_exp_dev(tA), row_exp_dev(B_)
+        ea2, eb2 = row_exp_dev(tA2), row_exp_dev(B2)
+        Ad = cut_dev(runs_dev(tA, True), put(np.ldexp(1.0, -ea_).reshape(1, -1, 1)), n)
+        Bd = cut_dev(runs_dev(B_, True), put(np.ldexp(1.0, -eb_).reshape(1, -1, 1)), n, kmajor=True)
+        A2d = cut_dev(runs_dev(tA2, True), put(np.ldexp(1.0, -ea2).reshape(1, -1, 1)), n)
+        B2d = cut_dev(runs_dev(B2, True), put(np.ldexp(1.0, -eb2).reshape(1, -1, 1)), n, kmajor=True)
         ttnn.synchronize_device(dev); t["cut"] = time.perf_counter() - t0
         t0 = time.perf_counter()
         Ch, Cl = oz_dev(Ad, Bd, put(np.ldexp(1.0, ea_)[:, None] * np.ldexp(1.0, eb_)[None, :]), n)
         Nh, Nl = oz_dev(A2d, B2d, put(np.ldexp(1.0, ea2)[:, None] * np.ldexp(1.0, eb2)[None, :]), n)  # [B, O]
+        Nh0, Nl0 = Nh, Nl
         # rows are b * T + t: expand the per-particle |CTF P|^2 over the T translations
-        Nh = ttnn.reshape(ttnn.repeat_interleave(Nh, T, dim=0), (len(rows), a.O))
-        Nl = ttnn.reshape(ttnn.repeat_interleave(Nl, T, dim=0), (len(rows), a.O))
-        Nxh = Nx.astype(np.float32); Nxl = (Nx - Nxh).astype(np.float32)
+        Nh = ttnn.concat([Nh] * T, dim=0)
+        Nl = ttnn.concat([Nl] * T, dim=0)
+        Nxp = Nx[perm]
+        Nxh = Nxp.astype(np.float32); Nxl = (Nxp - Nxh).astype(np.float32)
         # D = (Nx + Ncp) / 2 - C in df32, rounded once
         sh, se = tsum(ttnn.multiply(Nh, 0.5), put(np.repeat(Nxh[:, None] / 2, a.O, 1)))
         lo_ = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), put(np.repeat(Nxl[:, None] / 2, a.O, 1)))
@@ -391,9 +416,41 @@ if not a.nodev:
         ttnn.synchronize_device(dev); t["oz_combine"] = time.perf_counter() - t0
         out = dict(t=t)
         if check:
-            Bh = ttnn.to_torch(B_).double().numpy()
+            Bh = ttnn.to_torch(Braw).double().numpy()
             out["B"] = Bh
-            out["D"] = ttnn.to_torch(D).double().numpy()[:len(rows), :a.O]
+            Dd = ttnn.to_torch(D).double().numpy()[:len(rows), :a.O]
+            out["D"] = np.empty_like(Dd)
+            out["D"][perm] = Dd
+            # component diagnostics against float64 on the chip's own fp32 operands
+            th = lambda x_: ttnn.to_torch(x_).double().numpy()  # noqa: E731
+            Bh = Bh[:a.O, :K]
+            Cc = (th(Ch) + th(Cl))[:len(rows), :a.O]
+            C_ = Ah.astype(np.float64) @ Bh.T
+            B2h = (Bh.astype(np.float32) ** 2).astype(np.float64)
+            Nc = (th(Nh) + th(Nl))[:len(rows), :a.O]
+            N_ = (A2h.astype(np.float64) @ B2h.T)[np.arange(len(rows)) % a.B]
+            def recon(dl, sc_e, rows_first):  # sum_i q_i 2^-(2i+1), back in [n, K] order, vs the scaled operand
+                acc_ = None
+                for i, q_ in enumerate(dl):
+                    v = th(q_) * 2.0 ** -(2 * i + 1)
+                    acc_ = v if acc_ is None else acc_ + v
+                if rows_first:   # [nc, n, KC] -> [n, nc KC]
+                    acc_ = acc_.transpose(1, 0, 2).reshape(acc_.shape[1], -1)
+                else:            # [nc, KC, n] -> [n, nc KC]
+                    acc_ = acc_.transpose(2, 0, 1).reshape(acc_.shape[2], -1)
+                return acc_[:, :K]
+            An_ = np.ldexp(th(tA)[:len(rows), :K], -ea_[:, None])
+            Bn_ = np.ldexp(th(B_)[:a.O, :K], -eb_[:, None])
+            out["diag"] = dict(
+                C_rel=float(np.abs(Cc - C_).max() / np.abs(C_).max()),
+                B2_rel=float(np.abs(th(B2raw)[:a.O, :K] - B2h).max() / B2h.max()),
+                Ncp0_rel=float(np.abs((th(Nh0) + th(Nl0))[:a.B, :a.O] - N_[:a.B]).max() / np.abs(N_).max()),
+                A2cut_err=float(np.abs(recon(A2d, ea2, True)[:a.B] - np.ldexp(th(tA2)[:a.B, :K], -ea2[:, None])).max()),
+                Ncp_rel=float(np.abs(Nc - N_).max() / np.abs(N_).max()),
+                cutA_err=float(np.abs(recon(Ad, ea_, True)[:len(rows)] - An_).max()),
+                cutB_err=float(np.abs(recon(Bd, eb_, False)[:a.O] - Bn_).max()),
+                digA_max=float(max(np.abs(th(q_)).max() for q_ in Ad)),
+                digB_max=float(max(np.abs(th(q_)).max() for q_ in Bd)))
         return out
 
     n = 14
@@ -408,7 +465,8 @@ if not a.nodev:
     for q_ in range(len(rows)):
         d32c[q_] = ((Xr[q_][None] - CF[q_][None] * Pt2) ** 2 * W2).sum(1).double().numpy()
     grade("host fp32 direct on CHIP projection", d32c, dict(proj_rel_vs_f64=prel))
-    grade("RESIDENT chip n14 (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, proj_rel_vs_f64=prel))
+    print(json.dumps({"diag": r0["diag"]}), flush=True)
+    grade("RESIDENT chip n14 (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, proj_rel_vs_f64=prel, **r0["diag"]))
     clk = Clock(nodes)
     ts = []
     for _ in range(a.reps):
