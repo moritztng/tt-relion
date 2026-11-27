@@ -12,6 +12,7 @@ void kernel_main() {
     constexpr uint32_t RT = get_compile_time_arg_val(base + 4), OT = get_compile_time_arg_val(base + 5);
     constexpr uint32_t NRB = get_compile_time_arg_val(base + 6), NCB = get_compile_time_arg_val(base + 7);
     constexpr bool BT = get_compile_time_arg_val(base + 8);   // B stored [n, O, K]: read tile (o, k) for (k, o)
+    constexpr uint32_t NB_K = get_compile_time_arg_val(base + 9);   // digits n (batch stride = n digit planes)
     constexpr uint32_t KT = KR * NRUN;
     constexpr uint32_t cb_a = 0, cb_b = 1, cb_acc = 24, cb_tok = 26;
     constexpr uint32_t TB = 2048, TF = 4096;
@@ -20,7 +21,9 @@ void kernel_main() {
     const uint32_t u0 = get_arg_val<uint32_t>(0), nu = get_arg_val<uint32_t>(1);
 
     for (uint32_t u = u0; u < u0 + nu; ++u) {
-        const uint32_t k = u / (NRB * NCB), rb = (u / NCB) % NRB, cbk = u % NCB;
+        // unit = ((batch q * n + k) * NRB + rb) * NCB + cbk; batch q has its own A [n, RT, KT] and B planes
+        const uint32_t qk = u / (NRB * NCB), q = qk / NB_K, k = qk % NB_K, rb = (u / NCB) % NRB, cbk = u % NCB;
+        const uint32_t a0 = q * NB_K * RT * KT, b0 = q * NB_K * OT * KT;
         if (u != u0) {
             cb_wait_front(cb_tok, 1);
             cb_pop_front(cb_tok, 1);
@@ -36,15 +39,15 @@ void kernel_main() {
                 uint32_t p = get_write_ptr(cb_b);
                 for (uint32_t kk = 0; kk < KR; ++kk)
                     for (uint32_t c = 0; c < NB; ++c, p += TB)
-                        noc_async_read_page(BT ? j * OT * KT + (cbk * NB + c) * KT + run * KR + kk
-                                               : j * KT * OT + (run * KR + kk) * OT + cbk * NB + c, sb, p);
+                        noc_async_read_page(b0 + (BT ? j * OT * KT + (cbk * NB + c) * KT + run * KR + kk
+                                               : j * KT * OT + (run * KR + kk) * OT + cbk * NB + c), sb, p);
                 noc_async_read_barrier();
                 cb_push_back(cb_b, KR * NB);
                 for (uint32_t r = 0; r < RB; ++r) {
                     cb_reserve_back(cb_a, KR);
-                    uint32_t q = get_write_ptr(cb_a);
-                    for (uint32_t kk = 0; kk < KR; ++kk, q += TB)
-                        noc_async_read_page(i * RT * KT + (rb * RB + r) * KT + run * KR + kk, sa, q);
+                    uint32_t qa = get_write_ptr(cb_a);
+                    for (uint32_t kk = 0; kk < KR; ++kk, qa += TB)
+                        noc_async_read_page(a0 + i * RT * KT + (rb * RB + r) * KT + run * KR + kk, sa, qa);
                     noc_async_read_barrier();
                     cb_push_back(cb_a, KR);
                 }

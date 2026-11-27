@@ -14,14 +14,15 @@ void kernel_main() {
     constexpr uint32_t RB = get_compile_time_arg_val(0), NB = get_compile_time_arg_val(1);
     constexpr uint32_t KR = get_compile_time_arg_val(2), NRUN = get_compile_time_arg_val(3);
     constexpr uint32_t NRB = get_compile_time_arg_val(4), NCB = get_compile_time_arg_val(5);
-    constexpr bool BT = get_compile_time_arg_val(6);   // the unpacker transposes each B tile
+    constexpr bool BT = get_compile_time_arg_val(6);
+    constexpr uint32_t NB_K = get_compile_time_arg_val(7);   // the unpacker transposes each B tile
     constexpr uint32_t OG = 2;   // output tiles per dest pass: OG matmul slots + OG accumulator slots <= 4 fp32
     constexpr uint32_t cb_a = 0, cb_b = 1, cb_acc = 24, cb_done = 25;
     const uint32_t u0 = get_arg_val<uint32_t>(0), nu = get_arg_val<uint32_t>(1);
     if (nu == 0) return;
     mm_block_init(cb_a, cb_b, cb_acc, BT, OG, 1, KR);
     for (uint32_t u = u0; u < u0 + nu; ++u) {
-        const uint32_t k = u / (NRB * NCB);
+        const uint32_t k = (u / (NRB * NCB)) % NB_K;
         cb_wait_front(cb_acc, RB * NB);
         for (uint32_t i = 0; i <= k; ++i) {
             for (uint32_t run = 0; run < NRUN; ++run) {
