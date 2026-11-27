@@ -185,7 +185,7 @@ class _Server:
         self.shm = None
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
         self.gen, self.kept, self.kept_bytes = None, set(), 0            # operands this chip keeps
-        self.models = []                                                 # model keys this chip keeps, oldest first
+        self.models, self.declined = [], set()                           # model keys this chip keeps / refused
 
     def _seg(self, need):
         from multiprocessing import shared_memory
@@ -206,17 +206,21 @@ class _Server:
     def model(self, mkey, mdl, geom):
         """Make this chip keep the model mkey (fp32 [nvox, 2], box geom); a no-op if it already does."""
         with self.lock:
-            if mkey in self.models:
+            if mkey in self.models or mkey in self.declined:
                 return
             self._seg(mdl.nbytes)
             np.ndarray(mdl.shape, np.float32, self.shm.buf)[...] = mdl
-            self._ask({"shm": self.shm.name, "model": mkey, "nvox": int(mdl.shape[0]), "geom": geom})
-            self.models = (self.models + [mkey])[-2:]
+            if self._ask({"shm": self.shm.name, "model": mkey, "nvox": int(mdl.shape[0]), "geom": geom}) == "ok":
+                self.models = (self.models + [mkey])[-2:]
+            else:                                   # the chip cannot hold it: never re-ship it
+                self.declined.add(mkey)
 
     def cross_proj(self, mkey, g, eul, shw, w):
         """(C [O, T], ref2 [O]) float64 with the references projected on the chip; None if it lost the model."""
         o, (t, k) = eul.shape[0], shw.shape
         with self.lock:
+            if mkey not in self.models:
+                return None
             off = 4 * (9 * o + t * k + k // 2)
             self._seg(off + 8 * (o * t + o))
             f32 = np.ndarray((off // 4,), np.float32, self.shm.buf)

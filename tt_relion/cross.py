@@ -143,15 +143,22 @@ def serve(backend, reply):
                 backend.free(a)
             gen, kept = req["gen"], {}
         if "model" in req:
-            backend.set_model(req["model"], np.ndarray((req["nvox"], 2), np.float32, shm.buf), req["geom"])
-            reply.write("ok\n")
+            try:   # a model the chip cannot hold (memory) is declined; the bridge then uses RELION's projection
+                backend.set_model(req["model"], np.ndarray((req["nvox"], 2), np.float32, shm.buf), req["geom"])
+                r = "ok"
+            except Exception as exc:  # noqa: BLE001
+                print("tt_relion.cross: model %s declined: %r" % (req["model"], exc), file=sys.stderr, flush=True)
+                r = "nomodel"
+            reply.write(r + "\n")
             reply.flush()
             continue
         o, t, k = req["O"], req["T"], req["K"]
         if req.get("proj"):
             try:
                 c, ref2, off = _projected(backend, req, shm.buf, o, t, k)
-            except KeyError:
+            except Exception as exc:  # noqa: BLE001  (KeyError: model not kept; anything else: declined)
+                if not isinstance(exc, KeyError):
+                    print("tt_relion.cross: proj declined: %r" % (exc,), file=sys.stderr, flush=True)
                 reply.write("nomodel\n")
                 reply.flush()
                 continue
