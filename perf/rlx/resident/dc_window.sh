@@ -4,8 +4,9 @@
 # devcell.sh on every chip that passed. Per-phase timeout TO keeps the cell inside the booking.
 #   dc_window.sh 20:00 10 NG NL NF   (run from the run dir)
 START=${1:?HH:MM}; GRACE=${2:-10}; NG=${3:-9}; NL=${4:-4}; NF=${5:-2}
-export PATH=~/fleet/env/bin:$PATH PYTHONPATH=~/rlx-resident/src
-R=~/rlx-resident/src/perf/rlx/resident
+SRC=${SRC:-~/rlx-resident/src}; export SRC
+export PATH=~/fleet/env/bin:$PATH PYTHONPATH=$SRC
+R=$SRC/perf/rlx/resident
 t=$(date -u -d "today $START" +%s); now=$(date +%s); [ $t -gt $now ] && { echo "sleep until ${START}Z"; sleep $((t-now)); }
 [ -e ~/fleet/HANDBACK ] && { echo HANDBACK; exit 3; }
 end=$(( $(date +%s) + GRACE*60 ))
