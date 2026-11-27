@@ -50,6 +50,10 @@ _DEV_CHUNK = int(os.environ.get("TT_RELION_DEV_CHUNK", "1024"))
 _FIDELITY = os.environ.get("TT_RELION_FIDELITY", "HiFi3")
 _SPLIT = int(os.environ.get("TT_RELION_SPLIT", "3"))
 _KCHUNK = int(os.environ.get("TT_RELION_KCHUNK", "256"))
+# The K-chunk partials are added on the chip in fp32 and one product comes back instead of K/_KCHUNK
+# of them. 400-particle smoke on BH: poses identical 400/400, MaxValueProb within 2.1e-5, readback
+# 1.25 -> 0.12 s per chip (results/e2e_bt). TT_RELION_SUM0=0 sums them on the host in float64.
+_SUM0 = os.environ.get("TT_RELION_SUM0", "1") not in ("", "0")
 # TT_RELION_TRACE=<path>: append one line per call with the shape, a hash of the euler set and a
 # hash of the reference. Answers "is the coarse orientation set shared across particles" from a
 # real run rather than from reading RELION's sampling code.
@@ -166,10 +170,11 @@ class _Server:
         self.lhs_key = None                 # key of the lhs this server's chip holds
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
 
-    def matmul(self, lhs, rhs, lhs_key=None):
+    def matmul(self, lhs, rhs, lhs_key=None, sum0=False):
         """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip.
 
         lhs_key: keep lhs on the chip under this key; a later call with the same key skips the upload.
+        sum0: add the nc products on the chip and return [1, m, n].
         """
         from multiprocessing import shared_memory
         nc, m, kc = lhs.shape
@@ -190,6 +195,8 @@ class _Server:
             req = {"shm": self.shm.name, "shape": [nc, m, kc, n], "client": self.c}
             if lhs_key is not None:
                 req["lhs_key"] = lhs_key
+            if sum0:
+                req["sum0"] = True
             self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             self.p.stdin.flush()
             if self.p.stdout.readline().strip() != "ok":
@@ -197,7 +204,8 @@ class _Server:
             t2 = time.time()
             if lhs_key is not None:
                 self.lhs_key = lhs_key
-            out = buf[lhs.size + rhs.size:].reshape(nc, m, n).copy()
+            out = buf[lhs.size + rhs.size:lhs.size + rhs.size + (1 if sum0 else nc) * m * n]
+            out = out.reshape(-1, m, n).copy()
             del buf
             c = self.c
             c["calls"] += 1
@@ -207,7 +215,7 @@ class _Server:
         return out
 
 
-def _matmul(lhs, rhs, lhs_key=None):
+def _matmul(lhs, rhs, lhs_key=None, sum0=False):
     """On whichever of this rank's chips is idle. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
     (one server each), so fewer ranks, and so less host memory, can still drive every chip."""
     global _free
@@ -223,7 +231,7 @@ def _matmul(lhs, rhs, lhs_key=None):
     s = _free.get()
     try:
         _tl.srv = s
-        return s.matmul(lhs, rhs, lhs_key)
+        return s.matmul(lhs, rhs, lhs_key, sum0)
     finally:
         _free.put(s)
 
@@ -283,7 +291,7 @@ def _device_cross(t, ref, shw, ref_key=None):
     if pad:
         rhs = t.nn.functional.pad(rhs, (0, 0, 0, pad))
     rhs = rhs.reshape(nc, kc, rhs.shape[1])
-    out = _matmul(lhs, rhs.numpy(), None if ref_key is None else ref_key.hex())
+    out = _matmul(lhs, rhs.numpy(), None if ref_key is None else ref_key.hex(), _SUM0)
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 

@@ -16,3 +16,10 @@ The coarse batch path now uploads its split reference projections once per itera
 Per-chip upload time 0.52-0.66 s -> 0.26-0.30 s (TTDEV up_s). The chip is busy ~2 s per rank against
 ~8-9 s of host-side coarse work (C_s), and readback (down_s ~1.2-1.3 s) is the largest device term.
 AICLK up to 1350 MHz during, load1 5.7.
+
+## K-chunk partials added on chip (pass 10, 23:04Z), now the default
+
+TT_RELION_SUM0=1 vs A (host float64 sum): poses and origins identical 400/400; MaxValueProbDistribution
+differs in 280 rows by at most 2.1e-5, LogLikeliContribution in 354 rows by at most 6e-5. Per chip:
+readback 1.2-1.3 s -> 0.10-0.15 s, chip busy ~1.9 s -> 0.57-0.77 s, host coarse time (C_s) ~8.7 s -> ~5.0 s.
+load1 7.8. `perf/rlx/star_cmp.py` does the row comparison.

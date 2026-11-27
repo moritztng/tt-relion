@@ -10,6 +10,7 @@ Protocol, one JSON line per request on stdin, one line back:
 "lhs_key" keeps lhs on the chip: a request with the key of the lhs already held skips its upload (the
 bridge does not even write it into the segment), a new key replaces it. The coarse pass keys its
 reference projections by iteration, so a batch ships only its particles.
+"sum0": true adds the nc partial products on the chip (fp32) and returns only out[0] = their sum.
 "client" carries the bridge's cumulative counters (round trips, copies, bytes); the server only echoes the
 last one in its exit line, so the WALLMAP gets the client side without RELION having to flush anything.
 The shared-memory segment holds lhs [nc, m, kc], rhs [nc, kc, n] and out [nc, m, n], float32, back to back.
@@ -64,9 +65,22 @@ def main():
         ttnn.synchronize_device(dev)
         t1 = time.time()
         c = ttnn.matmul(a, b, compute_kernel_config=cfg)
+        if req.get("sum0") and nc > 1:
+            parts = [ttnn.slice(c, [i, 0, 0], [i + 1, m, n]) for i in range(nc)]
+            acc = parts[0]
+            for p_ in parts[1:]:
+                nxt = ttnn.add(acc, p_)
+                if acc is not parts[0]:
+                    ttnn.deallocate(acc)
+                acc = nxt
+            for p_ in parts:
+                ttnn.deallocate(p_)
+            ttnn.deallocate(c)
+            c = acc
         ttnn.synchronize_device(dev)
         t2 = time.time()
-        out[...] = ttnn.to_torch(c).numpy()
+        r = ttnn.to_torch(c).numpy()
+        out.reshape(-1)[:r.size] = r.reshape(-1)
         if a is not held:
             ttnn.deallocate(a)
         ttnn.deallocate(b)
