@@ -1,2 +1,2 @@
-{"q": 3, "n": 13, "R": 64, "K": 960, "O": 160, "rb": 2, "nb": 5, "adm_bit_identical": true, "exact": true}
-{"q": 2, "n": 4, "R": 512, "K": 480, "O": 256, "rb": 16, "nb": 8, "adm_bit_identical": true, "exact": true}
+{"q": 3, "n": 13, "R": 64, "K": 960, "O": 160, "rb": 2, "nb": 5, "adm_bit_identical": true, "exact": true, "adm_bdm_bit_identical": true}
+{"q": 2, "n": 4, "R": 512, "K": 480, "O": 256, "rb": 16, "nb": 8, "adm_bit_identical": true, "exact": true, "adm_bdm_bit_identical": true}

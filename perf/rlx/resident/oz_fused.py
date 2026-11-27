@@ -16,12 +16,13 @@ KDIR = Path(__file__).resolve().parent / "kernels" / "oz_fused"
 RB, NB, KR = 16, 8, 15
 
 
-def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, adm=False):
+def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, adm=False, bdm=False):
     """bt: B is [n, O, K] (row-major digits of the reference, no transpose needed); the unpacker transposes each tile.
     q: independent batches in one program (local passes: one small product per pooled orientation set). A is
     [q*n, R, K], B [q*n, K, O] (or [q*n, O, K]), S [q*n, R, O]; batch j owns digit planes j*n .. j*n+n-1.
     adm: A is digit-major [n*q, R, K] instead (plane i of batch j = i*q + j), as oz_cut emits for q stacked
-    particles; B and S stay batch-major."""
+    particles; bdm: likewise for B (bt only). S stays batch-major."""
+    assert bt or not bdm
     dev = A.device()
     R, K = int(A.shape[-2]), int(A.shape[-1])
     O = int(B.shape[-2]) if bt else int(B.shape[-1])
@@ -53,7 +54,7 @@ def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, adm=False):
     acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
     path = ttnn.KernelDescriptor.SourceType.FILE_PATH
     reader = ttnn.KernelDescriptor(kernel_source=str(KDIR / "reader.cpp"), source_type=path, core_ranges=grid,
-                                   compile_time_args=acc(A) + acc(B) + [rb, nb, KR, NRUN, RT, OT, NRB, NCB, int(bt), n, int(adm), q],
+                                   compile_time_args=acc(A) + acc(B) + [rb, nb, KR, NRUN, RT, OT, NRB, NCB, int(bt), n, int(adm), q, int(bdm)],
                                    runtime_args=rt, common_runtime_args=[A.buffer_address(), B.buffer_address()],
                                    config=ttnn.ReaderConfigDescriptor())
     writer = ttnn.KernelDescriptor(kernel_source=str(KDIR / "writer.cpp"), source_type=path, core_ranges=grid,

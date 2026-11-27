@@ -14,7 +14,8 @@ void kernel_main() {
     constexpr bool BT = get_compile_time_arg_val(base + 8);   // B stored [n, O, K]: read tile (o, k) for (k, o)
     constexpr uint32_t NB_K = get_compile_time_arg_val(base + 9);   // digits n (batch stride = n digit planes)
     constexpr bool ADM = get_compile_time_arg_val(base + 10);       // A digit-major [n, Q, RT, KT] (oz_cut's order)
-    constexpr uint32_t QN = get_compile_time_arg_val(base + 11);    // batches Q (for ADM)
+    constexpr uint32_t QN = get_compile_time_arg_val(base + 11);    // batches Q (for ADM / BDM)
+    constexpr bool BDM = get_compile_time_arg_val(base + 12);       // B digit-major [n, Q, OT, KT] (BT only)
     constexpr uint32_t KT = KR * NRUN;
     constexpr uint32_t cb_a = 0, cb_b = 1, cb_acc = 24, cb_tok = 26;
     constexpr uint32_t TB = 2048, TF = 4096;
@@ -41,8 +42,9 @@ void kernel_main() {
                 uint32_t p = get_write_ptr(cb_b);
                 for (uint32_t kk = 0; kk < KR; ++kk)
                     for (uint32_t c = 0; c < NB; ++c, p += TB)
-                        noc_async_read_page(b0 + (BT ? j * OT * KT + (cbk * NB + c) * KT + run * KR + kk
-                                               : j * KT * OT + (run * KR + kk) * OT + cbk * NB + c), sb, p);
+                        noc_async_read_page((BDM ? (j * QN + q) * OT * KT + (cbk * NB + c) * KT + run * KR + kk :
+                                             b0 + (BT ? j * OT * KT + (cbk * NB + c) * KT + run * KR + kk
+                                               : j * KT * OT + (run * KR + kk) * OT + cbk * NB + c)), sb, p);
                 noc_async_read_barrier();
                 cb_push_back(cb_b, KR * NB);
                 for (uint32_t r = 0; r < RB; ++r) {

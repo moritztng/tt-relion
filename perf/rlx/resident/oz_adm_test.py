@@ -26,5 +26,7 @@ for (q, n, R, K, O, rb, nb) in ((3, 13, 64, 960, 160, 2, 5), (2, 4, 512, 480, 25
                                 nb=nb, bt=True, q=q, adm=True)).numpy()
     ex = np.stack([np.stack([sum(A[j, i].astype(np.float64) @ B[j, k - i].T for i in range(k + 1)) for k in range(n)])
                    for j in range(q)]).reshape(q * n, R, O)
+    S2 = ttnn.to_torch(oz_fused(up(A.transpose(1, 0, 2, 3).reshape(n * q, R, K)), up(B.transpose(1, 0, 2, 3).reshape(n * q, O, K)),
+                                n, rb=rb, nb=nb, bt=True, q=q, adm=True, bdm=True)).numpy()
     print(json.dumps(dict(q=q, n=n, R=R, K=K, O=O, rb=rb, nb=nb, adm_bit_identical=bool((S0 == S1).all()),
-                          exact=bool((S1 == ex).all()))), flush=True)
+                          exact=bool((S1 == ex).all()), adm_bdm_bit_identical=bool((S0 == S2).all()))), flush=True)
