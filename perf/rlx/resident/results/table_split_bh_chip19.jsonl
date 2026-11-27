@@ -1,0 +1,2 @@
+{"O_tab": 512, "K": 98304, "q": 8, "own": 160, "kchunk": 6144, "bit_exact": true, "sec": 0.0221, "ms_per_particle": 2.768, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "1.24"}
+{"O_tab": 512, "K": 24576, "q": 32, "own": 160, "kchunk": 6144, "bit_exact": true, "sec": 0.0203, "ms_per_particle": 0.636, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "1.54"}

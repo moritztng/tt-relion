@@ -24,6 +24,9 @@ if DC:
 LOC_DC_MS_K2400 = 0.2991 + 5.73 / 128
 # measured final route (runs/lp3, --local 1 --lerp 1, s352 stand-in for s360: K 98304, B8 x own 160): per particle
 # proj 21.5 + balance 5.3 + row exp 0.9 + cut 8.3 + product 9.0 + combine 0.1 ms = 45.1 ms all-in device
+SPLIT = "--split" in sys.argv   # final projections as gathers from a 3-piece bf16 fp32 table (needs particles routed
+# to the chip holding their direction's slice: 181 GB/half = 11 GB/chip on 16 chips); measured runs/ts1 2.77 ms vs
+# the 21.5 ms projection per particle at K 98304, bit-exact
 FIN_MS_K98304 = 41.45   # balance computed once per iteration (runs/lp3 rerun); 45.1 with per-batch balance   # local passes from a shared per-half digit table (final stays on proj_lerp: 788 GB/half)
 FINE_S = 1030.0         # fine pass: 0.4e12 px of child projections at PROJ_PX_S + 1.9e13 FLOP (state doc), chip-s
 rows = [l.split("\t") for l in open("results/work_full_s0.tsv") if l[0].isdigit()]
@@ -39,7 +42,10 @@ for r in rows:
         tot[ph] = tot.get(ph, 0) + s
     else:                    # local / final: per-particle product (T padded to 64) + own-orientation projections
         if DC and ph == "fin":   # measured all-in (projection included), scaled by K
-            tot["fin_measured"] = tot.get("fin_measured", 0) + FIN_MS_K98304 * 1e-3 * K / 98304 * NP
+            ms = FIN_MS_K98304 - (21.5 - 2.77 if SPLIT else 0)
+            tot["fin_measured"] = tot.get("fin_measured", 0) + ms * 1e-3 * K / 98304 * NP
+            if SPLIT:   # both halves' tables built once by proj_lerp
+                tot["fin_table"] = 2 * 294912 * Pc / PROJ_PX_S
             continue
         if DC and ph == "loc":
             s = LOC_DC_MS_K2400 * 1e-3 * K / 2400 * (1.17 if Tc > 32 else 1.0) * NP
@@ -53,6 +59,6 @@ for r in rows:
         tot[ph + "_proj"] = tot.get(ph + "_proj", 0) + s
 tot["fine"] = FINE_S
 chip_s = sum(tot.values())
-print(json.dumps(dict(table=TABLE, dc=DC, chips=CH, chip_s={k: round(v) for k, v in tot.items()}, total_chip_s=round(chip_s),
+print(json.dumps(dict(table=TABLE, dc=DC, split=SPLIT, chips=CH, chip_s={k: round(v) for k, v in tot.items()}, total_chip_s=round(chip_s),
                       per_chip_s=round(chip_s / CH, 1),
                       per_chip_by_phase={k: round(v / CH, 1) for k, v in tot.items()})))
