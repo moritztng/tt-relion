@@ -65,7 +65,16 @@ class _Ttnn:
         return out
 
     def oz_upload(self, runs, n):
-        return self._digits(runs, n)
+        """runs [nc, O, 480] -> (A, O, Op): the n lhs digits stacked by rows, A [nc, n * Op, 480] bf16, row block i
+        = digit i, O padded to a whole tile so every block starts on a tile row."""
+        o = runs.shape[1]
+        op = -(-o // 32) * 32
+        if op > o:
+            runs = np.pad(runs, ((0, 0), (0, op - o), (0, 0)))
+        d = self._digits(runs, n)
+        a = self.ttnn.concat(d, 1)
+        self.free(d)
+        return a, o, op
 
     def _tree_sum(self, c):
         """fp32 [nc, O, T] -> [1, O, T] by pairwise elementwise adds (exact: integer sums < 2^24)."""
@@ -82,26 +91,39 @@ class _Ttnn:
         return c
 
     def oz_mm(self, a, rhs, n):
-        """a: n lhs digit tensors [nc, O, 480]; rhs runs [nc, 480, T] fp32 -> n float64 [O, T] diagonal sums."""
+        """a = oz_upload(...); rhs runs [nc, 480, T] fp32 -> n float64 [O, T], sum s = sum_{i+j=s} a_i . b_j.
+
+        One matmul per rhs digit j gives a_r . b_j for every r in row block r (the blocks with r + j >= n are
+        thrown away: n^2 small products instead of n(n+1)/2, in n dispatches instead of n(n+1)/2). The diagonal
+        sums are Horner shifts: acc_j = M_j + (acc_{j+1} moved down one block), so block s of acc_0 is sum s.
+        Every value stays an integer below 2^24 (the old per-pair path's bound), so the result is the same."""
         ttnn = self.ttnn
         if not hasattr(self, "lofi"):
             self.lofi = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi, math_approx_mode=False,
                                                          fp32_dest_acc_en=True, packer_l1_acc=True)
-        b, out = self._digits(rhs, n), []
-        for s in range(n):
-            acc = None
-            for i in range(s + 1):
-                c = ttnn.matmul(a[i], b[s - i], compute_kernel_config=self.lofi, dtype=ttnn.float32)
-                if acc is not None:
-                    c2 = ttnn.add(acc, c)
-                    ttnn.deallocate(acc), ttnn.deallocate(c)
-                    c = c2
-                acc = c
-            acc = self._tree_sum(acc)
-            out.append(self.torch.squeeze(ttnn.to_torch(acc), 0).double().numpy())
-            ttnn.deallocate(acc)
+        A, o, op = a
+        b = self._digits(rhs, n)
+        nc, t = rhs.shape[0], rhs.shape[2]
+        z = acc = None
+        for j in range(n - 1, -1, -1):
+            m = ttnn.matmul(A, b[j], compute_kernel_config=self.lofi, dtype=ttnn.float32)
+            if acc is not None:
+                if z is None:
+                    z = ttnn.zeros([nc, op, t], dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=self.dev)
+                top = ttnn.slice(acc, [0, 0, 0], [nc, (n - 1) * op, t])
+                sh = ttnn.concat([z, top], 1)
+                m2 = ttnn.add(m, sh)
+                for x in (m, acc, top, sh):
+                    ttnn.deallocate(x)
+                m = m2
+            acc = m
+        if z is not None:
+            ttnn.deallocate(z)
         self.free(b)
-        return out
+        acc = self._tree_sum(acc)
+        out = ttnn.to_torch(acc).double().numpy().reshape(n, op, t)[:, :o]
+        ttnn.deallocate(acc)
+        return list(out)
 
     # ---- projection on the chip (cross.py "proj" requests) ----
     # The model is kept as a corner table: row v holds the 2x2x2 neighbours of voxel v (16 fp32, column
