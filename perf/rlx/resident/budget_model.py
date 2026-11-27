@@ -15,19 +15,37 @@ PROD = dict(R=3328, O=4096, K=2400, oz=0.1721, proj=0.0124, op=0.0051, rb=0.0087
 LOC_MS_PER_K2400 = 0.236
 PROJ_PX_S = 390e6       # proj_lerp, results/proj_lerp_bh_chip16.jsonl (389-392M px/s)
 GATHER_US_K8160 = 168.9  # bf16 digit-table row gather per particle (n13 x 160 rows), results/table_gather_digits_bh_chip16.jsonl
+FROM = sys.argv[sys.argv.index("--from-dc") + 1] if "--from-dc" in sys.argv else None
+if FROM:
+    sys.argv.append("--dc")
 TABLE = "--table" in sys.argv or "--dc" in sys.argv
 DC = "--dc" in sys.argv   # rates measured with 5 chips running at once (results/devcell_dc2, worst chip, AICLK 1350)
 if DC:
     PROD.update(oz=0.1723, rb=0.0114, sig=0.0170)
+if FROM:   # worst chip of a devcell.sh run: global timing_warm, local table, final lerp
+    import glob
+    G_, L_, F_ = [], [], []
+    for fn in glob.glob(f"{FROM}/out_*.jsonl"):
+        for ln in open(fn):
+            r = json.loads(ln)
+            if "timing_warm" in r and r.get("R") == 3328:
+                G_.append(r["timing_warm"])
+            elif r.get("arm") == "LOCAL timing_warm":
+                (F_ if "proj" in r["t"] else L_).append(r)
+    PROD.update({k: max(g[kk] for g in G_) for k, kk in (("oz", "cut_oz_combine"), ("proj", "proj"), ("op", "particle_op"),
+                                                           ("rb", "readback"), ("sig", "host_sig"))})
+    LOC_FROM = max(r["ms_per_particle_device"] + r["t"]["readback"] / r["B"] * 1e3 for r in L_)
+    FIN_FROM = max(r["ms_per_particle_device"] + r["t"]["readback"] / r["B"] * 1e3 for r in F_)
+    AICLK_FROM = (min(r.get("aiclk_min", 0) for r in L_ + F_), len(G_), len(L_), len(F_))
 # dc2 local pass all-in per particle (gather + particle cut + q-batched product + combine + readback), B128 x own
 # 160, T 13 padded to 32, K 2400: 0.2991 + 0.0057 / 128 * 1e3 ms; T padded to 64 costs 1.17x (runs/loc1 rb2 vs rb1)
-LOC_DC_MS_K2400 = 0.2991 + 5.73 / 128
+LOC_DC_MS_K2400 = LOC_FROM if FROM else 0.2991 + 5.73 / 128
 # measured final route (runs/lp3, --local 1 --lerp 1, s352 stand-in for s360: K 98304, B8 x own 160): per particle
 # proj 21.5 + balance 5.3 + row exp 0.9 + cut 8.3 + product 9.0 + combine 0.1 ms = 45.1 ms all-in device
 SPLIT = "--split" in sys.argv   # final projections as gathers from a 3-piece bf16 fp32 table (needs particles routed
 # to the chip holding their direction's slice: 181 GB/half = 11 GB/chip on 16 chips); measured runs/ts1 2.77 ms vs
 # the 21.5 ms projection per particle at K 98304, bit-exact
-FIN_MS_K98304 = 41.45   # balance computed once per iteration (runs/lp3 rerun); 45.1 with per-batch balance   # local passes from a shared per-half digit table (final stays on proj_lerp: 788 GB/half)
+FIN_MS_K98304 = FIN_FROM if FROM else 41.45   # balance computed once per iteration (runs/lp3 rerun); 45.1 with per-batch balance
 FINE_S = 1030.0 if "--dc" not in sys.argv else 0.4e12 * 0.0236813 / (16 * 0 + 672 * 7168)  # fine pass chip-s:
 # 0.4e12 child-projection px over the job (state doc) x the measured all-in per-px cost of the per-particle lerp
 # route at the fine-pass shape (runs/fp1: s134, own 672, 23.68 ms/particle = 4.92 ns/px incl. product)
@@ -61,6 +79,6 @@ for r in rows:
         tot[ph + "_proj"] = tot.get(ph + "_proj", 0) + s
 tot["fine"] = FINE_S
 chip_s = sum(tot.values())
-print(json.dumps(dict(table=TABLE, dc=DC, split=SPLIT, chips=CH, chip_s={k: round(v) for k, v in tot.items()}, total_chip_s=round(chip_s),
+print(json.dumps(dict(table=TABLE, dc=DC, split=SPLIT, from_dc=FROM, aiclk_min_nG_nL_nF=AICLK_FROM if FROM else None, chips=CH, chip_s={k: round(v) for k, v in tot.items()}, total_chip_s=round(chip_s),
                       per_chip_s=round(chip_s / CH, 1),
                       per_chip_by_phase={k: round(v / CH, 1) for k, v in tot.items()})))
