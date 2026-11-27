@@ -163,10 +163,14 @@ class _Server:
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
         self.shm = None
+        self.lhs_key = None                 # key of the lhs this server's chip holds
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
 
-    def matmul(self, lhs, rhs):
-        """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip."""
+    def matmul(self, lhs, rhs, lhs_key=None):
+        """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip.
+
+        lhs_key: keep lhs on the chip under this key; a later call with the same key skips the upload.
+        """
         from multiprocessing import shared_memory
         nc, m, kc = lhs.shape
         n = rhs.shape[2]
@@ -179,15 +183,20 @@ class _Server:
                 self.shm = shared_memory.SharedMemory(create=True, size=need)
             t0 = time.time()
             buf = np.ndarray((need // 4,), np.float32, self.shm.buf)
-            buf[:lhs.size] = lhs.reshape(-1)
+            if lhs_key is None or lhs_key != self.lhs_key:
+                buf[:lhs.size] = lhs.reshape(-1)
             buf[lhs.size:lhs.size + rhs.size] = rhs.reshape(-1)
             t1 = time.time()
-            self.p.stdin.write(json.dumps({"shm": self.shm.name, "shape": [nc, m, kc, n], "client": self.c},
-                                          separators=(",", ":")) + "\n")
+            req = {"shm": self.shm.name, "shape": [nc, m, kc, n], "client": self.c}
+            if lhs_key is not None:
+                req["lhs_key"] = lhs_key
+            self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             self.p.stdin.flush()
             if self.p.stdout.readline().strip() != "ok":
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
             t2 = time.time()
+            if lhs_key is not None:
+                self.lhs_key = lhs_key
             out = buf[lhs.size + rhs.size:].reshape(nc, m, n).copy()
             del buf
             c = self.c
@@ -198,7 +207,7 @@ class _Server:
         return out
 
 
-def _matmul(lhs, rhs):
+def _matmul(lhs, rhs, lhs_key=None):
     """On whichever of this rank's chips is idle. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
     (one server each), so fewer ranks, and so less host memory, can still drive every chip."""
     global _free
@@ -214,7 +223,7 @@ def _matmul(lhs, rhs):
     s = _free.get()
     try:
         _tl.srv = s
-        return s.matmul(lhs, rhs)
+        return s.matmul(lhs, rhs, lhs_key)
     finally:
         _free.put(s)
 
@@ -242,7 +251,7 @@ def _bf16_split(t, a, k):
     return parts + [a]
 
 
-def _device_cross(t, ref, shw):
+def _device_cross(t, ref, shw, ref_key=None):
     """C[o, t] = sum_p ref[o, p] * shw[t, p] on the chip, fp32 in, fp32 accumulate.
 
     ref [O, K] and shw [T, K] are real (real and imaginary parts concatenated along K). Both are
@@ -251,7 +260,18 @@ def _device_cross(t, ref, shw):
     and output column block j collects b_j against every a_i with i + j < _SPLIT.
     """
     k, n, kk = _SPLIT, shw.shape[0], ref.shape[1]
-    lhs = t.cat(_bf16_split(t, ref, k), 1)
+    kc = _KCHUNK if _KCHUNK > 0 else k * kk
+    nc = -(-(k * kk) // kc)
+    pad = nc * kc - k * kk
+    lhs = _lhscache.get(ref_key) if ref_key is not None else None
+    if lhs is None:          # ref_key: the same ref recurs (a coarse iteration), so split it once and keep it on chip
+        lhs = t.cat(_bf16_split(t, ref, k), 1)
+        if pad:
+            lhs = t.nn.functional.pad(lhs, (0, pad))
+        lhs = lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous().numpy()
+        if ref_key is not None:
+            _lhscache.clear()
+            _lhscache[ref_key] = lhs
     bs = _bf16_split(t, shw, k)
     rhs = t.zeros(k * kk, k * n, dtype=t.float32)
     for i in range(k):
@@ -260,15 +280,10 @@ def _device_cross(t, ref, shw):
     # With exact products the chip still loses bits in accumulation, so K is cut into _KCHUNK runs,
     # each its own batch entry, summed on the host in float64. Measured at box 64 (parity_cross.py):
     # max |d2 error| 0.54 unchunked, 0.35 at 256, 0.25 at 64; fp32 torch is 0.005.
-    kc = _KCHUNK if _KCHUNK > 0 else lhs.shape[1]
-    nc = -(-lhs.shape[1] // kc)
-    pad = nc * kc - lhs.shape[1]
     if pad:
-        lhs = t.nn.functional.pad(lhs, (0, pad))
         rhs = t.nn.functional.pad(rhs, (0, 0, 0, pad))
-    lhs = lhs.reshape(lhs.shape[0], nc, kc).permute(1, 0, 2).contiguous()
     rhs = rhs.reshape(nc, kc, rhs.shape[1])
-    out = _matmul(lhs.numpy(), rhs.numpy())
+    out = _matmul(lhs, rhs.numpy(), None if ref_key is None else ref_key.hex())
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 
@@ -456,6 +471,7 @@ def stats():
 
 # ---- batch entry: one call per particle batch (the resident E-step's C++ call) ----
 
+_lhscache = {}       # ref key -> the chip-layout split of that ref (_device_cross)
 _refcache = {}       # (model key, euler hash) -> (ref_r, ref_i) for the shared coarse set
 
 
@@ -475,7 +491,7 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom):
         for o0 in range(0, eul.shape[0], _DEV_CHUNK):
             a, b = _project(t, mdl, x, y, eul[o0:o0 + _DEV_CHUNK], *geom)
             rr.append(a), ri.append(b)
-        hit = _refcache[key] = (t.cat(rr), t.cat(ri))
+        hit = _refcache[key] = (t.cat(rr), t.cat(ri), hashlib.sha256(repr(key).encode()).digest())
     return hit
 
 
@@ -497,7 +513,7 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     x = (pix % imgX).to(t.float32)
     yi = pix // imgX
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
-    ref_r, ref_i = _shared_refs(t, mdl, eul, x, y,
+    ref_r, ref_i, ref_key = _shared_refs(t, mdl, eul, x, y,
                                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
     w = t.from_numpy(np.asarray(corr, np.float32)) * 0.5                      # [N, P]
     ir, ii = t.from_numpy(np.asarray(img_r, np.float32)), t.from_numpy(np.asarray(img_i, np.float32))
@@ -512,7 +528,7 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     shw = t.cat([sh_r * w[:, None], sh_i * w[:, None]], -1).reshape(n * T, -1)       # [N*T, 2P]
     refc = t.cat([ref_r, ref_i], 1)                                                  # [O, 2P]
     if _BACKEND == "ttnn":
-        cross = _device_cross(t, refc, shw).double()                                  # [O, N*T]
+        cross = _device_cross(t, refc, shw, ref_key).double()                                  # [O, N*T]
     else:
         cross = (refc.double() @ shw.double().T)
     cross = cross.reshape(-1, n, T).permute(1, 0, 2)                                  # [N, O, T]

@@ -8,3 +8,11 @@ A: one device call per particle. B: TT_RELION_BATCH=8 (TT_RELION_BATCH_WAIT_MS=5
 - Wall 38.6 s (A) vs 34.5 s (B). The run is dominated by startup, so this is not a perf number.
 - AICLK on chips 16-23 sampled during the run: up to 1350 MHz; load1 15.5 (A), 8.8 (B).
 - Neither arm fell back to the CPU path (no "TTBridge: ... raised").
+
+## Reference projections kept on chip (pass 10, 23:02Z)
+
+The coarse batch path now uploads its split reference projections once per iteration (device_server
+`lhs_key`) and ships only particle operands after that. B vs A: 0 of 400 data.star rows differ.
+Per-chip upload time 0.52-0.66 s -> 0.26-0.30 s (TTDEV up_s). The chip is busy ~2 s per rank against
+~8-9 s of host-side coarse work (C_s), and readback (down_s ~1.2-1.3 s) is the largest device term.
+AICLK up to 1350 MHz during, load1 5.7.

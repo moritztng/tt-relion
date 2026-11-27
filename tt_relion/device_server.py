@@ -6,7 +6,10 @@ bridge starts one of these servers with mpirun's variables removed; it owns the 
 TT_VISIBLE_DEVICES) and does the matmuls.
 
 Protocol, one JSON line per request on stdin, one line back:
-    {"shm": <name>, "shape": [nc, m, kc, n], "client": {...}}  ->  "ok"
+    {"shm": <name>, "shape": [nc, m, kc, n], "client": {...}, "lhs_key": <str, optional>}  ->  "ok"
+"lhs_key" keeps lhs on the chip: a request with the key of the lhs already held skips its upload (the
+bridge does not even write it into the segment), a new key replaces it. The coarse pass keys its
+reference projections by iteration, so a batch ships only its particles.
 "client" carries the bridge's cumulative counters (round trips, copies, bytes); the server only echoes the
 last one in its exit line, so the WALLMAP gets the client side without RELION having to flush anything.
 The shared-memory segment holds lhs [nc, m, kc], rhs [nc, kc, n] and out [nc, m, n], float32, back to back.
@@ -32,6 +35,7 @@ def main():
                                           math_approx_mode=False, fp32_dest_acc_en=True,
                                           packer_l1_acc=True)
     shm = None
+    held_key, held = None, None
     t_open, calls, client = time.time(), 0, {}
     up = mm = down = 0.0
     for line in sys.stdin:
@@ -47,7 +51,15 @@ def main():
         lhs = buf[:nc * m * kc].reshape(nc, m, kc)
         rhs = buf[nc * m * kc:nc * m * kc + nc * kc * n].reshape(nc, kc, n)
         out = buf[nc * m * kc + nc * kc * n:].reshape(nc, m, n)
-        a = ttnn.from_torch(torch.from_numpy(lhs), dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
+        key = req.get("lhs_key")
+        if key is not None and key == held_key:
+            a = held
+        else:
+            a = ttnn.from_torch(torch.from_numpy(lhs), dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
+            if key is not None:
+                if held is not None:
+                    ttnn.deallocate(held)
+                held_key, held = key, a
         b = ttnn.from_torch(torch.from_numpy(rhs), dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=dev)
         ttnn.synchronize_device(dev)
         t1 = time.time()
@@ -55,7 +67,8 @@ def main():
         ttnn.synchronize_device(dev)
         t2 = time.time()
         out[...] = ttnn.to_torch(c).numpy()
-        ttnn.deallocate(a)
+        if a is not held:
+            ttnn.deallocate(a)
         ttnn.deallocate(b)
         ttnn.deallocate(c)
         del lhs, rhs, out, buf
