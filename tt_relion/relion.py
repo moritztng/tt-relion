@@ -344,6 +344,21 @@ def _device_cross(t, ref, shw, ref_key=None):
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 
+def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, geom, shared):
+    """diff2 [N, O, T] from the resident chip op. shared: the orientation set is the iteration's (a global coarse
+    pass), so the chip keeps its projections; otherwise it is this call's own and is used once."""
+    import hashlib
+    mdlX, mdlY, mdlZ = geom[:3]
+    model = [hashlib.sha256(repr(_model_key(mdl_mv)).encode()).hexdigest(), *geom, mdlX * mdlY * mdlZ]
+    f32 = lambda a: np.asarray(a, np.float32)  # noqa: E731
+    s = _server()
+    try:
+        return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty),
+                    model[0] + hashlib.sha256(eul.tobytes()).hexdigest() if shared else None)
+    finally:
+        _free.put(s)
+
+
 def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                  mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                  padding_factor, imgX, imgY,
@@ -353,6 +368,15 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     This is the body of RELION's diff2_coarse_2D and, entry for entry, of diff2_fine_2D as well:
     the fine kernel differs only in which entries it is asked for and in the constant it adds.
     """
+    if _RESIDENT and _BACKEND == "ttnn":
+        row = lambda mv: np.frombuffer(mv, dtype=np.float32)[None]  # noqa: E731
+        pix = np.arange(image_size)
+        yi = pix // imgX
+        return _resident_d2(mdl_mv, np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9),
+                            (pix % imgX).astype(np.float32), np.where(yi > maxR, yi - imgY, yi).astype(np.float32),
+                            row(re_mv), row(im_mv), row(corr_mv), row(tx_mv), row(ty_mv),
+                            (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor),
+                            shared=tag == "C").reshape(-1)
     mdl = t.from_numpy(np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy())
     eul = t.from_numpy(np.frombuffer(eul_mv, dtype=np.float32)
                        .reshape(orientation_num, 9).copy())
@@ -573,18 +597,8 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     yi = pix // imgX
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
     if _RESIDENT and _BACKEND == "ttnn":
-        import hashlib
-        model = [hashlib.sha256(repr(_model_key(mdl)).encode()).hexdigest(), mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
-                 maxR2_padded, padding_factor, mdlX * mdlY * mdlZ]
-        e = eul.numpy()
-        s = _server()
-        try:
-            return s.d2(mdl, model, e, x.numpy(), y.numpy(), np.asarray(img_r, np.float32),
-                        np.asarray(img_i, np.float32), np.asarray(corr, np.float32) * 0.5,
-                        np.asarray(tx, np.float32), np.asarray(ty, np.float32),
-                        model[0] + hashlib.sha256(e.tobytes()).hexdigest())
-        finally:
-            _free.put(s)
+        return _resident_d2(mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty,
+                            (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared=True)
     ref_r, ref_i, ref_a2, ref_key = _shared_refs(t, mdl, eul, x, y,
                                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
     w = t.from_numpy(np.asarray(corr, np.float32)) * 0.5                      # [N, P]
