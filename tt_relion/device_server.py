@@ -17,6 +17,10 @@ import numpy as np
 # issue_s (host time to enqueue the phase) and wait_s (then until the chip is done). Instrument only: the syncs
 # remove the overlap a normal call has, so read the split, not the sum, against an unsynced warm call.
 PHASES = os.environ.get("TT_RELION_PHASES") == "1"
+# Where the Ozaki result is untilized before it leaves the chip: "host" (to_torch on the tile layout) or
+# "device" (to_layout ROW_MAJOR on the chip, then a plain read). Every value is an integer below 2^24, so the
+# device path is only correct if its untilize keeps all 24 fp32 mantissa bits; ozaki_bridge_check's sha says.
+UNTILIZE = os.environ.get("TT_RELION_UNTILIZE", "host")
 
 
 class _Ttnn:
@@ -154,7 +158,12 @@ class _Ttnn:
         self._mark("mm_chain")
         acc = self._tree_sum(acc)
         self._mark("tree")
-        out = ttnn.to_torch(acc).double().numpy().reshape(op, n, tp).transpose(1, 0, 2)[:, :o, :t]
+        if UNTILIZE == "device":
+            rm = ttnn.to_layout(acc, ttnn.ROW_MAJOR_LAYOUT)
+            ttnn.deallocate(acc)
+            acc = rm
+        # fp32 views: oz_combine casts each sum to float64 itself, so no float64 copy of the whole block here
+        out = ttnn.to_torch(acc).numpy().reshape(op, n, tp).transpose(1, 0, 2)[:, :o, :t]
         ttnn.deallocate(acc)
         self._mark("download")
         if PHASES:

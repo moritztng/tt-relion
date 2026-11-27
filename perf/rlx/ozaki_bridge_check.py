@@ -1,9 +1,11 @@
 """The bridge's cross term with TT_RELION_OZAKI on vs off: d2 error vs float64 and warm s/call, through the real
 server loop (tt_relion/cross.py). Stub server (numpy, exact digit sums) by default; --chip N uses the device server.
     TT_RELION_PYTHON=<python> python ozaki_bridge_check.py --s 146 --O 256 --T 84 [--chip N] [--ns 0,14]
+TT_RELION_UNTILIZE=device|host picks where the result is untilized; sha (of C) compares two arms bitwise.
 TT_RELION_PHASES=1 in the environment adds the device server's per-phase split (TTPHASES line on stderr).
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -62,5 +64,6 @@ for n in map(int, a.ns.split(",")):
     srv.shm.close(), srv.shm.unlink()
     e = np.abs(ref2[:, None] + sh2[None, :] - 2 * C - d64)
     print(json.dumps(dict(s=a.s, O=a.O, T=a.T, ozaki=n, chip=a.chip, err_max=float(e.max()),
-                          err_near=float(e[near].max()), first_s=round(tim[0], 4),
+                          err_near=float(e[near].max()), sha=hashlib.sha1(np.ascontiguousarray(C).tobytes()).hexdigest()[:12],
+                          untilize=os.environ.get("TT_RELION_UNTILIZE", "host"), first_s=round(tim[0], 4),
                           warm_s=round(float(np.median(tim[1:])), 4), aiclk_min=cl[0], aiclk_med=cl[1])), flush=True)
