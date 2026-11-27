@@ -110,12 +110,15 @@ print("chip=%s s=%d O=%d T=%d  d2 max %.4g | err vs f64: given %.3g  devproj %.3
 if a.reps:
     import threading
     import time
+    import subprocess
     clk, run = [], [True]
+    # The chip id is a UMD (PCI-order) id; the clock lives on the device node it opens.
+    node = a.chip and subprocess.check_output([os.path.join(os.path.dirname(__file__), "ttvd_nodes.sh"), str(a.chip)], text=True).strip()
 
     def sample():
         while run[0]:
             try:
-                clk.append(int(open("/sys/class/tenstorrent/tenstorrent!%s/tt_aiclk" % a.chip).read().split()[0]))
+                clk.append(int(open("/sys/class/tenstorrent/tenstorrent!%s/tt_aiclk" % node).read().split()[0]))
             except (OSError, ValueError, TypeError):
                 pass
             time.sleep(0.1)

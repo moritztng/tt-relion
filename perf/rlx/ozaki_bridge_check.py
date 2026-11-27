@@ -6,6 +6,7 @@ TT_RELION_PHASES=1 in the environment adds the device server's per-phase split (
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -50,7 +51,8 @@ for n in map(int, a.ns.split(",")):
     tim = []
     for rep in range(a.reps + 1):
         if rep == 1 and a.chip is not None:
-            clk = Clock([int(a.chip)])
+            node = subprocess.check_output([os.path.join(os.path.dirname(__file__), "ttvd_nodes.sh"), str(a.chip)], text=True)
+            clk = Clock([int(node)])   # the chip id is a UMD (PCI-order) id, the clock lives on its device node
         t0 = time.time()
         C = srv.cross(lambda: ref, a.O, shw, "k", 1, 0)     # rep 0 ships and keeps the reference
         tim.append(time.time() - t0)
