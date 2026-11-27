@@ -1,0 +1,8 @@
+start 2026-11-27T16:24:35Z load: 1.55 3.43 4.61 2/970 2178614
+{"arm": "gather_tiled", "N": 8000000, "C": 64, "rows": 1048576, "s": 0.00231, "Mrows_per_s": 453.7, "GBps": 58.1, "aiclk_min": 1350, "aiclk_med": 1350}
+{"arm": "embedding_tile", "N": 8000000, "C": 64, "rows": 1048576, "s": 0.00265, "Mrows_per_s": 395.1, "GBps": 50.6, "aiclk_min": 1350, "aiclk_med": 1350}
+{"arm": "gather_tiled", "N": 8000000, "C": 32, "rows": 1048576, "s": 0.00214, "Mrows_per_s": 489.9, "GBps": 31.4, "aiclk_min": 1350, "aiclk_med": 1350}
+{"arm": "embedding_tile", "N": 8000000, "C": 32, "rows": 1048576, "s": 0.0025, "Mrows_per_s": 420.3, "GBps": 26.9, "aiclk_min": 1350, "aiclk_med": 1350}
+{"arm": "gather_tiled", "N": 8000000, "C": 64, "rows": 4194304, "s": 0.009, "Mrows_per_s": 466.2, "GBps": 59.7, "aiclk_min": 1350, "aiclk_med": 1350}
+{"arm": "embedding_tile", "N": 8000000, "C": 64, "rows": 4194304, "s": 0.01041, "Mrows_per_s": 402.7, "GBps": 51.6, "aiclk_min": 1350, "aiclk_med": 1350}
+end 2026-11-27T16:24:51Z load: 1.65 3.36 4.57 2/970 2179391
