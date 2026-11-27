@@ -47,6 +47,12 @@ _CHECK = os.environ.get("TT_RELION_CHECK", "") not in ("", "0")
 # TT_RELION_DEV_CHUNK: orientations per device matmul. Larger amortises the launch, smaller bounds
 # the host copy of the projected references.
 _DEV_CHUNK = int(os.environ.get("TT_RELION_DEV_CHUNK", "1024"))
+# TT_RELION_FINE_CALL_MB: host bytes one fine chunk may hold while it builds its operand. A fine chunk
+# costs ~40 bytes per orientation and pixel (the float64 copy, |ref|^2, its weighted product, the shared
+# memory copy), and the final iteration runs the fine pass at Nyquist: at box 360 a 1024-orientation
+# chunk held ~2.7 GB per --j thread and OOM-killed the dev cell's last iteration on a 32-chip Galaxy.
+# The coarse pass is never near this size, so its chunks (and its cache keys) stay _DEV_CHUNK.
+_FINE_CALL_MB = int(os.environ.get("TT_RELION_FINE_CALL_MB", "1024"))
 _FIDELITY = os.environ.get("TT_RELION_FIDELITY", "HiFi3")
 _KCHUNK = int(os.environ.get("TT_RELION_KCHUNK", "256"))
 # TT_RELION_OZAKI=<n>: exact-integer cross term with n base-4 digits (Blackhole; 14 meets the accuracy bar
@@ -515,6 +521,8 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         shw_np = t.cat([sh_r * w, sh_i * w], 1).numpy()
         sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * w.double()).sum(-1)
     chunk = _DEV_CHUNK if device else _ORI_CHUNK
+    if device and tag == "F":
+        chunk = max(1, min(chunk, (_FINE_CALL_MB << 20) // (40 * image_size)))
     ckey = _coarse_key(mdl_mv, eul_mv, (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
                                         padding_factor, imgX, imgY, image_size)) if tag == "C" else None
     for o0 in range(0, orientation_num, chunk):
