@@ -73,23 +73,27 @@ class _Ttnn:
             self.ttnn.deallocate(x)
 
     # ---- exact-integer cross term (cross.py TT_RELION_OZAKI) ----
-    _MAGIC = 12582912.0   # 1.5 * 2^23: (x + M) - M rounds to the nearest integer in fp32
-
     def _digits(self, runs, n, tag):
-        """runs fp32 numpy, |x| < 1 -> n bf16 device tensors of balanced base-4 digits (exact fp32 ops on the chip)."""
+        """runs fp32 numpy, |x| < 1 -> n bf16 device tensors of balanced base-4 digits (exact fp32 ops on the chip).
+
+        t_0 = 2x, q_i = round(t_i) (half to even), t_{i+1} = 4 (t_i - q_i). |t_i - q_i| <= 1/2,
+        so the subtraction and the power-of-two scale are exact and t stays O(1): four ops per digit, and the last
+        residual is never formed. Same digits as cross.py's host cut."""
         ttnn, out = self.ttnn, []
-        x = r = self._put(runs)
+        x = self._put(runs)
         self._mark(tag + "_put")
+        t = ttnn.multiply(x, 2.0)
+        ttnn.deallocate(x)
         for i in range(n):
-            t = ttnn.multiply(r, float(2 ** (2 * i + 1)))
-            q = ttnn.subtract(ttnn.add(t, self._MAGIC), self._MAGIC)
+            q = ttnn.round(t, decimals=0)
             out.append(ttnn.typecast(q, ttnn.bfloat16))
-            r2 = ttnn.subtract(r, ttnn.multiply(q, float(2.0 ** -(2 * i + 1))))
-            ttnn.deallocate(t), ttnn.deallocate(q)
-            if r is not x:
-                ttnn.deallocate(r)
-            r = r2
-        ttnn.deallocate(r), ttnn.deallocate(x)
+            if i < n - 1:
+                d = ttnn.subtract(t, q)
+                ttnn.deallocate(t)
+                t = ttnn.multiply(d, 4.0)
+                ttnn.deallocate(d)
+            ttnn.deallocate(q)
+        ttnn.deallocate(t)
         self._mark(tag + "_digits")
         return out
 
