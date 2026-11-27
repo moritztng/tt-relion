@@ -30,18 +30,20 @@ void kernel_main() {
                 for (uint32_t r = 0; r < RB; ++r) {
                     cb_wait_front(cb_a, KR);
                     for (uint32_t g = 0; g < NB; g += OG) {
+                        // odd NB: the last group is one tile wide (a 2-wide group there wrote the next row's tile 0)
+                        const uint32_t og = (g + OG <= NB) ? OG : 1;
                         tile_regs_acquire();
-                        mm_block_init_short(cb_a, cb_b, BT, OG, 1, KR);
+                        mm_block_init_short(cb_a, cb_b, BT, og, 1, KR);
                         reconfig_data_format_srca(cb_acc, cb_b);
-                        for (uint32_t kk = 0; kk < KR; ++kk) matmul_block(cb_a, cb_b, kk, kk * NB + g, 0, BT, OG, 1, KR);
+                        for (uint32_t kk = 0; kk < KR; ++kk) matmul_block(cb_a, cb_b, kk, kk * NB + g, 0, BT, og, 1, KR);
                         reconfig_data_format_srca(cb_b, cb_acc);
                         copy_tile_to_dst_init_short(cb_acc);
-                        for (uint32_t t = 0; t < OG; ++t) copy_tile(cb_acc, r * NB + g + t, OG + t);
+                        for (uint32_t t = 0; t < og; ++t) copy_tile(cb_acc, r * NB + g + t, OG + t);
                         add_binary_tile_init();
-                        for (uint32_t t = 0; t < OG; ++t) add_binary_tile(t, OG + t, t);
+                        for (uint32_t t = 0; t < og; ++t) add_binary_tile(t, OG + t, t);
                         tile_regs_commit();
                         tile_regs_wait();
-                        for (uint32_t t = 0; t < OG; ++t) pack_tile<true>(t, cb_acc, r * NB + g + t);
+                        for (uint32_t t = 0; t < og; ++t) pack_tile<true>(t, cb_acc, r * NB + g + t);
                         tile_regs_release();
                     }
                     cb_pop_front(cb_a, KR);

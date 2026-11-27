@@ -1,0 +1,9 @@
+{"q": 1, "n": 1, "R": 64, "K": 480, "O": 160, "rb": 2, "nb": 5, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 1, "n": 2, "R": 64, "K": 480, "O": 160, "rb": 2, "nb": 5, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 1, "n": 1, "R": 512, "K": 480, "O": 256, "rb": 16, "nb": 8, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 1, "n": 1, "R": 64, "K": 480, "O": 256, "rb": 2, "nb": 8, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 1, "n": 1, "R": 512, "K": 480, "O": 160, "rb": 16, "nb": 5, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 2, "n": 1, "R": 64, "K": 480, "O": 160, "rb": 2, "nb": 5, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 1, "n": 1, "R": 64, "K": 2400, "O": 160, "rb": 2, "nb": 5, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 1, "n": 1, "R": 128, "K": 480, "O": 160, "rb": 4, "nb": 5, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}
+{"q": 1, "n": 1, "R": 64, "K": 480, "O": 128, "rb": 2, "nb": 4, "nbad": 0, "first": [], "rows_bad": [], "cols_bad": []}

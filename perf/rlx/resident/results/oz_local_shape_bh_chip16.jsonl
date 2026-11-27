@@ -1,0 +1,4 @@
+{"q": 4, "n": 13, "R": 64, "K": 2400, "O": 160, "rb": 2, "nb": 5, "exact": true, "sec": 0.0016, "ms_per_particle": 0.394, "digit_TFLOPs": 11.35, "useful_real_TFLOPs": 0.07, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "2.26"}
+{"q": 128, "n": 13, "R": 64, "K": 2400, "O": 160, "rb": 2, "nb": 5, "sec": 0.0302, "ms_per_particle": 0.236, "digit_TFLOPs": 18.98, "useful_real_TFLOPs": 0.117, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "2.22"}
+{"q": 128, "n": 13, "R": 64, "K": 2400, "O": 160, "rb": 1, "nb": 5, "sec": 0.0517, "ms_per_particle": 0.404, "digit_TFLOPs": 11.08, "useful_real_TFLOPs": 0.068, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "2.18"}
+{"q": 64, "n": 13, "R": 64, "K": 8640, "O": 160, "rb": 2, "nb": 5, "sec": 0.0547, "ms_per_particle": 0.854, "digit_TFLOPs": 18.85, "useful_real_TFLOPs": 0.116, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "2.14"}
