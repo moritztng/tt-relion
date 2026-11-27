@@ -7,6 +7,7 @@
 set -u
 R=${RLX_ROOT:?}; runs=$R/runs; mkdir -p "$runs"; here=$(cd "$(dirname "$0")" && pwd)
 export RELION_BIN=$R/relion/build/bin/relion_refine_mpi PYTHONPATH=$(dirname "$(dirname "$here")"):${RLX_SITE:?}
+export TT_RELION_PYTHON=${TT_RELION_PYTHON:-python3}
 export RLX_CHIPS=${RLX_CHIPS:-8} RLX_CHIP_BASE=${RLX_CHIP_BASE:-16} RLX_CHIPS_PER_RANK=1 TT_RELION_PROFILE=1
 n=$((RLX_CHIPS + 1)) j=${RLX_J:-7}
 while [ "$(date +%s)" -lt "${RLX_WAIT_UNTIL:-0}" ]; do sleep 30; done
@@ -20,7 +21,7 @@ stage() { local s=$1; shift; [ -f "$runs/$s/rc" ] && return 0; echo "$(date -u +
 # Stops a stage once run_it<N>_optimiser.star exists (the CPU reference only needs the early walls).
 cap() { local s=$1 it=$2; shift 2; "$@" & local p=$!
   while kill -0 $p 2>/dev/null; do
-    [ -f "$runs/$s/run_it$(printf %03d "$it")_optimiser.star" ] && { sleep 5; pkill -TERM -P $p; sleep 30; kill $p 2>/dev/null; }
+    [ -f "$runs/$s/run_it$(printf %03d "$it")_optimiser.star" ] && { sleep 5; pkill -TERM -f -- "--o $runs/$s/run"; sleep 60; }
     sleep 20; done; wait $p; }
 TT_RELION_BACKEND=ttnn TT_RELION_OZAKI=${RLX_OZAKI:-14} TT_RELION_PROJ_CACHE_MB=4096 \
   stage dev_ttnn_bh "$here/run.sh" "$runs/dev_ttnn_bh" $n $j "${DEV[@]}" --o "$runs/dev_ttnn_bh/run"
