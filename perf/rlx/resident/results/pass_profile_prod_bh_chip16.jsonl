@@ -1,0 +1,7 @@
+{"piece": "cut A 3584x2400", "ms": 3.85, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "11.59"}
+{"piece": "cut B 4096x2400", "ms": 4.43, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "11.59"}
+{"piece": "oz_fused C 3584x2400x4096", "ms": 138.4, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "11.59"}
+{"piece": "oz_fused C prescale", "ms": 150.58, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "11.59"}
+{"piece": "oz_fused N 512x2400x4096", "ms": 20.37, "aiclk_min": 1343, "aiclk_med": 1343, "load1": "11.59"}
+{"piece": "combine C prescaled 3584x4096", "ms": 3.91, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "11.59"}
+{"piece": "combine C raw 3584x4096", "ms": 21.25, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "11.59"}

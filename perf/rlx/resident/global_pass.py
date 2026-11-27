@@ -466,9 +466,10 @@ if not a.nodev:
             return ttnn.concat(out, dim=0)
 
         Ad, Bd = digits(Xa, ea_, Rp, False), digits(Xb, eb_, Op, False)
-        S = oz_fused(Ad, Bd, n, bt=True, prescale=bool(a.fcomb))   # B digits stay [n, O, K]; the unpacker transposes each tile
+        S = oz_fused(Ad, Bd, n, bt=True)   # B digits stay [n, O, K]; the unpacker transposes each tile
         if a.fcomb:   # one SFPU kernel: TwoSum over k and the exact 2^(ea + eb) scale, a single pass over S
-            hi, lo = oz_combine(S, ti(ea_, Rp), ti(eb_, Op), n, prescaled=True)
+            assert int(np.min(ea_)) + int(np.min(eb_)) - 2 * n > -126 and int(np.max(ea_)) + int(np.max(eb_)) < 127
+            hi, lo = oz_combine(S, ti(ea_, Rp), ti(eb_, Op), n)
             return hi[:Ra, :Ob], lo[:Ra, :Ob]
         cs = put(np.ldexp(1.0, np.pad(ea_, (0, Rp - Ra))).reshape(-1, 1))
         rs = put(np.ldexp(1.0, np.pad(eb_, (0, Op - Ob))).reshape(1, -1))

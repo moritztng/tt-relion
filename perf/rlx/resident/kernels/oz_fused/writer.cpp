@@ -9,7 +9,6 @@ void kernel_main() {
     constexpr uint32_t RT = get_compile_time_arg_val(base + 2), OT = get_compile_time_arg_val(base + 3);
     constexpr uint32_t NRB = get_compile_time_arg_val(base + 4), NCB = get_compile_time_arg_val(base + 5);
     constexpr uint32_t NB_K = get_compile_time_arg_val(base + 6);
-    constexpr bool PRE = get_compile_time_arg_val(base + 7);   // write b_k = S_k 2^-(2k+2) (exact) for oz_combine
     constexpr uint32_t cb_acc = 24, cb_done = 25, cb_tok = 26, TF = 4096;
     const auto ss = TensorAccessor(s_args, get_common_arg_val<uint32_t>(0), TF);
     const uint32_t u0 = get_arg_val<uint32_t>(0), nu = get_arg_val<uint32_t>(1);
@@ -17,14 +16,6 @@ void kernel_main() {
     for (uint32_t u = u0; u < u0 + nu; ++u) {
         const uint32_t qk = u / (NRB * NCB), rb = (u / NCB) % NRB, cbk = u % NCB;   // qk = q * n + k
         cb_wait_front(cb_done, 1);
-        if constexpr (PRE) {   // exponent-field subtract: S_k are integers < 2^24, nonzero ones stay normal
-            const uint32_t dk = (2 * (qk % NB_K) + 2) << 23;
-            uint32_t* w = reinterpret_cast<uint32_t*>(acc);
-            for (uint32_t i = 0; i < RB * NB * 1024; ++i) {
-                const uint32_t v = w[i];
-                w[i] = v - (dk & (0u - static_cast<uint32_t>((v << 1) != 0)));
-            }
-        }
         uint32_t p = acc;
         for (uint32_t r = 0; r < RB; ++r)
             for (uint32_t c = 0; c < NB; ++c, p += TF)

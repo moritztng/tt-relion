@@ -16,11 +16,8 @@ KDIR = Path(__file__).resolve().parent / "kernels" / "oz_fused"
 RB, NB, KR = 16, 8, 15
 
 
-def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, prescale=False):
+def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1):
     """bt: B is [n, O, K] (row-major digits of the reference, no transpose needed); the unpacker transposes each tile.
-    prescale: S_k is written as b_k = S_k 2^-(2k+2) (exact; the writer applies it before the store, a short stall
-    per unit that the 14x larger per-word loop in the combine reader would otherwise cost),
-    for oz_combine(prescaled=True).
     q: independent batches in one program (local passes: one small product per pooled orientation set). A is
     [q*n, R, K], B [q*n, K, O] (or [q*n, O, K]), S [q*n, R, O]; batch j owns digit planes j*n .. j*n+n-1."""
     dev = A.device()
@@ -58,7 +55,7 @@ def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, prescale=False):
                                    runtime_args=rt, common_runtime_args=[A.buffer_address(), B.buffer_address()],
                                    config=ttnn.ReaderConfigDescriptor())
     writer = ttnn.KernelDescriptor(kernel_source=str(KDIR / "writer.cpp"), source_type=path, core_ranges=grid,
-                                   compile_time_args=acc(S) + [rb, nb, RT, OT, NRB, NCB, n, int(prescale)], runtime_args=rt,
+                                   compile_time_args=acc(S) + [rb, nb, RT, OT, NRB, NCB, n], runtime_args=rt,
                                    common_runtime_args=[S.buffer_address()], config=ttnn.WriterConfigDescriptor())
     cfg = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi, fp32_dest_acc_en=True)
     modes = [ttnn.UnpackToDestMode.Default] * 64
@@ -73,10 +70,11 @@ def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, prescale=False):
 CDIR = Path(__file__).resolve().parent / "kernels" / "oz_combine"
 
 
-def oz_combine(S, ea, eb, n, prescaled=False):
+def oz_combine(S, ea, eb, n):
     """S fp32 TILE [n, R, O] from oz_fused; ea int32 RM [R/32, 32] row exponents, eb int32 RM [O/32, 32] column
-    exponents. Returns (hi, lo) fp32 TILE [R, O], the df32 of sum_k S_k 2^-(2k+2) 2^(ea[r] + eb[c]): TwoSum on the
-    SFPU in one pass over S (the ttnn chain cost ~6 [R, O] DRAM passes per digit)."""
+    exponents. Returns (hi, lo) fp32 TILE [R, O], the df32 of sum_k S_k 2^-(2k+2) 2^(ea[r] + eb[c]): Horner
+    (H <- 4 H + S_k, exact x4) with TwoSum on the SFPU in one pass over S, then one exact 2^(ea + eb - 2n) scale
+    (the ttnn chain cost ~6 [R, O] DRAM passes per digit). Needs ea + eb - 2n > -126."""
     dev = S.device()
     R, O = int(S.shape[-2]), int(S.shape[-1])
     RT, OT = R // 32, O // 32
@@ -104,7 +102,7 @@ def oz_combine(S, ea, eb, n, prescaled=False):
     acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
     path = ttnn.KernelDescriptor.SourceType.FILE_PATH
     reader = ttnn.KernelDescriptor(kernel_source=str(CDIR / "reader.cpp"), source_type=path, core_ranges=grid,
-                                   compile_time_args=acc(S) + acc(ea) + acc(eb) + [n, RT, OT, int(prescaled)], runtime_args=rt,
+                                   compile_time_args=acc(S) + acc(ea) + acc(eb) + [n, RT, OT], runtime_args=rt,
                                    common_runtime_args=[S.buffer_address(), ea.buffer_address(), eb.buffer_address()],
                                    config=ttnn.ReaderConfigDescriptor())
     writer = ttnn.KernelDescriptor(kernel_source=str(CDIR / "writer.cpp"), source_type=path, core_ranges=grid,

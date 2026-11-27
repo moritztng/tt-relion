@@ -21,13 +21,13 @@ rng = np.random.default_rng(2)
 f32 = np.float32
 
 
-def emul(S, ea, eb, n):
-    H = (S[0] * f32(2.0 ** -2)).astype(f32); L = np.zeros_like(H)
+def emul(S, ea, eb, n):   # same op order as the kernel (Horner, Knuth TwoSum, lo += da, lo += db)
+    H = S[0].astype(f32); L = np.zeros_like(H)
     for k in range(1, n):
-        b = (S[k] * f32(2.0 ** -(2 * k + 2))).astype(f32)
+        H = (H * f32(4)).astype(f32); L = (L * f32(4)).astype(f32); b = S[k]
         s = (H + b).astype(f32); ap = (s - b).astype(f32); da = (H - ap).astype(f32); bp = (s - ap).astype(f32)
         L = (L + da).astype(f32); L = (L + (b - bp).astype(f32)).astype(f32); H = s
-    E = np.ldexp(f32(1.0), (ea.reshape(-1)[:, None] + eb.reshape(-1)[None, :])).astype(f32)
+    E = np.ldexp(f32(1.0), (ea.reshape(-1)[:, None] + eb.reshape(-1)[None, :] - 2 * n)).astype(f32)
     return (H * E).astype(f32), (L * E).astype(f32)
 
 
