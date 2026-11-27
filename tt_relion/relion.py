@@ -68,7 +68,7 @@ _DUMP = os.environ.get("TT_RELION_DUMP", "")
 _DUMP_N = int(os.environ.get("TT_RELION_DUMP_N", "1"))
 _dumped = [0]
 _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
-          "proj_hit": 0, "proj_miss": 0, "devproj": 0}
+          "proj_hit": 0, "proj_miss": 0, "ref_asked": 0, "devproj": 0}
 # TT_RELION_PROJ_CACHE_MB: cap on kept coarse references (device path), per rank on the host and per
 # chip on the device. In a global search every particle's coarse pass asks for the same orientation set
 # against the same reference, so the projection and its left operand are per-iteration constants:
@@ -370,7 +370,7 @@ def _progress():
     for s in _srv:
         for k, v in list(s.c.items()):     # copy: other threads insert keys
             tot[k] = tot.get(k, 0) + v
-    keys = ("handled", "fine_handled", "proj_hit", "proj_miss")
+    keys = ("handled", "fine_handled", "proj_hit", "proj_miss", "ref_asked")
     return (f"tt_relion pid {os.getpid()} " + " ".join(f"{k} {_stats[k]}" for k in keys)
             + f" cached_mb {_pc['bytes'] >> 20} "
             + " ".join(f"{k} {tot.get(k, 0):.1f}" for k in ("C_s", "F_s", "rt_s", "copy_s", "calls")))
@@ -423,6 +423,24 @@ def _coarse_refs(t, key, o0, project):
     return ref, rr, None
 
 
+def _coarse_key(mdl_mv, eul_mv, geom):
+    """The host cache's name for a coarse call's projections, None where nothing is cached."""
+    if _BACKEND != "ttnn" or _PCACHE_MB <= 0:
+        return None
+    import hashlib
+    return (_model_key(mdl_mv), (hashlib.sha1(eul_mv).digest(),) + tuple(geom) + (_DEV_CHUNK,))
+
+
+def _coarse_cached(key, orientation_num):
+    """True when every chunk of this coarse call is in the host cache under the current reference."""
+    if key is None:
+        return False
+    mkey, ekey = key
+    with _pc_lock:
+        return _pc["model"] == mkey and all((ekey, o0) in _pc["hit"]
+                                            for o0 in range(0, orientation_num, _DEV_CHUNK))
+
+
 def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                  mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                  padding_factor, imgX, imgY,
@@ -465,12 +483,8 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         shw_np = t.cat([sh_r * w, sh_i * w], 1).numpy()
         sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * w.double()).sum(-1)
     chunk = _DEV_CHUNK if device else _ORI_CHUNK
-    ckey = None
-    if device and tag == "C" and _PCACHE_MB > 0:
-        import hashlib
-        ckey = (_model_key(mdl_mv),
-                (hashlib.sha1(eul_mv).digest(), mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
-                 maxR2_padded, padding_factor, imgX, imgY, image_size, chunk))
+    ckey = _coarse_key(mdl_mv, eul_mv, (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
+                                        padding_factor, imgX, imgY, image_size)) if tag == "C" else None
     for o0 in range(0, orientation_num, chunk):
         o1 = min(o0 + chunk, orientation_num)
         if given is not None:
@@ -550,8 +564,15 @@ def _marshal(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, orientation_nu
 def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
                  mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                  padding_factor, imgX, imgY,
-                 orientation_num, translation_num, image_size):
-    """runDiff2KernelCoarse, 3D reference and 2D data. Accumulates onto out_mv."""
+                 orientation_num, translation_num, image_size, ref_mv=None, can_ref=False):
+    """runDiff2KernelCoarse, 3D reference and 2D data. Accumulates onto out_mv.
+
+    ref_mv is RELION's own projection of these orientations, laid out as for diff2_fine, or None.
+    A caller that can project (can_ref) calls with None first and gets 2 back, out_mv untouched,
+    unless the host cache holds every projection already: a global search asks every particle
+    for the same orientation set and hits, a local search asks for its own set and projects in
+    C++ instead of in torch under this rank's interpreter.
+    """
     if _BACKEND in ("nullbase", "null"):
         if _BACKEND == "null":
             _marshal(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, orientation_num)
@@ -559,6 +580,13 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         return False
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
+        if can_ref and ref_mv is None and not _coarse_cached(
+                _coarse_key(mdl_mv, eul_mv, (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
+                                             padding_factor, imgX, imgY, image_size)),
+                orientation_num):
+            _stats["ref_asked"] += 1
+            _book("C_s", time.time() - t0)
+            return 2
         t = _torch()
         if _DEVPROJ and _BACKEND == "ttnn":
             _keep_model(mdl_mv, dict(mdlX=mdlX, mdlY=mdlY, mdlZ=mdlZ, mdlInitY=mdlInitY, mdlInitZ=mdlInitZ,
@@ -566,7 +594,7 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                            mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                            padding_factor, imgX, imgY,
-                           orientation_num, translation_num, image_size, "C")
+                           orientation_num, translation_num, image_size, "C", ref_mv=ref_mv)
         _book("C_s", time.time() - t0)
         out = np.frombuffer(out_mv, dtype=np.float32)
         out += acc

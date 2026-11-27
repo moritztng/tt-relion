@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 8b8cd506..97bc14ef 100644
+index 8b8cd50..97bc14e 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -86,6 +86,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
@@ -28,21 +28,45 @@ index 8b8cd506..97bc14ef 100644
      message(STATUS "ALTCPU enabled - Building CPU-accelerated version of RELION")
  elseif(SYCL)
 diff --git a/src/acc/acc_helper_functions_impl.h b/src/acc/acc_helper_functions_impl.h
-index c06a1221..c72627bb 100644
+index c06a122..bf16a60 100644
 --- a/src/acc/acc_helper_functions_impl.h
 +++ b/src/acc/acc_helper_functions_impl.h
-@@ -12,6 +12,10 @@
+@@ -12,6 +12,34 @@
  #include "src/macros.h"
  #include "src/error.h"
  */
 +#ifdef _TT_ENABLED
 +#include "src/acc/tt/tt_bridge.h"
++
++// The reference for orientation_num orientations, projected by RELION's own projector in the
++// calling thread, as the bridge takes it: [orientation_num][2 * image_size], real then imag.
++// Pixels outside the projector's radius stay 0, as RELION's kernels read them.
++static const float *ttProjectRef(AccProjectorKernel &projector, const XFLOAT *eulers,
++                                 long orientation_num, long image_size)
++{
++	thread_local std::vector<float> ref;
++	const long P = image_size;
++	ref.assign((size_t)orientation_num * 2 * P, 0.f);
++	for (long o = 0; o < orientation_num; o++)
++	{
++		const XFLOAT *e = eulers + 9 * o;
++		float *re = ref.data() + 2 * P * o, *im = re + P;
++		for (long p = 0; p < P; p++)
++		{
++			int x = (int)(p % projector.imgX), y = (int)(p / projector.imgX);
++			if (y > projector.maxR)
++				y -= projector.imgY;
++			projector.project3Dmodel(x, y, e[0], e[1], e[3], e[4], e[6], e[7], re[p], im[p]);
++		}
++	}
++	return ref.data();
++}
 +#endif
 +
  #ifdef _CUDA_ENABLED
  	using deviceStream_t = cudaStream_t;
  #elif _HIP_ENABLED
-@@ -366,7 +370,7 @@ void runWavgKernel(
+@@ -366,7 +394,7 @@ void runWavgKernel(
  				stream
  				);
  		else if (projector.mdlZ!=0)
@@ -51,7 +75,7 @@ index c06a1221..c72627bb 100644
  			AccUtilities::kernel_wavg<true,true,false,WAVG_BLOCK_SIZE_REF3D>(
  #else
  			AccUtilities::kernel_wavg<true,true,false,WAVG_BLOCK_SIZE>(
-@@ -392,7 +396,7 @@ void runWavgKernel(
+@@ -392,7 +420,7 @@ void runWavgKernel(
  				stream
  				);
  		else
@@ -60,7 +84,7 @@ index c06a1221..c72627bb 100644
  			AccUtilities::kernel_wavg<true,false,false,WAVG_BLOCK_SIZE_2D>(
  #else
  			AccUtilities::kernel_wavg<true,false,false,WAVG_BLOCK_SIZE>(
-@@ -443,7 +447,7 @@ void runWavgKernel(
+@@ -443,7 +471,7 @@ void runWavgKernel(
  				stream
  				);
  		else if (projector.mdlZ!=0)
@@ -69,7 +93,7 @@ index c06a1221..c72627bb 100644
  			AccUtilities::kernel_wavg<false,true,false,WAVG_BLOCK_SIZE_REF3D>(
  #else
  			AccUtilities::kernel_wavg<false,true,false,WAVG_BLOCK_SIZE>(
-@@ -469,7 +473,7 @@ void runWavgKernel(
+@@ -469,7 +497,7 @@ void runWavgKernel(
  				stream
  				);
  		else
@@ -78,16 +102,20 @@ index c06a1221..c72627bb 100644
  			AccUtilities::kernel_wavg<false,false,false,WAVG_BLOCK_SIZE_2D>(
  #else
  			AccUtilities::kernel_wavg<false,false,false,WAVG_BLOCK_SIZE>(
-@@ -1154,6 +1158,24 @@ void runDiff2KernelCoarse(
+@@ -1154,6 +1182,35 @@ void runDiff2KernelCoarse(
  		bool do_CC,
  		bool data_is_3D)
  {
 +#ifdef _TT_ENABLED
 +	// Whole-tensor altitude: the device gets orientation_num x translation_num x image_size in one
 +	// dispatch. Any shape the bridge declines falls straight through to the code below.
++	// The bridge keeps the projections of an orientation set it has seen before (a global search
++	// asks every particle for the same set); otherwise it asks for them once per call.
 +	if (!do_CC && projector.mdlZ != 0 && !data_is_3D)
 +	{
-+		if (TTBridge::diff2Coarse(
++		const float *ref = nullptr;
++		bool wants_ref = false;
++		auto call = [&]() { return TTBridge::diff2Coarse(ref, &wants_ref,
 +				(const float*)projector.mdlComplex,
 +				projector.mdlX, projector.mdlXY / projector.mdlX, projector.mdlZ,
 +				projector.mdlInitY, projector.mdlInitZ,
@@ -96,14 +124,21 @@ index c06a1221..c72627bb 100644
 +				d_eulers, trans_x, trans_y,
 +				Fimg_real, Fimg_imag, corr_img,
 +				diff2s,
-+				(long)orientation_num, (long)translation_num, (long)image_size))
++				(long)orientation_num, (long)translation_num, (long)image_size); };
++		bool handled = call();
++		if (wants_ref)
++		{
++			ref = ttProjectRef(projector, d_eulers, (long)orientation_num, (long)image_size);
++			handled = call();
++		}
++		if (handled)
 +			return;
 +	}
 +#endif
  	const long unsigned blocks3D = (data_is_3D? D2C_BLOCK_SIZE_DATA3D : D2C_BLOCK_SIZE_REF3D);
  
  	if(!do_CC)
-@@ -1739,7 +1761,7 @@ void runDiff2KernelCoarse(
+@@ -1739,7 +1796,7 @@ void runDiff2KernelCoarse(
  // a single call to diff2_CC_course?
  		// dim3 CCblocks(orientation_num,translation_num);
  		if(data_is_3D)
@@ -112,7 +147,7 @@ index c06a1221..c72627bb 100644
  			AccUtilities::diff2_CC_coarse<true,true,D2C_CC_BLOCK_SIZE_DATA3D>(
  #else
  			AccUtilities::diff2_CC_coarse<true,true,D2C_BLOCK_SIZE_DATA3D>(
-@@ -1760,7 +1782,7 @@ void runDiff2KernelCoarse(
+@@ -1760,7 +1817,7 @@ void runDiff2KernelCoarse(
  				local_sqrtXi2,
  				stream);
  		else if(projector.mdlZ!=0)
@@ -121,7 +156,7 @@ index c06a1221..c72627bb 100644
  			AccUtilities::diff2_CC_coarse<true,false,D2C_CC_BLOCK_SIZE_REF3D>(
  #else
  			AccUtilities::diff2_CC_coarse<true,false,D2C_BLOCK_SIZE_REF3D>(
-@@ -1781,7 +1803,7 @@ void runDiff2KernelCoarse(
+@@ -1781,7 +1838,7 @@ void runDiff2KernelCoarse(
  				local_sqrtXi2,
  				stream);
  		else
@@ -130,7 +165,7 @@ index c06a1221..c72627bb 100644
  			AccUtilities::diff2_CC_coarse<false,false,D2C_CC_BLOCK_SIZE_2D>(
  #else
  			AccUtilities::diff2_CC_coarse<false,false,D2C_BLOCK_SIZE_2D>(
-@@ -1838,6 +1860,44 @@ void runDiff2KernelFine(
+@@ -1838,6 +1895,30 @@ void runDiff2KernelFine(
  		bool do_CC,
  		bool data_is_3D)
  {
@@ -141,24 +176,10 @@ index c06a1221..c72627bb 100644
 +	// orientation: the bridge used to redo it in Python, where it was most of a fine call.
 +	if (!do_CC && projector.mdlZ != 0 && !data_is_3D && TTBridge::fineWanted())
 +	{
-+		thread_local std::vector<float> ref;
-+		const long P = (long)image_size;
 +		const bool own = TTBridge::fineWantsRef();      // false: the bridge projects from the model
-+		ref.assign(own ? (size_t)orientation_num * 2 * P : 0, 0.f);  // outside the radius stays 0
-+		for (long o = 0; own && o < (long)orientation_num; o++)
-+		{
-+			const XFLOAT *e = eulers + 9 * o;
-+			float *re = ref.data() + 2 * P * o, *im = re + P;
-+			for (long p = 0; p < P; p++)
-+			{
-+				int x = (int)(p % projector.imgX), y = (int)(p / projector.imgX);
-+				if (y > projector.maxR)
-+					y -= projector.imgY;
-+				projector.project3Dmodel(x, y, e[0], e[1], e[3], e[4], e[6], e[7], re[p], im[p]);
-+			}
-+		}
 +		if (TTBridge::diff2Fine(
-+				own ? ref.data() : nullptr, (const float*)projector.mdlComplex,
++				own ? ttProjectRef(projector, eulers, (long)orientation_num, (long)image_size) : nullptr,
++				(const float*)projector.mdlComplex,
 +				projector.mdlX, projector.mdlXY / projector.mdlX, projector.mdlZ,
 +				projector.mdlInitY, projector.mdlInitZ,
 +				projector.maxR, projector.maxR2_padded, projector.padding_factor,
@@ -175,7 +196,7 @@ index c06a1221..c72627bb 100644
      long unsigned block_dim = job_num_count;
  
      if(!do_CC)
-@@ -2002,6 +2062,11 @@ void runDiff2KernelFine(
+@@ -2002,6 +2083,11 @@ void runDiff2KernelFine(
  		#endif
      }
  
@@ -188,7 +209,7 @@ index c06a1221..c72627bb 100644
  
  void runCollect2jobs(	int grid_dim,
 diff --git a/src/acc/utilities.h b/src/acc/utilities.h
-index f407bdba..fc67a306 100644
+index f407bdb..fc67a30 100644
 --- a/src/acc/utilities.h
 +++ b/src/acc/utilities.h
 @@ -297,7 +297,7 @@ else
@@ -201,7 +222,7 @@ index f407bdba..fc67a306 100644
  static size_t filterGreaterZeroOnHost(T *in, const size_t sz, T *out)
  {
 diff --git a/src/apps/CMakeLists.txt b/src/apps/CMakeLists.txt
-index 24f2c3e7..ea449d58 100644
+index 24f2c3e..ea449d5 100644
 --- a/src/apps/CMakeLists.txt
 +++ b/src/apps/CMakeLists.txt
 @@ -30,7 +30,7 @@ endif()

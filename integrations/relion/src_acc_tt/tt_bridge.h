@@ -13,7 +13,14 @@ namespace TTBridge
 	// Coarse squared-difference kernel, 3D reference and 2D data.
 	// mdlComplex is the padded Fourier reference, interleaved (re,im) per voxel.
 	// diff2s is [orientation_num][translation_num], inner stride translation_num, ACCUMULATED onto.
+	//
+	// ref is null or RELION's own projection of these orientations, laid out as for diff2Fine. Call
+	// with ref = nullptr first: when the bridge holds no projection of this orientation set it
+	// sets *wants_ref, returns false and leaves diff2s alone, and the caller projects and calls
+	// again. A global search hits the bridge's cache and never projects; a local search projects
+	// here, in the calling thread, instead of in Python under the rank's one interpreter.
 	bool diff2Coarse(
+			const float *ref, bool *wants_ref,
 			const float *mdlComplex,
 			int mdlX, int mdlY, int mdlZ, int mdlInitY, int mdlInitZ,
 			int maxR, int maxR2_padded, float padding_factor,

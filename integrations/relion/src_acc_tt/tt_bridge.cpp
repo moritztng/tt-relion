@@ -148,6 +148,7 @@ namespace TTBridge
 {
 
 bool diff2Coarse(
+		const float *ref, bool *wants_ref,
 		const float *mdlComplex,
 		int mdlX, int mdlY, int mdlZ, int mdlInitY, int mdlInitZ,
 		int maxR, int maxR2_padded, float padding_factor,
@@ -158,6 +159,7 @@ bool diff2Coarse(
 		float *diff2s,
 		long orientation_num, long translation_num, long image_size)
 {
+	*wants_ref = false;
 	if (!ensureReady())
 	{
 		g_declined.fetch_add(1);
@@ -178,19 +180,29 @@ bool diff2Coarse(
 	PyObject *a_corr = PyMemoryView_FromMemory((char*)corr_img,   image_size * f, PyBUF_READ);
 	PyObject *a_out  = PyMemoryView_FromMemory((char*)diff2s,
 	                                           orientation_num * translation_num * f, PyBUF_WRITE);
+	PyObject *a_ref  = ref ? PyMemoryView_FromMemory((char*)ref, orientation_num * 2 * image_size * f, PyBUF_READ)
+	                       : (Py_INCREF(Py_None), Py_None);
 
+	// Trailing (ref, can_ref): diff2_coarse answers 2 for "project these and call again".
 	PyObject *res = nullptr;
-	if (a_mdl && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_out)
-		res = PyObject_CallFunction(g_diff2, "OOOOOOOOiiiiiiifiilll",
+	if (a_mdl && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_out && a_ref)
+		res = PyObject_CallFunction(g_diff2, "OOOOOOOOiiiiiiifiilllOO",
 				a_mdl, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_out,
 				mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
 				(double)padding_factor, imgX, imgY,
-				orientation_num, translation_num, image_size);
+				orientation_num, translation_num, image_size, a_ref, Py_True);
 
 	Py_XDECREF(a_mdl); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
-	Py_XDECREF(a_re);  Py_XDECREF(a_im);  Py_XDECREF(a_corr); Py_XDECREF(a_out);
+	Py_XDECREF(a_re);  Py_XDECREF(a_im);  Py_XDECREF(a_corr); Py_XDECREF(a_out); Py_XDECREF(a_ref);
 
 	bool handled = false;
+	if (res != nullptr && PyLong_Check(res) && PyLong_AsLong(res) == 2 && !ref)
+	{
+		Py_DECREF(res);
+		PyGILState_Release(gil);
+		*wants_ref = true;               // not a decline: the caller comes back with ref
+		return false;
+	}
 	if (res == nullptr)
 	{
 		// A Python-side failure is a bug, not a shape we decline. Print it once and stop trying, so
