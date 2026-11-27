@@ -1,0 +1,27 @@
+sleep until 21:00Z
+21:00:00Z box busy: pids  2543401
+    PID     ELAPSED COMMAND
+2543401       00:25 <home> -m ttfluid.device.run_mesh case 20 --arch bh --mesh 1,1 --layout rcb --l1 0 --wplace 2 --gw 1 --nsh 1 --pa
+21:00:30Z box busy: pids  2543401
+    PID     ELAPSED COMMAND
+2543401       00:56 <home> -m ttfluid.device.run_mesh case 20 --arch bh --mesh 1,1 --layout rcb --l1 0 --wplace 2 --gw 1 --nsh 1 --pa
+21:01:00Z box busy: pids  2543401
+    PID     ELAPSED COMMAND
+2543401       01:26 <home> -m ttfluid.device.run_mesh case 20 --arch bh --mesh 1,1 --layout rcb --l1 0 --wplace 2 --gw 1 --nsh 1 --pa
+21:01:30Z box busy: pids  2544010
+    PID     ELAPSED COMMAND
+2544010       00:11 <home> -m ttfluid.device.run_mesh case 20 --arch bh --mesh 1,1 --layout rcb --l1 0 --wplace 2 --gw 1 --nsh 1 --pa
+21:02:00Z box busy: pids  2544010
+    PID     ELAPSED COMMAND
+2544010       00:41 <home> -m ttfluid.device.run_mesh case 20 --arch bh --mesh 1,1 --layout rcb --l1 0 --wplace 2 --gw 1 --nsh 1 --pa
+21:02:30Z box busy: pids  2544010
+    PID     ELAPSED COMMAND
+2544010       01:11 <home> -m ttfluid.device.run_mesh case 20 --arch bh --mesh 1,1 --layout rcb --l1 0 --wplace 2 --gw 1 --nsh 1 --pa
+21:03:00Z box busy: pids  2544010
+    PID     ELAPSED COMMAND
+2544010       01:41 <home> -m ttfluid.device.run_mesh case 20 --arch bh --mesh 1,1 --layout rcb --l1 0 --wplace 2 --gw 1 --nsh 1 --pa
+21:03:30Z box free; probing 0..31
+healthy: [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ] (32 chips)
+start 2026-11-27T21:04:03Z chips=[0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 ] NG=9 NL=4 load: 2.63 4.12 6.27 1/834 2551421
+end 2026-11-27T21:05:52Z cell_wall_s=109.241383794
+window done 2026-11-27T21:05:52Z
