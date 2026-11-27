@@ -116,16 +116,33 @@ def proj_rhs(shw, p, kc):
     return rhs.reshape(-1, kc, SPLIT * n)
 
 
-def oz_scale(x):
-    """x [R, K] fp32 -> (x / 2^e cut into runs [nc, R, OZ_KC] fp32, e int [R]): |x / 2^e| < 1, exact."""
+def oz_scale(x, kmajor=False):
+    """x [R, K] fp32 -> (x / 2^e cut into runs [nc, R, OZ_KC] fp32, e int [R]): |x / 2^e| < 1, exact.
+
+    kmajor gives the runs as [nc, OZ_KC, R] (the right operand). One pass: a multiply by the fp32 power of two 2^-e is
+    exact like ldexp. 2^-e overflows fp32 for e < -126 (a row of subnormals), so such a row takes a second exact
+    power-of-two multiply."""
     x = np.asarray(x, np.float32)
+    r, k = x.shape
     m = np.abs(x).max(1)
     e = np.where(m > 0, np.frexp(m)[1], 0).astype(np.int32)    # m < 2^e
-    r, k = x.shape
-    nc = -(-k // OZ_KC)
-    y = np.zeros((r, nc * OZ_KC), np.float32)
-    y[:, :k] = np.ldexp(x, -e[:, None])
-    return np.ascontiguousarray(y.reshape(r, nc, OZ_KC).transpose(1, 0, 2)), e
+    s = np.ldexp(np.float32(1), -np.maximum(e, -126)).astype(np.float32)
+    nc, full = -(-k // OZ_KC), k // OZ_KC
+    y = np.empty((nc, OZ_KC, r) if kmajor else (nc, r, OZ_KC), np.float32)
+    if kmajor:
+        np.multiply(x[:, :full * OZ_KC].T.reshape(full, OZ_KC, r), s, out=y[:full])
+        if nc > full:
+            y[full, k - full * OZ_KC:] = 0
+            np.multiply(x[:, full * OZ_KC:].T, s, out=y[full, :k - full * OZ_KC])
+    else:
+        np.multiply(x[:, :full * OZ_KC].reshape(r, full, OZ_KC).transpose(1, 0, 2), s[:, None], out=y[:full])
+        if nc > full:
+            y[full, :, k - full * OZ_KC:] = 0
+            np.multiply(x[:, full * OZ_KC:], s[:, None], out=y[full, :, :k - full * OZ_KC])
+    for i in np.flatnonzero(e < -126):
+        row = y[..., i] if kmajor else y[:, i]
+        row *= np.float32(2.0 ** (-126 - int(e[i])))
+    return y, e
 
 
 def oz_digits(x, n):
@@ -227,8 +244,7 @@ def serve(backend, reply):
         else:
             a = kept[req["key"]]
         if OZAKI:
-            runs, eb = oz_scale(f32[nref:].reshape(t, k))
-            rhs = np.ascontiguousarray(runs.transpose(0, 2, 1))
+            rhs, eb = oz_scale(f32[nref:].reshape(t, k), kmajor=True)
         else:
             nc, kc = backend.shape(a)
             rhs = rhs_operand(f32[nref:].reshape(t, k), nc, kc)

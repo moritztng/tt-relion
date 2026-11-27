@@ -47,6 +47,12 @@ _CHECK = os.environ.get("TT_RELION_CHECK", "") not in ("", "0")
 # TT_RELION_DEV_CHUNK: orientations per device matmul. Larger amortises the launch, smaller bounds
 # the host copy of the projected references.
 _DEV_CHUNK = int(os.environ.get("TT_RELION_DEV_CHUNK", "1024"))
+# TT_RELION_FINE_CALL_MB: host bytes one fine chunk may hold while it builds its operand. A fine chunk
+# costs ~40 bytes per orientation and pixel (the float64 copy, |ref|^2, its weighted product, the shared
+# memory copy), and the final iteration runs the fine pass at Nyquist: at box 360 a 1024-orientation
+# chunk held ~2.7 GB per --j thread and OOM-killed the dev cell's last iteration on a 32-chip Galaxy.
+# The coarse pass is never near this size, so its chunks (and its cache keys) stay _DEV_CHUNK.
+_FINE_CALL_MB = int(os.environ.get("TT_RELION_FINE_CALL_MB", "1024"))
 _FIDELITY = os.environ.get("TT_RELION_FIDELITY", "HiFi3")
 _KCHUNK = int(os.environ.get("TT_RELION_KCHUNK", "256"))
 # TT_RELION_OZAKI=<n>: exact-integer cross term with n base-4 digits (Blackhole; 14 meets the accuracy bar
@@ -68,7 +74,7 @@ _DUMP = os.environ.get("TT_RELION_DUMP", "")
 _DUMP_N = int(os.environ.get("TT_RELION_DUMP_N", "1"))
 _dumped = [0]
 _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
-          "proj_hit": 0, "proj_miss": 0, "ref_asked": 0, "devproj": 0, "once_cpu": 0,
+          "proj_hit": 0, "proj_miss": 0, "ref_asked": 0, "devproj": 0, "once_cpu": 0, "once_cpu_fine": 0,
           "batch_req": 0, "batch_calls": 0}
 # TT_RELION_PROJ_CACHE_MB: cap on kept coarse references (device path), per rank on the host and per
 # chip on the device. In a global search every particle's coarse pass asks for the same orientation set
@@ -92,7 +98,11 @@ _pc = {"model": None, "gen": 0, "seen": set(), "hit": {}, "bytes": 0}
 # call declines and RELION's own CPU kernel computes it; from the second sighting on the set goes to
 # the chip and is kept. A local search asks every particle for its own set, so under "cpu" its coarse
 # pass stays on the host, where one call costs less than one chip round trip with a fresh operand.
+# The particle's fine pass follows its coarse pass (same --j thread, coarse first): a particle whose
+# coarse set went to the host does its fine pass on the host too. In a local search the device fine
+# pass cost 260-680 thread-s per rank and iteration, more than RELION's whole CPU iteration.
 _COARSE_ONCE = os.environ.get("TT_RELION_COARSE_ONCE", "chip")
+_on_host = threading.local()                    # .particle: this thread's last coarse call went to the host
 if _COARSE_ONCE not in ("chip", "cpu"):
     raise ValueError("TT_RELION_COARSE_ONCE must be chip or cpu, got %r" % _COARSE_ONCE)
 # TT_RELION_DEVPROJ=1: the fine pass projects on the chip. Each server keeps the model it last saw in a
@@ -339,7 +349,8 @@ def _pool():
 # threads queue anyway; stacking turns that queue into one matmul over more columns, so the per-request
 # cost (dispatch, the n Ozaki matmuls, tile padding of T) is paid once. Every output column depends only
 # on its own row (the Ozaki exponent is per row), so each caller gets the bits it would have alone.
-_BATCH = max(1, int(os.environ.get("TT_RELION_BATCH", "1")))
+# Default 8: on 8 BH chips it cut the it019 E-step 494 -> 411 s (ABBA, AICLK 1350); 1 turns it off.
+_BATCH = max(1, int(os.environ.get("TT_RELION_BATCH", "8")))
 _pend = {}                 # key -> [[shw, result, event], ...] waiting for a server
 _pend_lock = threading.Lock()
 
@@ -424,7 +435,8 @@ def _progress():
     for s in _srv:
         for k, v in list(s.c.items()):     # copy: other threads insert keys
             tot[k] = tot.get(k, 0) + v
-    keys = ("handled", "fine_handled", "proj_hit", "proj_miss", "ref_asked", "once_cpu", "batch_req", "batch_calls")
+    keys = ("handled", "fine_handled", "proj_hit", "proj_miss", "ref_asked", "once_cpu", "once_cpu_fine",
+            "batch_req", "batch_calls")
     return (f"tt_relion pid {os.getpid()} " + " ".join(f"{k} {_stats[k]}" for k in keys)
             + f" cached_mb {_pc['bytes'] >> 20} "
             + " ".join(f"{k} {tot.get(k, 0):.1f}" for k in ("C_s", "F_s", "rt_s", "copy_s", "calls")))
@@ -557,6 +569,8 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         shw_np = t.cat([sh_r * w, sh_i * w], 1).numpy()
         sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * w.double()).sum(-1)
     chunk = _DEV_CHUNK if device else _ORI_CHUNK
+    if device and tag == "F":
+        chunk = max(1, min(chunk, (_FINE_CALL_MB << 20) // (40 * image_size)))
     ckey = _coarse_key(mdl_mv, eul_mv, (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
                                         padding_factor, imgX, imgY, image_size)) if tag == "C" else None
     for o0 in range(0, orientation_num, chunk):
@@ -660,11 +674,14 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
             if _COARSE_ONCE == "cpu" and key is not None and _coarse_first_sighting(key, orientation_num):
                 _stats["once_cpu"] += 1
                 _stats["declined"] += 1
+                _on_host.particle = True
                 _book("C_s", time.time() - t0)
                 return False
             _stats["ref_asked"] += 1
+            _on_host.particle = False
             _book("C_s", time.time() - t0)
             return 2
+        _on_host.particle = False
         t = _torch()
         if _DEVPROJ and _BACKEND == "ttnn":
             _keep_model(mdl_mv, dict(mdlX=mdlX, mdlY=mdlY, mdlZ=mdlZ, mdlInitY=mdlInitY, mdlInitZ=mdlInitZ,
@@ -716,6 +733,10 @@ def diff2_fine(ref_mv, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     if _BACKEND in ("nullbase", "null"):
         # Only has to cost what an entry-and-decline costs, so that the coarse arms differ in one term.
         _stats["fine_declined"] += 1
+        return False
+    if getattr(_on_host, "particle", False):        # TT_RELION_COARSE_ONCE=cpu sent its coarse pass to the host
+        _stats["fine_declined"] += 1
+        _stats["once_cpu_fine"] += 1
         return False
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
