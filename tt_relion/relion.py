@@ -175,6 +175,9 @@ class _Server:
         # are page-faulted in afresh: 640 vs 28 ms for one fine-size operand build on pc. Keep them.
         for k, v in _MALLOC_ENV.items():
             env.setdefault(k, v)
+        # tt-metal's inspector logs every workload to ./generated/inspector (~75 MB/min per chip). Each new server
+        # deletes the previous one's files while that one keeps writing: 32 chips filled 25 GB of disk in 15 min.
+        env.setdefault("TT_METAL_INSPECTOR", "0")
         self.p = subprocess.Popen([_PYTHON, "-m", module, _FIDELITY],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
