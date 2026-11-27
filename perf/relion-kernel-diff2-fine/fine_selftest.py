@@ -57,7 +57,7 @@ n = len(rot_idx)
 sum_init = 3.5
 
 out = np.zeros(n, dtype=np.float32)
-ok = R.diff2_fine(memoryview(mdl), memoryview(eul.reshape(-1)), memoryview(tx), memoryview(ty),
+ok = R.diff2_fine(None, memoryview(mdl), memoryview(eul.reshape(-1)), memoryview(tx), memoryview(ty),
                   memoryview(img_r), memoryview(img_i), memoryview(corr),
                   memoryview(rot_idx), memoryview(trans_idx), memoryview(out),
                   geom["mdlX"], geom["mdlY"], geom["mdlZ"], geom["mdlInitY"], geom["mdlInitZ"],
@@ -73,7 +73,7 @@ print("stats:", R.stats())
 
 # the accumulate contract: RELION zero-inits and both kernels use +=, so a second call doubles
 out2 = out.copy()
-R.diff2_fine(memoryview(mdl), memoryview(eul.reshape(-1)), memoryview(tx), memoryview(ty),
+R.diff2_fine(None, memoryview(mdl), memoryview(eul.reshape(-1)), memoryview(tx), memoryview(ty),
              memoryview(img_r), memoryview(img_i), memoryview(corr),
              memoryview(rot_idx), memoryview(trans_idx), memoryview(out2),
              geom["mdlX"], geom["mdlY"], geom["mdlZ"], geom["mdlInitY"], geom["mdlInitZ"],

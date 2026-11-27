@@ -34,6 +34,7 @@ namespace
 	std::atomic<long> g_fine_declined{0};
 
 	bool g_check = false;                   // TT_RELION_CHECK, read once at init
+	bool g_fine_ref = true;                 // TT_RELION_FINE_PROJECT=relion: RELION projects the fine ref
 	long   g_res_flushed = 0;               // g_res_n at the last flush, guarded by g_res_mutex
 
 	// TT_RELION_CHECK only. diff2Fine stashes its own answer here and declines; diff2FineCheck
@@ -105,6 +106,12 @@ namespace
 		}
 		Py_XDECREF(be);
 		PyErr_Clear();
+		// "bridge": the fine pass gets the model, as the coarse pass does, and RELION skips its projection.
+		PyObject *fp = PyObject_GetAttrString(mod, "_FINE_PROJECT");
+		const char *fps = (fp && PyUnicode_Check(fp)) ? PyUnicode_AsUTF8(fp) : nullptr;
+		g_fine_ref = !(fps && std::strcmp(fps, "bridge") == 0);
+		Py_XDECREF(fp);
+		PyErr_Clear();
 		Py_DECREF(mod);
 		if (fn == nullptr || !PyCallable_Check(fn))
 		{
@@ -129,8 +136,9 @@ namespace
 			std::fprintf(stderr, "TTBridge: tt_relion.relion.diff2_fine missing, "
 			                     "the fine pass stays on RELION's own kernel\n");
 		}
-		std::fprintf(stderr, "TTBridge: tt_relion.relion loaded (fine=%s check=%s)\n",
-		             g_fine_usable.load() ? "yes" : "no", g_check ? "yes" : "no");
+		std::fprintf(stderr, "TTBridge: tt_relion.relion loaded (fine=%s fine_project=%s check=%s)\n",
+		             g_fine_usable.load() ? "yes" : "no", g_fine_ref ? "relion" : "bridge",
+		             g_check ? "yes" : "no");
 		std::atexit(&TTBridge::report);  // nothing else calls it, and the no-op trap needs the line
 		return true;
 	}
@@ -207,9 +215,16 @@ bool fineWanted()
 	return ensureReady() && g_fine_usable.load(std::memory_order_acquire);
 }
 
+bool fineWantsRef()
+{
+	return g_fine_ref;
+}
+
 bool diff2Fine(
-		const float *ref,
-		int maxR, int imgX, int imgY,
+		const float *ref, const float *mdlComplex,
+		int mdlX, int mdlY, int mdlZ, int mdlInitY, int mdlInitZ,
+		int maxR, int maxR2_padded, float padding_factor,
+		int imgX, int imgY,
 		const float *eulers,
 		const float *trans_x, const float *trans_y,
 		const float *Fimg_real, const float *Fimg_imag, const float *corr_img,
@@ -239,7 +254,12 @@ bool diff2Fine(
 	const Py_ssize_t f = (Py_ssize_t)sizeof(float);
 	const Py_ssize_t u = (Py_ssize_t)sizeof(unsigned long);
 
-	PyObject *a_ref  = PyMemoryView_FromMemory((char*)ref, orientation_num * 2 * image_size * f, PyBUF_READ);
+	// Exactly one of the two goes over; the other is None.
+	PyObject *a_ref  = ref ? PyMemoryView_FromMemory((char*)ref, orientation_num * 2 * image_size * f, PyBUF_READ)
+	                       : (Py_INCREF(Py_None), Py_None);
+	PyObject *a_mdl  = ref ? (Py_INCREF(Py_None), Py_None)
+	                       : PyMemoryView_FromMemory((char*)mdlComplex,
+	                                                 (long)mdlX * mdlY * mdlZ * 2 * f, PyBUF_READ);
 	PyObject *a_eul  = PyMemoryView_FromMemory((char*)eulers,     orientation_num * 9 * f, PyBUF_READ);
 	PyObject *a_tx   = PyMemoryView_FromMemory((char*)trans_x,    translation_num * f, PyBUF_READ);
 	PyObject *a_ty   = PyMemoryView_FromMemory((char*)trans_y,    translation_num * f, PyBUF_READ);
@@ -251,13 +271,14 @@ bool diff2Fine(
 	PyObject *a_out  = PyMemoryView_FromMemory((char*)dst,        significant_num * f, PyBUF_WRITE);
 
 	PyObject *res = nullptr;
-	if (a_ref && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_ri && a_ti && a_out)
-		res = PyObject_CallFunction(g_diff2f, "OOOOOOOOOOiiidlllll",
-				a_ref, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_ri, a_ti, a_out,
-				maxR, imgX, imgY, (double)sum_init,
+	if (a_ref && a_mdl && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_ri && a_ti && a_out)
+		res = PyObject_CallFunction(g_diff2f, "OOOOOOOOOOOiiiiiiifiidlllll",
+				a_ref, a_mdl, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_ri, a_ti, a_out,
+				mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
+				(double)padding_factor, imgX, imgY, (double)sum_init,
 				orientation_num, translation_num, significant_num, image_size, job_num_count);
 
-	Py_XDECREF(a_ref); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
+	Py_XDECREF(a_ref); Py_XDECREF(a_mdl); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
 	Py_XDECREF(a_re);  Py_XDECREF(a_im);  Py_XDECREF(a_corr);
 	Py_XDECREF(a_ri);  Py_XDECREF(a_ti);  Py_XDECREF(a_out);
 

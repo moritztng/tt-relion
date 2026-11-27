@@ -74,6 +74,14 @@ _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
 # is kept only on its second sighting, so local searches (per-particle orientations) keep nothing.
 # 0 disables.
 _PCACHE_MB = int(os.environ.get("TT_RELION_PROJ_CACHE_MB", "4096"))
+# TT_RELION_FINE_PROJECT: who projects the fine pass's reference. "relion" (default): RELION's own
+# AccProjectorKernel in the calling --j thread, handed over as ref_mv. "bridge": RELION hands over
+# the model and geometry instead and the bridge projects (today on the host in torch, the pre-L4 path;
+# the on-device projection op plugs in here). Read by the C++ bridge at init, so RELION skips its
+# projection loop when the bridge asks for the model.
+_FINE_PROJECT = os.environ.get("TT_RELION_FINE_PROJECT", "relion")
+if _FINE_PROJECT not in ("relion", "bridge"):
+    raise ValueError("TT_RELION_FINE_PROJECT must be relion or bridge, got %r" % _FINE_PROJECT)
 _pc = {"model": None, "gen": 0, "seen": set(), "hit": {}, "bytes": 0}
 _pc_lock = threading.Lock()
 
@@ -460,16 +468,19 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         return False
 
 
-def diff2_fine(ref_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
+def diff2_fine(ref_mv, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                rot_idx_mv, trans_idx_mv, out_mv,
-               maxR, imgX, imgY, sum_init,
+               mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
+               padding_factor, imgX, imgY, sum_init,
                orientation_num, translation_num, significant_num, image_size,
                job_num_count):
     """runDiff2KernelFine, 3D reference and 2D data. Accumulates onto out_mv.
 
-    ref_mv is the reference already projected by RELION's own AccProjectorKernel in the calling
-    thread, [orientation_num, 2 * image_size] float32, real | imag: in torch that projection was
-    65-80 % of a fine call's host wall and held this rank's interpreter while it ran.
+    Exactly one of ref_mv and mdl_mv is given (TT_RELION_FINE_PROJECT). ref_mv is the reference
+    already projected by RELION's own AccProjectorKernel in the calling thread, [orientation_num,
+    2 * image_size] float32, real | imag: in torch that projection was 65-80 % of a fine call's host
+    wall and held this rank's interpreter while it ran. mdl_mv is the padded model with the same
+    geometry diff2_coarse takes, for a bridge that projects itself.
 
     RELION's fine kernel is written as a list of jobs, each job one orientation and a run of at
     most D2F_CHUNK_REF3D consecutive translations, and it re-projects the reference once per job.
@@ -491,8 +502,9 @@ def diff2_fine(ref_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
-        acc = _dense_diff2(t, None, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
-                           0, 0, 0, 0, 0, maxR, 0, 0, imgX, imgY,
+        acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
+                           mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
+                           padding_factor, imgX, imgY,
                            orientation_num, translation_num, image_size, "F", ref_mv=ref_mv)
         _book("F_s", time.time() - t0)
         rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)

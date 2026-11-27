@@ -130,7 +130,7 @@ index c06a1221..c72627bb 100644
  			AccUtilities::diff2_CC_coarse<false,false,D2C_CC_BLOCK_SIZE_2D>(
  #else
  			AccUtilities::diff2_CC_coarse<false,false,D2C_BLOCK_SIZE_2D>(
-@@ -1838,6 +1860,39 @@ void runDiff2KernelFine(
+@@ -1838,6 +1860,44 @@ void runDiff2KernelFine(
  		bool do_CC,
  		bool data_is_3D)
  {
@@ -143,8 +143,9 @@ index c06a1221..c72627bb 100644
 +	{
 +		thread_local std::vector<float> ref;
 +		const long P = (long)image_size;
-+		ref.assign((size_t)orientation_num * 2 * P, 0.f);  // outside the radius stays 0
-+		for (long o = 0; o < (long)orientation_num; o++)
++		const bool own = TTBridge::fineWantsRef();      // false: the bridge projects from the model
++		ref.assign(own ? (size_t)orientation_num * 2 * P : 0, 0.f);  // outside the radius stays 0
++		for (long o = 0; own && o < (long)orientation_num; o++)
 +		{
 +			const XFLOAT *e = eulers + 9 * o;
 +			float *re = ref.data() + 2 * P * o, *im = re + P;
@@ -157,7 +158,11 @@ index c06a1221..c72627bb 100644
 +			}
 +		}
 +		if (TTBridge::diff2Fine(
-+				ref.data(), projector.maxR, projector.imgX, projector.imgY,
++				own ? ref.data() : nullptr, (const float*)projector.mdlComplex,
++				projector.mdlX, projector.mdlXY / projector.mdlX, projector.mdlZ,
++				projector.mdlInitY, projector.mdlInitZ,
++				projector.maxR, projector.maxR2_padded, projector.padding_factor,
++				projector.imgX, projector.imgY,
 +				eulers, trans_x, trans_y,
 +				Fimgs_real, Fimgs_imag, corr_img,
 +				rot_idx, trans_idx,
@@ -170,7 +175,7 @@ index c06a1221..c72627bb 100644
      long unsigned block_dim = job_num_count;
  
      if(!do_CC)
-@@ -2002,6 +2057,11 @@ void runDiff2KernelFine(
+@@ -2002,6 +2062,11 @@ void runDiff2KernelFine(
  		#endif
      }
  

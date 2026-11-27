@@ -34,10 +34,13 @@ namespace TTBridge
 	// once (makeJobsForDiff2Fine, src/acc/acc_helper_functions_impl.h).
 	//
 	// ref is the reference RELION's own AccProjectorKernel projected for these orientations,
-	// [orientation_num][2 * image_size] float, real then imag (projectFine below builds it).
+	// [orientation_num][2 * image_size] float, real then imag. When fineWantsRef() is false the
+	// caller passes ref = nullptr and the bridge projects from mdlComplex + geometry (as diff2Coarse).
 	bool diff2Fine(
-			const float *ref,
-			int maxR, int imgX, int imgY,
+			const float *ref, const float *mdlComplex,
+			int mdlX, int mdlY, int mdlZ, int mdlInitY, int mdlInitZ,
+			int maxR, int maxR2_padded, float padding_factor,
+			int imgX, int imgY,
 			const float *eulers,
 			const float *trans_x, const float *trans_y,
 			const float *Fimg_real, const float *Fimg_imag, const float *corr_img,
@@ -49,6 +52,10 @@ namespace TTBridge
 	// True when diff2Fine will take a call, so the caller projects only for a taker
 	// (TT_RELION_BACKEND=nullbase/null, the CPU-reference arms, never project).
 	bool fineWanted();
+
+	// TT_RELION_FINE_PROJECT: true ("relion", default) when diff2Fine wants RELION's projection in
+	// ref, false ("bridge") when it wants the model and projects itself. Valid after fineWanted().
+	bool fineWantsRef();
 
 	// TT_RELION_CHECK=1 only. diff2Fine then computes into a private buffer and returns false, so
 	// RELION runs its own kernel; this is called once RELION's kernel has written diff2s and
