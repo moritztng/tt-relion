@@ -489,8 +489,14 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     the fine kernel differs only in which entries it is asked for and in the constant it adds.
     """
     # ref_mv: the fine pass hands over RELION's own projection, [O, 2P] real | imag, and no model.
-    mdl = None if mdl_mv is None else t.from_numpy(
-        np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy())
+    # The model is read only where this call projects it (a torch-path chunk, a device cache miss without
+    # RELION's projection): copying all 31.7 MB on every call held the interpreter ~2 ms per coarse call.
+    held = []
+
+    def mdl():
+        if not held:
+            held.append(t.from_numpy(np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy()))
+        return held[0]
     given = None if ref_mv is None else t.from_numpy(
         np.frombuffer(ref_mv, dtype=np.float32).reshape(orientation_num, 2 * image_size))
     eul = t.from_numpy(np.frombuffer(eul_mv, dtype=np.float32)
@@ -530,7 +536,7 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         if given is not None:
             project = lambda: given[o0:o1]          # noqa: E731
         else:
-            project = lambda: t.cat(_project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY,  # noqa: E731
+            project = lambda: t.cat(_project(t, mdl(), x, y, eul[o0:o1], mdlX, mdlY,  # noqa: E731
                                              mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
                                              padding_factor), 1)
         got = None
@@ -559,7 +565,7 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     if _DUMP and _dumped[0] < _DUMP_N:
         _dumped[0] += 1
         np.savez("%s.%s.%d.%d.npz" % (_DUMP, tag, os.getpid(), _dumped[0]),
-                 mdl=(mdl if mdl is not None else given).numpy(), eul=eul.numpy(), tx=tx.numpy(), ty=ty.numpy(),
+                 mdl=(mdl() if mdl_mv is not None else given).numpy(), eul=eul.numpy(), tx=tx.numpy(), ty=ty.numpy(),
                  img_r=img_r.numpy(), img_i=img_i.numpy(), w=w.numpy(),
                  diff2=acc,
                  geom=np.array([mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
