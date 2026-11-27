@@ -177,12 +177,14 @@ def oz_cut(X, ea, n, grp=2):
 KCDIR = Path(__file__).resolve().parent / "kernels" / "cand"
 
 
-def cand_compact(D, thr, rows, cols, cap=4096):
-    assert cap % 256 == 0  # flush offsets stay 2 KiB aligned and the last rounded write stays inside the row
+def cand_compact(D, thr, rows, cols, cap=4096, max_cap=1 << 17):
     """Candidate compaction of d2 on chip. D fp32 TILE [R, O] (R, O multiples of 32), thr fp32 RM [R/32, 32] per-row
     thresholds. Every element D[r, c] < thr[r] with r < rows, c < cols is emitted as (r * cols + c, value) exactly.
-    Returns (idx int64, val float32), or None when a core overflowed cap (caller reads D back in full)."""
+    Returns (idx int64, val float32). A core over cap still counts everything, so an overflow reruns once with the
+    cap sized from the measured maximum (broad particles: 832 significant samples, runs/dc1); None only if that
+    would exceed max_cap (caller reads D back in full)."""
     import numpy as np
+    assert cap % 256 == 0  # flush offsets stay 2 KiB aligned and the last rounded write stays inside the row
     dev = D.device()
     R, O = int(D.padded_shape[-2]), int(D.padded_shape[-1])
     RT, OT = R // 32, O // 32
@@ -218,7 +220,9 @@ def cand_compact(D, thr, rows, cols, cap=4096):
     ttnn.generic_op([D, thr, OUT, CNT], ttnn.ProgramDescriptor(kernels=[k], semaphores=[], cbs=cbs))
     cnt = ttnn.to_torch(CNT).numpy().astype(np.int64)[:, 0]
     if cnt.max() > cap:
-        return None
+        need = int(-(-cnt.max() // 256) * 256)
+        ttnn.deallocate(OUT); ttnn.deallocate(CNT)
+        return None if need > max_cap else cand_compact(D, thr, rows, cols, need, max_cap)
     o = np.ascontiguousarray(ttnn.to_torch(OUT).numpy()).astype(np.int64) & 0xffffffff
     idx = np.concatenate([o[j, 0:2 * cnt[j]:2] for j in range(ncores)])
     val = np.concatenate([o[j, 1:2 * cnt[j]:2] for j in range(ncores)]).astype(np.uint32).view(np.float32)

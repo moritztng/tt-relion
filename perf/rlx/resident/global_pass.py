@@ -54,6 +54,7 @@ ap.add_argument("--cand-th", type=float, default=40.0, help="candidate window in
 ap.add_argument("--cand-cap", type=int, default=8192, help="per-core candidate capacity (multiple of 256); overflow = full readback")
 ap.add_argument("--local", type=int, default=0, help="local-pass prototype: the --O orientations are the shared table, each particle scores its --own nearest")
 ap.add_argument("--own", type=int, default=160, help="own orientations per particle in --local (RELION local search: ~155)")
+ap.add_argument("--seed", type=int, default=0, help="particle pick (one slice per chip in the dev cell)")
 ap.add_argument("--frac", type=float, default=0.999, help="RELION adaptive_fraction")
 ap.add_argument("--sig-off", type=float, default=3.0, help="offset prior sigma, px")
 ap.add_argument("--fast", action="store_true", help="skip the host fp32/Ozaki arms (timing at production row counts)")
@@ -137,7 +138,7 @@ def project(R):
     return out
 
 
-rng = np.random.default_rng(0)
+rng = np.random.default_rng(a.seed)
 pick = rng.choice(len(parts), a.B, replace=False)
 X, CTF, poses = [], [], []
 for pi in pick:
