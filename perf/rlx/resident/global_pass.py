@@ -44,6 +44,8 @@ ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--balance", type=int, default=1)
 ap.add_argument("--fused", type=int, default=1, help="oz_fused kernel (1) or the composed ttnn matmul+add path (0)")
+ap.add_argument("--frac", type=float, default=0.999, help="RELION adaptive_fraction")
+ap.add_argument("--sig-off", type=float, default=3.0, help="offset prior sigma, px")
 ap.add_argument("--fast", action="store_true", help="skip the host fp32/Ozaki arms (timing at production row counts)")
 a = ap.parse_args()
 APIX, ORI = 1.34, 360
@@ -268,6 +270,26 @@ for n in ([] if a.fast else map(int, a.ns.split(","))):
     D = (dh + ((de + Nlo).astype(np.float32) - lo).astype(np.float32)).astype(np.float32)
     grade(f"oz n{n} df32 combine (emul)", 2 * D.astype(np.float64), dict(n=n))
 
+def significance(d2, prior, frac):
+    """RELION's coarse-pass significance per particle on d2 [T, B, O] (+ per-translation -log prior): weights
+    exp(-(d2 + prior - min)), the smallest set of largest weights holding >= frac of the sum. Samples with delta > 25
+    carry < 1.4e-11 each (< 1e-6 summed over 53k), so only candidates below that are sorted. Returns per particle
+    (n_sig, sorted significant flat indices into [T, O], weight sum)."""
+    Tn, Bn, On = d2.shape
+    out = []
+    for b in range(Bn):
+        x = (d2[:, b, :] + prior[:, None]).ravel()
+        dl = x - x.min()
+        cand = np.flatnonzero(dl < 25.0)
+        w = np.exp(-dl[cand])
+        order = np.argsort(-w, kind="stable")
+        cs = np.cumsum(w[order])
+        S = w.sum() + np.exp(-dl[dl >= 25.0]).sum()
+        k = int(np.searchsorted(cs, frac * S) + 1)
+        out.append((k, np.sort(cand[order[:k]]), S))
+    return out
+
+
 if not a.nodev:
     import ttnn
     from _tt import Clock, open_dev
@@ -327,6 +349,7 @@ if not a.nodev:
     # device rows are translation-major (t B + b) so the per-particle |CTF P|^2 [B, O] expands by a pure-copy concat;
     # ttnn.repeat_interleave on fp32 measured 3e-3 relative error (bf16-class), so it is not used
     perm = np.array([b * T + t for t in range(T) for b in range(a.B)])
+    prior_t = np.array([(dx * dx + dy * dy) / (2 * a.sig_off ** 2) for dx, dy in tr])   # -log pdf_offset
     Ah = Ah[perm]
     t_A, t_A2 = put(Ah), put(A2h)
     Kp = -(-K // KC) * KC
@@ -443,7 +466,14 @@ if not a.nodev:
         dh, de = tsum(sh, ttnn.neg(Ch))
         D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo_), Cl))
         ttnn.synchronize_device(dev); t["cut_oz_combine"] = time.perf_counter() - t0
-        out = dict(t=t)
+        # weights + significance v0: d2 back to the host (fp32), RELION's rule in float64 there
+        t0 = time.perf_counter()
+        Dd = ttnn.to_torch(D).numpy()[:len(rows), :a.O]
+        t["readback"] = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        sig = significance((2.0 * Dd.astype(np.float64)).reshape(T, a.B, a.O), prior_t, a.frac)
+        t["host_sig"] = time.perf_counter() - t0
+        out = dict(t=t, sig=sig)
         if check:
             out["B"] = ttnn.to_torch(Braw).double().numpy()
             Dd = ttnn.to_torch(D).double().numpy()[:len(rows), :a.O]
@@ -540,6 +570,17 @@ if not a.nodev:
     if not a.fast:
         grade("host fp32 direct on CHIP projection", d32c, dict(proj_rel_vs_f64=prel))
     print(json.dumps({"diag": r0["diag"]}), flush=True)
+    # significance parity: chip d2 vs float64 d2 (rows of d64 are b-major: b * T + t)
+    ref_sig = significance(d64.reshape(a.B, T, a.O).transpose(1, 0, 2), prior_t, a.frac)
+    same_set = sum(int(np.array_equal(c_[1], r_[1])) for c_, r_ in zip(r0["sig"], ref_sig))
+    nd = [abs(c_[0] - r_[0]) for c_, r_ in zip(r0["sig"], ref_sig)]
+    Srel = max(abs(c_[2] - r_[2]) / r_[2] for c_, r_ in zip(r0["sig"], ref_sig))
+    rec_s = {"significance": {"same_set": f"{same_set}/{a.B}", "max_nsig_diff": int(max(nd)),
+                              "nsig_ref_median": float(np.median([r_[0] for r_ in ref_sig])),
+                              "nsig_ref_max": int(max(r_[0] for r_ in ref_sig)), "weight_sum_rel": float(Srel),
+                              "frac": a.frac}}
+    print(json.dumps(rec_s), flush=True)
+    fh.write(json.dumps(rec_s) + "\n")
     grade("RESIDENT chip n14 (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, proj_rel_vs_f64=prel, **r0["diag"]))
     clk = Clock(nodes)
     ts = []
