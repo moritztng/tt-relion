@@ -168,3 +168,54 @@ def oz_cut(X, ea, n, grp=2):
                                     compile_time_args=[n, grp], runtime_args=rt, config=cfg)
     ttnn.generic_op([X, ea, D], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
     return D
+
+
+KCDIR = Path(__file__).resolve().parent / "kernels" / "cand"
+
+
+def cand_compact(D, thr, rows, cols, cap=4096):
+    assert cap % 256 == 0  # flush offsets stay 2 KiB aligned and the last rounded write stays inside the row
+    """Candidate compaction of d2 on chip. D fp32 TILE [R, O] (R, O multiples of 32), thr fp32 RM [R/32, 32] per-row
+    thresholds. Every element D[r, c] < thr[r] with r < rows, c < cols is emitted as (r * cols + c, value) exactly.
+    Returns (idx int64, val float32), or None when a core overflowed cap (caller reads D back in full)."""
+    import numpy as np
+    dev = D.device()
+    R, O = int(D.padded_shape[-2]), int(D.padded_shape[-1])
+    RT, OT = R // 32, O // 32
+    units = RT * OT
+    g = dev.compute_with_storage_grid_size()
+    ncores, grid, cg1, cg2, w1, w2 = core_split.split_work_to_cores(g, units, 0)
+    OUT = ttnn.allocate_tensor_on_device(ttnn.Shape([ncores, 2 * cap]), ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT, dev,
+                                         ttnn.DRAM_MEMORY_CONFIG)
+    CNT = ttnn.allocate_tensor_on_device(ttnn.Shape([ncores, 16]), ttnn.uint32, ttnn.ROW_MAJOR_LAYOUT, dev,
+                                         ttnn.DRAM_MEMORY_CONFIG)
+
+    def cb(i, dt, page):
+        fmt = ttnn.CBFormatDescriptor(buffer_index=i, data_format=dt, page_size=page)
+        return ttnn.CBDescriptor(total_size=page, core_ranges=grid, format_descriptors=[fmt])
+
+    cbs = [cb(0, ttnn.float32, 4096), cb(1, ttnn.float32, 128), cb(2, ttnn.uint32, 2048), cb(3, ttnn.uint32, 64)]
+    rt = ttnn.RuntimeArgs()
+    first = core = 0
+    for group, per in ((cg1, w1), (cg2, w2)):
+        for cr in group.ranges():
+            for cx in range(cr.start.x, cr.end.x + 1):
+                for cy in range(cr.start.y, cr.end.y + 1):
+                    rt[cx][cy] = [first, per, core]
+                    first += per
+                    core += 1
+    assert first == units and core == ncores
+    acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
+    k = ttnn.KernelDescriptor(kernel_source=str(KCDIR / "reader.cpp"), source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
+                              core_ranges=grid, compile_time_args=acc(D) + acc(thr) + acc(OUT) + acc(CNT) + [OT, cap, cols, rows],
+                              runtime_args=rt, common_runtime_args=[D.buffer_address(), thr.buffer_address(),
+                                                                    OUT.buffer_address(), CNT.buffer_address()],
+                              config=ttnn.ReaderConfigDescriptor())
+    ttnn.generic_op([D, thr, OUT, CNT], ttnn.ProgramDescriptor(kernels=[k], semaphores=[], cbs=cbs))
+    cnt = ttnn.to_torch(CNT).numpy().astype(np.int64)[:, 0]
+    if cnt.max() > cap:
+        return None
+    o = np.ascontiguousarray(ttnn.to_torch(OUT).numpy()).astype(np.int64) & 0xffffffff
+    idx = np.concatenate([o[j, 0:2 * cnt[j]:2] for j in range(ncores)])
+    val = np.concatenate([o[j, 1:2 * cnt[j]:2] for j in range(ncores)]).astype(np.uint32).view(np.float32)
+    return idx, val

@@ -49,6 +49,9 @@ ap.add_argument("--nchip", type=int, default=13, help="Ozaki digits of the chip 
 ap.add_argument("--pchip", type=int, default=0, help="build the particle operand on chip from the resident stack")
 ap.add_argument("--fcut", type=int, default=1, help="fused SFPU digit-cut kernel (1) or the ttnn chain (0)")
 ap.add_argument("--fcomb", type=int, default=1, help="fused SFPU combine kernel (1) or the ttnn TwoSum chain (0)")
+ap.add_argument("--cand", type=int, default=0, help="on-chip candidate compaction: only d2 within --cand-th of each particle's min comes back")
+ap.add_argument("--cand-th", type=float, default=40.0, help="candidate window in delta (exp(-40) * 53k < 3e-13 of the weight sum)")
+ap.add_argument("--cand-cap", type=int, default=8192, help="per-core candidate capacity (multiple of 256); overflow = full readback")
 ap.add_argument("--frac", type=float, default=0.999, help="RELION adaptive_fraction")
 ap.add_argument("--sig-off", type=float, default=3.0, help="offset prior sigma, px")
 ap.add_argument("--fast", action="store_true", help="skip the host fp32/Ozaki arms (timing at production row counts)")
@@ -275,6 +278,34 @@ for n in ([] if a.fast else map(int, a.ns.split(","))):
     D = (dh + ((de + Nlo).astype(np.float32) - lo).astype(np.float32)).astype(np.float32)
     grade(f"oz n{n} df32 combine (emul)", 2 * D.astype(np.float64), dict(n=n))
 
+def significance_sparse(idx, val, Bn, On, prior, frac, th):
+    """significance() on compacted candidates: idx = r * On + c over t-major rows r = t * Bn + b, val = chip d2 / 2.
+    Same rule; the weight sum runs over delta < th (the chip window) instead of everything (tail < 53k e^-th)."""
+    r, c = np.divmod(idx, On)
+    t, b = np.divmod(r, Bn)
+    x = 2.0 * val.astype(np.float64) + prior[t]
+    m = np.full(Bn, np.inf)
+    np.minimum.at(m, b, x)
+    dl = x - m[b]
+    keep = dl < th
+    Sb = np.bincount(b[keep], np.exp(-dl[keep]), Bn)       # weight sum over the window
+    keep = dl < 25.0                                       # only these can be significant (as in significance())
+    b, dl, f = b[keep], dl[keep], (t * On + c)[keep]
+    o = np.argsort(b * 128.0 + dl, kind="stable")   # by particle, then ascending delta (= descending weight)
+    b, dl, f = b[o], dl[o], f[o]
+    w = np.exp(-dl)
+    cuts = np.searchsorted(b, np.arange(Bn + 1))
+    if (np.diff(cuts) == 0).any():
+        return None
+    out = []
+    for i in range(Bn):
+        wi, fi = w[cuts[i]:cuts[i + 1]], f[cuts[i]:cuts[i + 1]]
+        cs = np.cumsum(wi)
+        k = int(np.searchsorted(cs, frac * Sb[i]) + 1)
+        out.append((k, np.sort(fi[:k]), Sb[i]))
+    return out
+
+
 def significance(d2, prior, frac):
     """RELION's coarse-pass significance per particle on d2 [T, B, O] (+ per-translation -log prior): weights
     exp(-(d2 + prior - min)), the smallest set of largest weights holding >= frac of the sum. Samples with delta > 25
@@ -440,7 +471,7 @@ if not a.nodev:
         return ttnn.multiply(XA, put(np.ldexp(1.0, e.astype(int)).reshape(1, -1))), \
             ttnn.multiply(XB, put(np.ldexp(1.0, -e.astype(int)).reshape(1, -1)))
 
-    from oz_fused import oz_combine, oz_cut, oz_fused
+    from oz_fused import cand_compact, oz_combine, oz_cut, oz_fused
 
     def oz_fused_dev(Xa, Xb, n):
         """Xa [Ra, K], Xb [Ob, K] fp32 TILE -> (hi, lo) df32 of Xa Xb^T, Ozaki n through oz_fused. Row exponents per side;
@@ -521,10 +552,37 @@ if not a.nodev:
         ttnn.synchronize_device(dev); t["cut_oz_combine"] = time.perf_counter() - t0
         # weights + significance v0: d2 back to the host (fp32), RELION's rule in float64 there
         t0 = time.perf_counter()
-        Dd = ttnn.to_torch(D).numpy()[:len(rows), :a.O]
-        t["readback"] = time.perf_counter() - t0
-        t0 = time.perf_counter()
-        sig = significance((2.0 * Dd.astype(np.float64)).reshape(T, a.B, a.O), prior_t, a.frac)
+        res = None
+        if a.cand:   # per-row min on chip -> per-particle window on the host (R floats each way) -> compaction kernel
+            Dv = D if int(D.shape[-1]) == a.O else ttnn.slice(D, [0, 0], [int(D.shape[0]), a.O])
+            rmin = ttnn.to_torch(ttnn.min(Dv, dim=-1, keepdim=True)).double().numpy().reshape(-1)
+            Rp = -(-rmin.shape[0] // 32) * 32
+            if check:   # how far the on-chip row min sits from the exact fp32 one (sizes the window margin)
+                ex = ttnn.to_torch(D).double().numpy()[:len(rows), :a.O].min(1)
+                t["rmin_err"] = [float((rmin[:len(rows)] - ex).min()), float((rmin[:len(rows)] - ex).max())]
+            mb = (2.0 * rmin[:len(rows)].reshape(T, a.B) + prior_t[:, None]).min(0)   # per particle, ~fp32-exact
+            thr = np.full(Rp, -np.inf)
+            # D < (m_b + th - prior_t) / 2, plus a margin covering ttnn.min's rounding (measured bf16-class: an fp32
+            # margin left particles of s146, d2 ~ 8000, with no candidate at all); the host re-filters exactly
+            marg = 1.0 + float(np.abs(rmin[:len(rows)]).max()) * 2.0 ** -6
+            thr[:len(rows)] = ((mb[None, :] + a.cand_th - prior_t[:, None]) / 2 + marg).reshape(-1)
+            thr_d = ttnn.from_torch(torch.from_numpy(thr.astype(np.float32).reshape(Rp // 32, 32)), dtype=ttnn.float32,
+                                    layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
+            res = cand_compact(D, thr_d, len(rows), a.O, a.cand_cap)
+            t["ncand"] = 0 if res is None else int(res[0].shape[0])
+            t["readback"] = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            if res is not None:
+                sig = significance_sparse(res[0], res[1], a.B, a.O, prior_t, a.frac, a.cand_th)
+                if sig is None:   # a particle's window missed its own min: never trust it, read everything
+                    res = None
+                    t["cand_fallback"] = 1
+        if res is None:
+            t0 = time.perf_counter()
+            Dd = ttnn.to_torch(D).numpy()[:len(rows), :a.O]
+            t["readback"] = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            sig = significance((2.0 * Dd.astype(np.float64)).reshape(T, a.B, a.O), prior_t, a.frac)
         t["host_sig"] = time.perf_counter() - t0
         out = dict(t=t, sig=sig)
         if check:
@@ -622,7 +680,8 @@ if not a.nodev:
         d32c[q_] = ((Xr[q_][None] - CF[q_][None] * Pt2) ** 2 * W2).sum(1).double().numpy()
     if not a.fast:
         grade("host fp32 direct on CHIP projection", d32c, dict(proj_rel_vs_f64=prel))
-    print(json.dumps({"diag": r0["diag"]}), flush=True)
+    print(json.dumps({"diag": r0["diag"], "cand": {k: r0["t"][k] for k in ("rmin_err", "ncand", "cand_fallback")
+                                                    if k in r0["t"]}}), flush=True)
     # significance parity: chip d2 vs float64 d2 (rows of d64 are b-major: b * T + t)
     ref_sig = significance(d64.reshape(a.B, T, a.O).transpose(1, 0, 2), prior_t, a.frac)
     same_set = sum(int(np.array_equal(c_[1], r_[1])) for c_, r_ in zip(r0["sig"], ref_sig))
