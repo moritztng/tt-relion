@@ -7,8 +7,11 @@
 # turns the worst chip's rates into the full-job per-chip budget.
 #   devcell.sh "17 18 19" NG NL   (run from the run dir; out_<chip>.jsonl, <chip>_{g,l}.log, wall.tsv)
 CHIPS=${1:?chips}; NG=${2:-9}; NL=${3:-4}; NF=${4:-2}
-export PATH=~/fleet/env/bin:$PATH PYTHONPATH=~/rlx-resident/src GLIBC_TUNABLES=glibc.malloc.hugetlb=1
-P=~/rlx-resident/src/perf/rlx/resident/global_pass.py
+# host threads per chip process: 64 cores / 32 processes; unset, every process spawns 64 BLAS/OMP threads
+HT=${HT:-2}
+export OMP_NUM_THREADS=$HT MKL_NUM_THREADS=$HT OPENBLAS_NUM_THREADS=$HT
+export PATH=~/fleet/env/bin:$PATH PYTHONPATH=${SRC:-~/rlx-resident/src} GLIBC_TUNABLES=glibc.malloc.hugetlb=1
+P=${SRC:-~/rlx-resident/src}/perf/rlx/resident/global_pass.py
 D="--run $HOME/rlx/runs/dev_ref_bh --it 18 --data $HOME/rlx/data --fast"
 [ -e ~/fleet/HANDBACK ] && { echo HANDBACK; exit 3; }
 echo "start $(date -u +%FT%TZ) chips=[$CHIPS] NG=$NG NL=$NL load: $(cat /proc/loadavg)"

@@ -673,6 +673,15 @@ if not a.nodev:
 
     BAL = {}
 
+    def local_readback(hi, lo, Bn, R1, On):
+        """[Bn R1, On] hi/lo -> float64 [Bn, T, On]. Only the T valid rows of each particle come back, untilized on
+        chip: the host untilize of the padded [Bn 32, On] pair was the local pass's host cost under 32-process
+        contention (dc32 readback 5 -> 50 ms/batch while the device phases stayed flat)."""
+        def rb(x_):
+            x_ = ttnn.slice(ttnn.reshape(x_, (Bn, R1, On)), [0, 0, 0], [Bn, T, On])
+            return ttnn.to_torch(ttnn.to_layout(x_, ttnn.ROW_MAJOR_LAYOUT)).numpy()
+        return rb(hi).astype(np.float64) + rb(lo)
+
     def local_lerp(n, Ab, own, check):
         t = {}
         Bn, On = a.B, a.own
@@ -712,7 +721,7 @@ if not a.nodev:
         ttnn.synchronize_device(dev); t["oz"] = time.perf_counter() - t0; t0 = time.perf_counter()
         hi, lo = oz_combine(S, t_ea, t_eb, n, q=Bn)
         ttnn.synchronize_device(dev); t["combine"] = time.perf_counter() - t0; t0 = time.perf_counter()
-        Cc = (ttnn.to_torch(hi).double().numpy() + ttnn.to_torch(lo).double().numpy()).reshape(Bn, R1, On)[:, :T]
+        Cc = local_readback(hi, lo, Bn, R1, On)
         t["readback"] = time.perf_counter() - t0
         return dict(t=t, **({"parity": local_parity(Cc, own)} if check else {}))
 
@@ -796,7 +805,7 @@ if not a.nodev:
         ttnn.synchronize_device(dev); mark("oz"); t["oz"] = time.perf_counter() - t0; t0 = time.perf_counter()
         hi, lo = oz_combine(S, t_ea, t_eb, n, q=Bn)
         ttnn.synchronize_device(dev); mark("combine"); t["combine"] = time.perf_counter() - t0; t0 = time.perf_counter()
-        Cc = (ttnn.to_torch(hi).double().numpy() + ttnn.to_torch(lo).double().numpy()).reshape(Bn, R1, On)[:, :T]
+        Cc = local_readback(hi, lo, Bn, R1, On)
         t["readback"] = time.perf_counter() - t0
         out = dict(t=t)
         if check:
