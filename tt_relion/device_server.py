@@ -17,10 +17,6 @@ import numpy as np
 # issue_s (host time to enqueue the phase) and wait_s (then until the chip is done). Instrument only: the syncs
 # remove the overlap a normal call has, so read the split, not the sum, against an unsynced warm call.
 PHASES = os.environ.get("TT_RELION_PHASES") == "1"
-# TT_RELION_OZ_CUT=batch: cut the digits from R_i = round(x 2^(2i+1)) for all i at once (_digits_batch), ~n + 8 ops
-# per operand instead of 6n. Default "seq" (the per-digit loop) until the chip check passes.
-OZ_CUT = os.environ.get("TT_RELION_OZ_CUT", "seq")
-OZ_CUT_MB = 256   # fp32 bytes of one stacked group of digits; bounds the batch cut's peak device memory
 
 
 class _Ttnn:
@@ -65,7 +61,10 @@ class _Ttnn:
         return out
 
     def free(self, a):
-        for x in (a if isinstance(a, list) else a[:1]):
+        """A list of device tensors, or an upload tuple (tensor or digit list, O, ...)."""
+        if isinstance(a, tuple):
+            a = a[0]
+        for x in (a if isinstance(a, list) else [a]):
             self.ttnn.deallocate(x)
 
     # ---- exact-integer cross term (cross.py TT_RELION_OZAKI) ----
@@ -89,60 +88,14 @@ class _Ttnn:
         self._mark(tag + "_digits")
         return out
 
-    def _digits_batch(self, runs, n, tag, dim):
-        """As _digits, stacked along dim (bf16, n blocks of the runs' shape). With R_i = round(x 2^(2i+1)) (half
-        to even, R_-1 = 0), the loop's digit i is R_i - 4 R_{i-1}: shifting by the even integer 4 R_{i-1}
-        commutes with half-to-even rounding. Every R_i and 4 R_{i-1} is an fp32 integer (|x 2^27| < 2^27 is
-        exact; above 2^23 it is already whole) and their difference is |q| <= 2, so each step is exact."""
-        ttnn = self.ttnn
-        x = self._put(runs)
-        self._mark(tag + "_put")
-        g = max(1, min(n, (OZ_CUT_MB << 20) // max(1, runs.size * 4)))
-        out = []
-        for a in range(0, n, g):
-            b = min(n, a + g)
-            ys = [ttnn.multiply(x, 0.0 if i < 0 else float(2 ** (2 * i + 1))) for i in range(a - 1, b)]
-            y = ttnn.concat(ys, dim)
-            self.free(ys)
-            r = ttnn.round(y, decimals=0)
-            ttnn.deallocate(y)
-            sh = list(r.shape)
-            blk = sh[dim] // (b - a + 1)
-            end = list(sh)
-            end[dim] = blk * (b - a)
-            lo = ttnn.slice(r, [0] * len(sh), end)
-            start = [0] * len(sh)
-            start[dim] = blk
-            hi = ttnn.slice(r, start, sh)
-            lo4 = ttnn.multiply(lo, 4.0)
-            q = ttnn.subtract(hi, lo4)
-            for z in (r, lo, hi, lo4):
-                ttnn.deallocate(z)
-            out.append(ttnn.typecast(q, ttnn.bfloat16))
-            ttnn.deallocate(q)
-        ttnn.deallocate(x)
-        c = out[0] if len(out) == 1 else ttnn.concat(out, dim)
-        if len(out) > 1:
-            self.free(out)
-        self._mark(tag + "_digits")
-        return c
-
     def oz_upload(self, runs, n):
-        """runs [nc, O, 480] -> (A, O, Op): the n lhs digits stacked by rows, A [nc, n * Op, 480] bf16, row block i
-        = digit i, O padded to a whole tile so every block starts on a tile row."""
+        """runs [nc, O, 480] -> (digits, O, Op): n bf16 device tensors [nc, Op, 480], O padded to a whole tile."""
         o = runs.shape[1]
         op = -(-o // 32) * 32
         if op > o:
             runs = np.pad(runs, ((0, 0), (0, op - o), (0, 0)))
         self._start()
-        if OZ_CUT == "batch":
-            a = self._digits_batch(runs, n, "lhs", 1)
-        else:
-            d = self._digits(runs, n, "lhs")
-            a = self.ttnn.concat(d, 1)
-            self.free(d)
-            self._mark("lhs_stack")
-        return a, o, op
+        return self._digits(runs, n, "lhs"), o, op
 
     def _tree_sum(self, c):
         """fp32 [nc, O, T] -> [1, O, T] by pairwise elementwise adds (exact: integer sums < 2^24)."""
@@ -161,44 +114,47 @@ class _Ttnn:
     def oz_mm(self, a, rhs, n):
         """a = oz_upload(...); rhs runs [nc, 480, T] fp32 -> n float64 [O, T], sum s = sum_{i+j=s} a_i . b_j.
 
-        One matmul per rhs digit j gives a_r . b_j for every r in row block r (the blocks with r + j >= n are
-        thrown away: n^2 small products instead of n(n+1)/2, in n dispatches instead of n(n+1)/2). The diagonal
-        sums are Horner shifts: acc_j = M_j + (acc_{j+1} moved down one block), so block s of acc_0 is sum s.
-        Every value stays an integer below 2^24 (the old per-pair path's bound), so the result is the same."""
+        The rhs digits sit side by side, B = [b_0 | b_1 | ... ] with each block padded to a whole tile Tp. Lhs digit
+        i meets only b_j with i + j < n, the first n - i blocks of B: one matmul per lhs digit, n(n+1)/2 block
+        products in n dispatches, and each resident lhs digit is read once per call. The diagonal sums are Horner
+        shifts along the columns: acc_i = M_i + [0 | acc_{i+1}], so column block s of acc_0 is sum s. Every value
+        stays an integer below 2^24, as in the per-pair sums, so the result is the same."""
         ttnn = self.ttnn
         if not hasattr(self, "lofi"):
             self.lofi = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi, math_approx_mode=False,
                                                          fp32_dest_acc_en=True, packer_l1_acc=True)
         A, o, op = a
+        nc, k, t = rhs.shape
+        tp = -(-t // 32) * 32
+        if tp > t:
+            rhs = np.pad(rhs, ((0, 0), (0, 0), (0, tp - t)))
         self._start()
-        if OZ_CUT == "batch":
-            bs, sh = self._digits_batch(rhs, n, "rhs", 0), rhs.shape
-            b = [ttnn.slice(bs, [j * sh[0], 0, 0], [(j + 1) * sh[0], sh[1], sh[2]]) for j in range(n)]
-            ttnn.deallocate(bs)
-            self._mark("rhs_slices")
-        else:
-            b = self._digits(rhs, n, "rhs")
-        nc, t = rhs.shape[0], rhs.shape[2]
+        d = self._digits(rhs, n, "rhs")
+        B = ttnn.concat(d, 2)
+        self.free(d)
+        self._mark("rhs_stack")
         z = acc = None
-        for j in range(n - 1, -1, -1):
-            m = ttnn.matmul(A, b[j], compute_kernel_config=self.lofi, dtype=ttnn.float32)
+        for i in range(n - 1, -1, -1):
+            bi = B if i == 0 else ttnn.slice(B, [0, 0, 0], [nc, k, (n - i) * tp])
+            m = ttnn.matmul(A[i], bi, compute_kernel_config=self.lofi, dtype=ttnn.float32)
+            if i:
+                ttnn.deallocate(bi)
             if acc is not None:
                 if z is None:
-                    z = ttnn.zeros([nc, op, t], dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=self.dev)
-                top = ttnn.slice(acc, [0, 0, 0], [nc, (n - 1) * op, t])
-                sh = ttnn.concat([z, top], 1)
+                    z = ttnn.zeros([nc, op, tp], dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=self.dev)
+                sh = ttnn.concat([z, acc], 2)
                 m2 = ttnn.add(m, sh)
-                for x in (m, acc, top, sh):
+                for x in (m, acc, sh):
                     ttnn.deallocate(x)
                 m = m2
             acc = m
-        if z is not None:
-            ttnn.deallocate(z)
-        self.free(b)
+        for x in (z, B):
+            if x is not None:
+                ttnn.deallocate(x)
         self._mark("mm_chain")
         acc = self._tree_sum(acc)
         self._mark("tree")
-        out = ttnn.to_torch(acc).double().numpy().reshape(n, op, t)[:, :o]
+        out = ttnn.to_torch(acc).double().numpy().reshape(op, n, tp).transpose(1, 0, 2)[:, :o, :t]
         ttnn.deallocate(acc)
         self._mark("download")
         if PHASES:
