@@ -11,6 +11,7 @@ void kernel_main() {
     constexpr uint32_t N = get_compile_time_arg_val(base + 0);
     constexpr uint32_t RT = get_compile_time_arg_val(base + 1);
     constexpr uint32_t OT = get_compile_time_arg_val(base + 2);
+    constexpr bool PRE = get_compile_time_arg_val(base + 3);   // S already holds b_k (oz_fused prescale)
     constexpr uint32_t cb_s = 0, cb_e = 2, cb_x = 3, TB = 4096;
     const auto ss = TensorAccessor(s_args, get_common_arg_val<uint32_t>(0), TB);
     const auto sa = TensorAccessor(a_args, get_common_arg_val<uint32_t>(1), 128);
@@ -32,6 +33,7 @@ void kernel_main() {
             noc_async_read_barrier();
             // b_k = S_k 2^-(2k+2) exactly, as an exponent-field subtract: S_k are integers below 2^24 (exponent
             // >= 127 when nonzero), so the result stays normal; zeros stay zero.
+            if constexpr (PRE) { cb_push_back(cb_s, 1); continue; }
             uint32_t* p = reinterpret_cast<uint32_t*>(w);   // the read barrier above orders the NoC write
             const uint32_t dk = (2 * k + 2) << 23;
 #pragma GCC unroll 8
