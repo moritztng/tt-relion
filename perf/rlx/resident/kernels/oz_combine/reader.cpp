@@ -1,6 +1,5 @@
 // oz_combine reader: output tile u = (rt, ct) of [RT, OT]. Streams the n Ozaki sums S_k (fp32 TILE [n, RT*32, OT*32])
 // for that tile, and builds the exact scale tile E[r, c] = 2^(ea[r] + eb[c]) from the int32 row/column exponents.
-// Once at start: n constant tiles c_k = 2^-(2k+2) (pushed once, never popped by compute).
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
 
@@ -12,21 +11,12 @@ void kernel_main() {
     constexpr uint32_t N = get_compile_time_arg_val(base + 0);
     constexpr uint32_t RT = get_compile_time_arg_val(base + 1);
     constexpr uint32_t OT = get_compile_time_arg_val(base + 2);
-    constexpr uint32_t cb_s = 0, cb_c = 1, cb_e = 2, cb_x = 3, TB = 4096;
+    constexpr uint32_t cb_s = 0, cb_e = 2, cb_x = 3, TB = 4096;
     const auto ss = TensorAccessor(s_args, get_common_arg_val<uint32_t>(0), TB);
     const auto sa = TensorAccessor(a_args, get_common_arg_val<uint32_t>(1), 128);
     const auto sb = TensorAccessor(b_args, get_common_arg_val<uint32_t>(2), 128);
     const uint32_t u0 = get_arg_val<uint32_t>(0), nu = get_arg_val<uint32_t>(1);
 
-    cb_reserve_back(cb_c, N);
-    {
-        volatile tt_l1_ptr uint32_t* p = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_c));
-        for (uint32_t k = 0; k < N; ++k) {
-            const uint32_t v = (127u - (2 * k + 2)) << 23;
-            for (uint32_t i = 0; i < 1024; ++i) p[k * 1024 + i] = v;
-        }
-    }
-    cb_push_back(cb_c, N);
 
     cb_reserve_back(cb_x, 2);
     const uint32_t xa = get_write_ptr(cb_x), xb = xa + 128;
@@ -37,8 +27,18 @@ void kernel_main() {
         const uint32_t rt = u / OT, ct = u % OT;
         for (uint32_t k = 0; k < N; ++k) {
             cb_reserve_back(cb_s, 1);
-            noc_async_read_page(k * RT * OT + u, ss, get_write_ptr(cb_s));
+            const uint32_t w = get_write_ptr(cb_s);
+            noc_async_read_page(k * RT * OT + u, ss, w);
             noc_async_read_barrier();
+            // b_k = S_k 2^-(2k+2) exactly, as an exponent-field subtract: S_k are integers below 2^24 (exponent
+            // >= 127 when nonzero), so the result stays normal; zeros stay zero.
+            uint32_t* p = reinterpret_cast<uint32_t*>(w);   // the read barrier above orders the NoC write
+            const uint32_t dk = (2 * k + 2) << 23;
+#pragma GCC unroll 8
+            for (uint32_t i = 0; i < 1024; ++i) {
+                const uint32_t v = p[i];
+                p[i] = v - (dk & (0u - static_cast<uint32_t>((v << 1) != 0)));
+            }
             cb_push_back(cb_s, 1);
         }
         if (rt != last_rt) noc_async_read_page(rt, sa, xa);

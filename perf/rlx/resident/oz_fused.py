@@ -87,8 +87,8 @@ def oz_combine(S, ea, eb, n):
         fmt = ttnn.CBFormatDescriptor(buffer_index=i, data_format=dt, page_size=page)
         return ttnn.CBDescriptor(total_size=depth * page, core_ranges=grid, format_descriptors=[fmt])
 
-    cbs = [cb(0, ttnn.float32, 4096, 2 * n), cb(1, ttnn.float32, 4096, n), cb(2, ttnn.float32, 4096, 2),
-           cb(3, ttnn.int32, 128, 2), cb(16, ttnn.float32, 4096, 2), cb(17, ttnn.float32, 4096, 2)]
+    cbs = [cb(0, ttnn.float32, 4096, 2 * n), cb(2, ttnn.float32, 4096, 2), cb(3, ttnn.int32, 128, 2),
+           cb(16, ttnn.float32, 4096, 2), cb(17, ttnn.float32, 4096, 2)]
     rt = ttnn.RuntimeArgs()
     first = 0
     for group, per in ((cg1, w1), (cg2, w2)):
@@ -109,12 +109,61 @@ def oz_combine(S, ea, eb, n):
                                    common_runtime_args=[hi.buffer_address(), lo.buffer_address()],
                                    config=ttnn.WriterConfigDescriptor())
     cfg = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True)
-    cfg.dst_full_sync_en = True
     modes = [ttnn.UnpackToDestMode.Default] * 64
-    for i in (0, 1, 2):
+    for i in (0, 2):
         modes[i] = ttnn.UnpackToDestMode.UnpackToDestFp32
     cfg.unpack_to_dest_mode = modes
     compute = ttnn.KernelDescriptor(kernel_source=str(CDIR / "compute.cpp"), source_type=path, core_ranges=grid,
                                     compile_time_args=[n], runtime_args=rt, config=cfg)
     ttnn.generic_op([S, ea, eb, hi, lo], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
     return hi, lo
+
+
+XDIR = Path(__file__).resolve().parent / "kernels" / "oz_cut"
+
+
+def oz_cut(X, ea, n, grp=2):
+    """X fp32 TILE [R, K] (padded), ea int32 RM [R/32, 32] row exponents (|X[r]| <= 2^ea[r]). Returns bf16 TILE
+    [n, R, K] base-4 digits in [-2, 2] with X 2^-ea = sum_i d_i 2^-(2i+1) + residual (< 2^-(2n+1)), in one pass
+    (the ttnn chain was ~4 [R, K] DRAM passes per digit)."""
+    dev = X.device()
+    R, K = int(X.shape[-2]), int(X.shape[-1])
+    RT, KT = R // 32, K // 32
+    D = ttnn.allocate_tensor_on_device(ttnn.Shape([n, R, K]), ttnn.bfloat16, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
+    units = RT * KT
+    g = dev.compute_with_storage_grid_size()
+    _, grid, cg1, cg2, w1, w2 = core_split.split_work_to_cores(g, units, 0)
+
+    def cb(i, dt, page, depth):
+        fmt = ttnn.CBFormatDescriptor(buffer_index=i, data_format=dt, page_size=page)
+        return ttnn.CBDescriptor(total_size=depth * page, core_ranges=grid, format_descriptors=[fmt])
+
+    cbs = [cb(0, ttnn.float32, 4096, 2), cb(1, ttnn.float32, 4096, 2), cb(2, ttnn.int32, 128, 1),
+           cb(16, ttnn.bfloat16, 2048, 12)]
+    rt = ttnn.RuntimeArgs()
+    first = 0
+    for group, per in ((cg1, w1), (cg2, w2)):
+        for cr in group.ranges():
+            for cx in range(cr.start.x, cr.end.x + 1):
+                for cy in range(cr.start.y, cr.end.y + 1):
+                    rt[cx][cy] = [first, per]
+                    first += per
+    assert first == units
+    acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
+    path = ttnn.KernelDescriptor.SourceType.FILE_PATH
+    reader = ttnn.KernelDescriptor(kernel_source=str(XDIR / "reader.cpp"), source_type=path, core_ranges=grid,
+                                   compile_time_args=acc(X) + acc(ea) + [KT], runtime_args=rt,
+                                   common_runtime_args=[X.buffer_address(), ea.buffer_address()],
+                                   config=ttnn.ReaderConfigDescriptor())
+    writer = ttnn.KernelDescriptor(kernel_source=str(XDIR / "writer.cpp"), source_type=path, core_ranges=grid,
+                                   compile_time_args=acc(D) + [n, units], runtime_args=rt,
+                                   common_runtime_args=[D.buffer_address()], config=ttnn.WriterConfigDescriptor())
+    cfg = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True)
+    modes = [ttnn.UnpackToDestMode.Default] * 64
+    for i in (0, 1):
+        modes[i] = ttnn.UnpackToDestMode.UnpackToDestFp32
+    cfg.unpack_to_dest_mode = modes
+    compute = ttnn.KernelDescriptor(kernel_source=str(XDIR / "compute.cpp"), source_type=path, core_ranges=grid,
+                                    compile_time_args=[n, grp], runtime_args=rt, config=cfg)
+    ttnn.generic_op([X, ea, D], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
+    return D

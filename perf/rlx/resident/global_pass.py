@@ -38,12 +38,14 @@ ap.add_argument("--size", type=int, default=50, help="coarse image size (s50 = t
 ap.add_argument("--B", type=int, default=16)
 ap.add_argument("--O", type=int, default=1024)
 ap.add_argument("--ns", default="8,10,12,14")
+ap.add_argument("--ns-n", type=int, default=0, help="digits for the |CTF P|^2 product (0 = same as --ns)")
 ap.add_argument("--kc", type=int, default=480)
 ap.add_argument("--out", required=True)
 ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--balance", type=int, default=1)
 ap.add_argument("--fused", type=int, default=1, help="oz_fused kernel (1) or the composed ttnn matmul+add path (0)")
+ap.add_argument("--fcut", type=int, default=1, help="fused SFPU digit-cut kernel (1) or the ttnn chain (0)")
 ap.add_argument("--fcomb", type=int, default=1, help="fused SFPU combine kernel (1) or the ttnn TwoSum chain (0)")
 ap.add_argument("--frac", type=float, default=0.999, help="RELION adaptive_fraction")
 ap.add_argument("--sig-off", type=float, default=3.0, help="offset prior sigma, px")
@@ -408,7 +410,7 @@ if not a.nodev:
         return ttnn.multiply(XA, put(np.ldexp(1.0, e.astype(int)).reshape(1, -1))), \
             ttnn.multiply(XB, put(np.ldexp(1.0, -e.astype(int)).reshape(1, -1)))
 
-    from oz_fused import oz_combine, oz_fused
+    from oz_fused import oz_combine, oz_cut, oz_fused
 
     def oz_fused_dev(Xa, Xb, n):
         """Xa [Ra, K], Xb [Ob, K] fp32 TILE -> (hi, lo) df32 of Xa Xb^T, Ozaki n through oz_fused. Row exponents per side;
@@ -417,8 +419,13 @@ if not a.nodev:
         Rp, Op = -(-Ra // 512) * 512, -(-Ob // 256) * 256
         ea_, eb_ = row_exp_dev(Xa), row_exp_dev(Xb)
 
+        ti = lambda e_, m: ttnn.from_torch(torch.from_numpy(np.pad(e_, (0, m - len(e_))).astype(np.int32).reshape(-1, 32)),  # noqa: E731
+                                          dtype=ttnn.int32, layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
+
         def digits(X_, e_, npad, tr):
             Xp = ttnn.pad(X_, [(0, npad - X_.shape[0]), (0, Kp - K)], 0.0)
+            if a.fcut:   # one SFPU kernel: exact scale, n round/subtract/x4 steps, bf16 digit planes
+                return oz_cut(Xp, ti(e_, npad), n)
             r = ttnn.multiply(Xp, put(np.ldexp(1.0, -np.pad(e_, (0, npad - len(e_)))).reshape(-1, 1)))
             out = []
             for i in range(n):
@@ -432,8 +439,6 @@ if not a.nodev:
         Ad, Bd = digits(Xa, ea_, Rp, False), digits(Xb, eb_, Op, False)
         S = oz_fused(Ad, Bd, n, bt=True)   # B digits stay [n, O, K]; the unpacker transposes each tile
         if a.fcomb:   # one SFPU kernel: TwoSum over k and the exact 2^(ea + eb) scale, a single pass over S
-            ti = lambda e_, m: ttnn.from_torch(torch.from_numpy(np.pad(e_, (0, m - len(e_))).astype(np.int32).reshape(-1, 32)),  # noqa: E731
-                                              dtype=ttnn.int32, layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
             hi, lo = oz_combine(S, ti(ea_, Rp), ti(eb_, Op), n)
             return hi[:Ra, :Ob], lo[:Ra, :Ob]
         cs = put(np.ldexp(1.0, np.pad(ea_, (0, Rp - Ra))).reshape(-1, 1))
@@ -460,7 +465,7 @@ if not a.nodev:
         tA, B_ = balance(t_A, B_) if a.balance else (t_A, B_)
         tA2, B2 = balance(t_A2, B2) if a.balance else (t_A2, B2)
         Ch, Cl = oz_fused_dev(tA, B_, n)
-        Nh, Nl = oz_fused_dev(tA2, B2, n)
+        Nh, Nl = oz_fused_dev(tA2, B2, a.ns_n or n)   # N = sum |CTF P|^2 w is all-positive: no cancellation inside it
         Nh = ttnn.concat([Nh] * T, dim=0)
         Nl = ttnn.concat([Nl] * T, dim=0)
         Nxp = Nx[perm]
@@ -587,7 +592,7 @@ if not a.nodev:
                               "frac": a.frac}}
     print(json.dumps(rec_s), flush=True)
     fh.write(json.dumps(rec_s) + "\n")
-    grade("RESIDENT chip n14 (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, proj_rel_vs_f64=prel, **r0["diag"]))
+    grade("RESIDENT chip n14 (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, ns_n=a.ns_n or n, proj_rel_vs_f64=prel, **r0["diag"]))
     clk = Clock(nodes)
     ts = []
     for _ in range(a.reps):

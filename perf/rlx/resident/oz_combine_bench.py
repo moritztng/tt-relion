@@ -25,9 +25,8 @@ def emul(S, ea, eb, n):
     H = (S[0] * f32(2.0 ** -2)).astype(f32); L = np.zeros_like(H)
     for k in range(1, n):
         b = (S[k] * f32(2.0 ** -(2 * k + 2))).astype(f32)
-        s = (H + b).astype(f32); bb = (s - H).astype(f32)
-        db = (b - bb).astype(f32); ap = (s - bb).astype(f32); da = (H - ap).astype(f32)
-        L = (L + (da + db).astype(f32)).astype(f32); H = s
+        s = (H + b).astype(f32); ap = (s - b).astype(f32); da = (H - ap).astype(f32); bp = (s - ap).astype(f32)
+        L = (L + da).astype(f32); L = (L + (b - bp).astype(f32)).astype(f32); H = s
     E = np.ldexp(f32(1.0), (ea.reshape(-1)[:, None] + eb.reshape(-1)[None, :])).astype(f32)
     return (H * E).astype(f32), (L * E).astype(f32)
 
