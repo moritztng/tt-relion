@@ -28,7 +28,9 @@ SPLIT = "--split" in sys.argv   # final projections as gathers from a 3-piece bf
 # to the chip holding their direction's slice: 181 GB/half = 11 GB/chip on 16 chips); measured runs/ts1 2.77 ms vs
 # the 21.5 ms projection per particle at K 98304, bit-exact
 FIN_MS_K98304 = 41.45   # balance computed once per iteration (runs/lp3 rerun); 45.1 with per-batch balance   # local passes from a shared per-half digit table (final stays on proj_lerp: 788 GB/half)
-FINE_S = 1030.0         # fine pass: 0.4e12 px of child projections at PROJ_PX_S + 1.9e13 FLOP (state doc), chip-s
+FINE_S = 1030.0 if "--dc" not in sys.argv else 0.4e12 * 0.0236813 / (16 * 0 + 672 * 7168)  # fine pass chip-s:
+# 0.4e12 child-projection px over the job (state doc) x the measured all-in per-px cost of the per-particle lerp
+# route at the fine-pass shape (runs/fp1: s134, own 672, 23.68 ms/particle = 4.92 ns/px incl. product)
 rows = [l.split("\t") for l in open("results/work_full_s0.tsv") if l[0].isdigit()]
 tot = {}
 for r in rows:
