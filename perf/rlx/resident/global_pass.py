@@ -43,6 +43,7 @@ ap.add_argument("--out", required=True)
 ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--balance", type=int, default=1)
+ap.add_argument("--fast", action="store_true", help="skip the host fp32/Ozaki arms (timing at production row counts)")
 a = ap.parse_args()
 APIX, ORI = 1.34, 360
 
@@ -207,9 +208,10 @@ Xr = torch.tensor(np.array([np.concatenate([x.real, x.imag]) for x, cf in rows])
 CF = torch.tensor(np.array([np.tile(cf, 2) for x, cf in rows]), dtype=torch.float32)
 W2 = torch.tensor(np.tile(w, 2), dtype=torch.float32)
 Pt = torch.tensor(Br, dtype=torch.float32)
-for r0 in range(len(rows)):
+for r0 in ([] if a.fast else range(len(rows))):
     d32[r0] = ((Xr[r0][None] - CF[r0][None] * Pt) ** 2 * W2).sum(1).double().numpy()
-grade("host fp32 direct", d32)
+if not a.fast:
+    grade("host fp32 direct", d32)
 
 # exact scaling + digits, host emulation of the integer sums (exact) to separate combine error from chip arithmetic
 def row_exp(x):
@@ -243,7 +245,7 @@ def two_sum(x, y):  # float32 TwoSum, exact error term under round-to-nearest
 Nf = (Nx[:, None] + Ncp) / 2          # float64 norms; on the chip they are a second Ozaki product (per particle, not per t)
 Nhi = Nf.astype(np.float32); Nlo = (Nf - Nhi).astype(np.float32)
 scale = np.ldexp(1.0, ea)[:, None] * np.ldexp(1.0, eb)[None, :]
-for n in map(int, a.ns.split(",")):
+for n in ([] if a.fast else map(int, a.ns.split(","))):
     Ad, Bd = digits_np(An, n), digits_np(Bn, n)
     S = [sum(Ad[i] @ Bd[k - i].T for i in range(k + 1)) for k in range(n)]   # exact integers (< 2^24)
     # host float64 combine (the hook)
@@ -462,9 +464,10 @@ if not a.nodev:
     # RELION's own class on the chip's fp32 projection: direct form in fp32
     Pt2 = torch.tensor(np.concatenate([Pre, Pim], 1), dtype=torch.float32)
     d32c = np.empty_like(d64)
-    for q_ in range(len(rows)):
+    for q_ in ([] if a.fast else range(len(rows))):
         d32c[q_] = ((Xr[q_][None] - CF[q_][None] * Pt2) ** 2 * W2).sum(1).double().numpy()
-    grade("host fp32 direct on CHIP projection", d32c, dict(proj_rel_vs_f64=prel))
+    if not a.fast:
+        grade("host fp32 direct on CHIP projection", d32c, dict(proj_rel_vs_f64=prel))
     print(json.dumps({"diag": r0["diag"]}), flush=True)
     grade("RESIDENT chip n14 (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, proj_rel_vs_f64=prel, **r0["diag"]))
     clk = Clock(nodes)
@@ -472,7 +475,10 @@ if not a.nodev:
     for _ in range(a.reps):
         ts.append(chip_pass(n)["t"])
     lo_c, med = clk.stop()
-    rec = {"timing_warm": {k_: round(min(t_[k_] for t_ in ts), 4) for k_ in ts[0]}, "R": len(rows), "O": a.O, "K": K,
+    tw = {k_: round(min(t_[k_] for t_ in ts), 4) for k_ in ts[0]}
+    fl = n * (n + 1) / 2 * 2 * (len(rows) + a.B) * a.O * Kp      # Ozaki pair matmuls, C and |CTF P|^2 terms
+    rec = {"timing_warm": tw, "oz_TFLOPs": round(fl / tw["oz_combine"] / 1e12, 1), "real_TFLOP_equiv_per_s":
+           round(2 * len(rows) * a.O * K / sum(tw.values()) / 1e12, 3), "R": len(rows), "O": a.O, "K": K,
            "P": P, "aiclk_min": lo_c, "aiclk_med": med, "load1": open("/proc/loadavg").read().split()[0], "nodes": nodes}
     print(json.dumps(rec), flush=True)
     fh.write(json.dumps(rec) + "\n")
