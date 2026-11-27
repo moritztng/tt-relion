@@ -19,6 +19,14 @@ with "ref" present the operand is built and kept under that key, without it the 
 Protocol, one JSON line per request on stdin, one line back ("ok"):
     {"shm": name, "O": o, "T": t, "K": k, "ref": bool, "key": str|null, "gen": int, "client": {...}}
 Segment: [ref fp32 O*K, only if "ref"] [shw fp32 T*K] [out float64 O*T].
+
+Projected on the chip. The server keeps up to two 3D models (the two half-set references), each sent
+once:  {"shm", "model": mkey, "nvox": n}  with segment [model fp32 n*2] (RELION's complex voxels).
+A request with "proj" then ships no reference; the server projects the O orientations itself:
+    "proj": {"mkey": str, "geom": {mdlX mdlY mdlZ mdlInitY mdlInitZ maxR2 pf imgX imgY maxR P}}
+Segment: [eul fp32 O*9] [shw fp32 T*K] [w fp32 K/2] -> [out float64 O*T] [ref2 float64 O],
+ref2[o] = sum_p w[p] |ref[o, p]|^2 (the bridge needs it for d2), through the same split matmul as the
+cross term against one extra column [w | w]. The reply is "nomodel" if mkey is not kept (evicted).
 EOF on stdin closes the backend and exits; the exit line is the TTDEV line perf/rlx/wallmap.py reads.
 """
 import json
@@ -69,6 +77,29 @@ def reduce(out, n):
     return out.sum(0, dtype=np.float64).reshape(-1, SPLIT, n).sum(1)
 
 
+def pixels(g):
+    """The Fourier pixels of one image, as the bridge's _dense_diff2 builds them: x, y float32 [P]."""
+    pix = np.arange(g["P"])
+    yi = pix // g["imgX"]
+    return (pix % g["imgX"]).astype(np.float32), np.where(yi > g["maxR"], yi - g["imgY"], yi).astype(np.float32)
+
+
+def _projected(backend, req, buf, o, t, k):
+    """One "proj" request: the chip projects, then the cross term and ref2. Returns (C, ref2) float64."""
+    pj, g = req["proj"], req["proj"]["geom"]
+    off = 0
+    eul = np.ndarray((o, 9), np.float32, buf, offset=off)
+    shw = np.ndarray((t, k), np.float32, buf, offset=off + 36 * o)
+    w = np.ndarray((k // 2,), np.float32, buf, offset=off + 36 * o + 4 * t * k)
+    a, a2 = backend.project(pj["mkey"], eul, g)
+    nc, kc = backend.shape(a)
+    c = reduce(backend.mm(a, rhs_operand(shw, nc, kc)), t)
+    ref2 = reduce(backend.mm(a2, rhs_operand(np.concatenate([w, w])[None], nc, kc)), 1)[:, 0]
+    backend.free(a)
+    backend.free(a2)
+    return c, ref2, off + 36 * o + 4 * t * k + 2 * k
+
+
 def serve(backend, reply):
     from multiprocessing import resource_tracker, shared_memory
     shm, gen, kept = None, None, {}
@@ -82,11 +113,32 @@ def serve(backend, reply):
                 shm.close()
             shm = shared_memory.SharedMemory(name=req["shm"])
             resource_tracker.unregister(shm._name, "shared_memory")   # the bridge owns it
-        if req["gen"] != gen:
+        if req.get("gen", gen) != gen:
             for a in kept.values():
                 backend.free(a)
             gen, kept = req["gen"], {}
+        if "model" in req:
+            backend.set_model(req["model"], np.ndarray((req["nvox"], 2), np.float32, shm.buf))
+            reply.write("ok\n")
+            reply.flush()
+            continue
         o, t, k = req["O"], req["T"], req["K"]
+        if req.get("proj"):
+            try:
+                c, ref2, off = _projected(backend, req, shm.buf, o, t, k)
+            except KeyError:
+                reply.write("nomodel\n")
+                reply.flush()
+                continue
+            np.ndarray((o, t), np.float64, shm.buf, offset=off)[...] = c
+            np.ndarray((o,), np.float64, shm.buf, offset=off + 8 * o * t)[...] = ref2
+            t3 = time.time()
+            mm += t3 - t0
+            client = req.get("client", client)
+            calls += 1
+            reply.write("ok\n")
+            reply.flush()
+            continue
         nref = o * k if req["ref"] else 0
         f32 = np.ndarray((nref + t * k,), np.float32, shm.buf)
         if req["ref"]:

@@ -65,7 +65,7 @@ _DUMP = os.environ.get("TT_RELION_DUMP", "")
 _DUMP_N = int(os.environ.get("TT_RELION_DUMP_N", "1"))
 _dumped = [0]
 _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
-          "proj_hit": 0, "proj_miss": 0}
+          "proj_hit": 0, "proj_miss": 0, "devproj": 0}
 # TT_RELION_PROJ_CACHE_MB: cap on kept coarse references (device path), per rank on the host and per
 # chip on the device. In a global search every particle's coarse pass asks for the same orientation set
 # against the same reference, so the projection and its left operand are per-iteration constants:
@@ -75,6 +75,10 @@ _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
 # 0 disables.
 _PCACHE_MB = int(os.environ.get("TT_RELION_PROJ_CACHE_MB", "4096"))
 _pc = {"model": None, "gen": 0, "seen": set(), "hit": {}, "bytes": 0}
+# TT_RELION_DEVPROJ=1: the fine pass projects on the chip. Each server keeps the model it last saw in a
+# coarse call (the same projector the particle's fine call uses), and a fine call ships only its Euler
+# matrices instead of the [O, 2P] reference. Off by default until the dev-cell A/B.
+_DEVPROJ = os.environ.get("TT_RELION_DEVPROJ", "") not in ("", "0")
 _pc_lock = threading.Lock()
 
 
@@ -181,6 +185,56 @@ class _Server:
         self.shm = None
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
         self.gen, self.kept, self.kept_bytes = None, set(), 0            # operands this chip keeps
+        self.models = []                                                 # model keys this chip keeps, oldest first
+
+    def _seg(self, need):
+        from multiprocessing import shared_memory
+        if self.shm is None or self.shm.size < need:
+            if self.shm is not None:
+                self.shm.close()
+                self.shm.unlink()
+            self.shm = shared_memory.SharedMemory(create=True, size=need)
+
+    def _ask(self, req):
+        self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
+        self.p.stdin.flush()
+        r = self.p.stdout.readline().strip()
+        if r not in ("ok", "nomodel"):
+            raise RuntimeError("device server died, rc=%s" % self.p.poll())
+        return r
+
+    def model(self, mkey, mdl):
+        """Make this chip keep the model mkey (fp32 [nvox, 2]); a no-op if it already does."""
+        with self.lock:
+            if mkey in self.models:
+                return
+            self._seg(mdl.nbytes)
+            np.ndarray(mdl.shape, np.float32, self.shm.buf)[...] = mdl
+            self._ask({"shm": self.shm.name, "model": mkey, "nvox": int(mdl.shape[0])})
+            self.models = (self.models + [mkey])[-2:]
+
+    def cross_proj(self, mkey, g, eul, shw, w):
+        """(C [O, T], ref2 [O]) float64 with the references projected on the chip; None if it lost the model."""
+        o, (t, k) = eul.shape[0], shw.shape
+        with self.lock:
+            off = 4 * (9 * o + t * k + k // 2)
+            self._seg(off + 8 * (o * t + o))
+            f32 = np.ndarray((off // 4,), np.float32, self.shm.buf)
+            f32[:9 * o] = eul.reshape(-1)
+            f32[9 * o:9 * o + t * k] = shw.reshape(-1)
+            f32[9 * o + t * k:] = w
+            del f32
+            t1 = time.time()
+            r = self._ask({"shm": self.shm.name, "O": o, "T": t, "K": k, "gen": self.gen,
+                           "proj": {"mkey": mkey, "geom": g}, "client": self.c})
+            self.c["rt_s"] = round(self.c["rt_s"] + time.time() - t1, 4)
+            self.c["calls"] += 1
+            if r == "nomodel":
+                self.models = [m for m in self.models if m != mkey]
+                return None
+            c = np.ndarray((o, t), np.float64, self.shm.buf, offset=off).copy()
+            ref2 = np.ndarray((o,), np.float64, self.shm.buf, offset=off + 8 * o * t).copy()
+        return c, ref2
 
     def cross(self, ref, o, shw, key, gen, kbytes):
         """C [O, T] float64 = ref [O, K] . shw [T, K]^T on the chip (tt_relion/cross.py).
@@ -232,25 +286,59 @@ class _Server:
         return out
 
 
-def _cross(ref, o, shw, key, kbytes):
-    """C [O, T] float64 on whichever of this rank's chips is idle. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
-    (one server each), so fewer ranks, and so less host memory, can still drive every chip."""
+def _pool():
+    """This rank's idle-server queue, started on first use. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
+    (one server each), so fewer ranks, and so less host memory, can still drive every chip. Servers a caller
+    registered in _srv beforehand (the stub benches) are used as they are."""
     global _free
     if _free is None:
         with _lock:
             if _free is None:
-                chips = [c for c in os.environ.get("RLX_RANK_CHIPS", "").split(",") if c] or [None]
-                _srv.extend(_Server(c) for c in chips)
+                if not _srv:
+                    chips = [c for c in os.environ.get("RLX_RANK_CHIPS", "").split(",") if c] or [None]
+                    _srv.extend(_Server(c) for c in chips)
                 q = queue.Queue()
                 for s in _srv:
                     q.put(s)
                 _free = q
-    s = _free.get()
+    return _free
+
+
+def _cross(ref, o, shw, key, kbytes):
+    """C [O, T] float64 on whichever of this rank's chips is idle."""
+    free = _pool()
+    s = free.get()
     try:
         _tl.srv = s
         return s.cross(ref, o, shw, key, _pc["gen"], kbytes)
     finally:
-        _free.put(s)
+        free.put(s)
+
+
+def _cross_proj(eul, shw, w, g):
+    """(C, ref2) with the chip projecting from the model this thread's last coarse call used; None if no chip
+    keeps it (the caller then uses RELION's projection)."""
+    dp = getattr(_tl, "dp", None)
+    if dp is None:
+        return None
+    free = _pool()
+    s = free.get()
+    try:
+        _tl.srv = s
+        return s.cross_proj(dp[0], dict(dp[1], **g), eul, shw, w)
+    finally:
+        free.put(s)
+
+
+def _keep_model(mdl_mv, geom):
+    """TT_RELION_DEVPROJ: every chip of this rank keeps the model of this coarse call, for the fine calls after it."""
+    import hashlib
+    mkey = hashlib.sha1(repr(_model_key(mdl_mv)).encode()).hexdigest()[:16]
+    _pool()
+    mdl = np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2)
+    for s in _srv:
+        s.model(mkey, mdl)
+    _tl.dp = (mkey, geom)
 
 
 def _progress():
@@ -370,7 +458,14 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
             project = lambda: t.cat(_project(t, mdl, x, y, eul[o0:o1], mdlX, mdlY,  # noqa: E731
                                              mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
                                              padding_factor), 1)
-        if device:
+        got = None
+        if device and tag == "F" and _DEVPROJ:
+            got = _cross_proj(eul[o0:o1].numpy(), shw_np, w.numpy(),
+                              dict(imgX=imgX, imgY=imgY, maxR=maxR, P=image_size))
+        if got is not None:
+            _stats["devproj"] += 1
+            d2 = t.from_numpy(got[1]).unsqueeze(1) + sh2.unsqueeze(0) - 2.0 * t.from_numpy(got[0])
+        elif device:
             ref, rr, key = _coarse_refs(t, ckey, o0, project)
             ref2 = (rr * w.double()).sum(-1)
             # Kept on the chip: the left operand is 3 bf16 parts (fp32 on device) padded to _KCHUNK.
@@ -443,6 +538,9 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
+        if _DEVPROJ and _BACKEND == "ttnn":
+            _keep_model(mdl_mv, dict(mdlX=mdlX, mdlY=mdlY, mdlZ=mdlZ, mdlInitY=mdlInitY, mdlInitZ=mdlInitZ,
+                                     maxR2=maxR2_padded, pf=padding_factor))
         acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                            mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                            padding_factor, imgX, imgY,
