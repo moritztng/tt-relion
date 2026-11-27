@@ -27,7 +27,10 @@ bash stage.sh data dev.txt || fail stage; cp dev.star full.star data/
 FAIR=/opt/relion-fair; [ $KIND = b200 ] && [ -d /opt/relion-fair100 ] && FAIR=/opt/relion-fair100
 nvidia-cuda-mps-control -d && st "MPS on" || st "MPS unavailable"
 NG=$(nvidia-smi -L | wc -l) NC=$(nproc)
-[ "$CONFIGS" = auto ] && CONFIGS=$(for r in 1 2 3; do n=$((NG*r+1)); j=$((NC/n)); [ $j -gt 6 ] && j=6; [ $j -lt 1 ] && j=1
+# Gold-standard refine needs an odd rank count (leader + even followers), so on one GPU 1 and 3 followers per GPU
+# would be 2 and 4 ranks and abort; use 2, 4, 6 followers there.
+F="1 2 3"; [ $((NG % 2)) = 1 ] && F="2 4 6"
+[ "$CONFIGS" = auto ] && CONFIGS=$(for r in $F; do n=$((NG*r+1)); j=$((NC/n)); [ $j -gt 6 ] && j=6; [ $j -lt 1 ] && j=1
   printf "%s %s 100;" $n $j; done; n=$((NG*2+1)); j=$((NC/n)); [ $j -gt 6 ] && j=6; echo "$n $j 30")
 smi(){ nvidia-smi --query-gpu=timestamp,index,clocks.sm,power.draw,utilization.gpu,memory.used --format=csv -l 1 > smi-$1.csv 2>&1 & echo $!; }
 run(){ local name=$1 relion=$2 star=$3 n=$4 j=$5 p=$6 s=$7 x=${8:-} pid; rm -rf $name; pid=$(smi $name); st "run $name start ($n ranks --j $j --pool $p seed $s)"
