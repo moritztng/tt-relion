@@ -46,3 +46,31 @@ def test_batch_matches_per_particle():
         rel = np.abs(got[p] - ref).max() / np.abs(ref).max()
         assert rel < 1e-5, (p, rel)
         assert (got[p].argmin() == ref.argmin())
+
+
+def test_threads_collect_into_batches():
+    """Concurrent diff2_coarse calls (RELION's --j threads) are grouped and stay exact."""
+    import threading
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case(seed=1, n=11)
+    n, T, O = tx.shape[0], tx.shape[1], eul.shape[0]
+    ref = relion.diff2_coarse_batch(mdl, eul, tx, ty, ir, ii, corr, **g)
+    relion._BATCH, relion._BATCH_WAIT = 4, 0.2
+    outs = [np.zeros(O * T, np.float32) for _ in range(n)]
+    ok = [False] * n
+
+    def run(p):
+        ok[p] = relion.diff2_coarse(memoryview(mdl), memoryview(eul.ravel()), memoryview(tx[p]),
+                                    memoryview(ty[p]), memoryview(ir[p]), memoryview(ii[p]),
+                                    memoryview(corr[p]), memoryview(outs[p]),
+                                    g["mdlX"], g["mdlY"], g["mdlZ"], g["mdlInitY"], g["mdlInitZ"],
+                                    g["maxR"], g["maxR2_padded"], g["padding_factor"],
+                                    g["imgX"], g["imgY"], O, T, P)
+    b0 = relion._stats.get("batches", 0)
+    th = [threading.Thread(target=run, args=(p,)) for p in range(n)]
+    [x.start() for x in th]
+    [x.join(60) for x in th]
+    relion._BATCH = 0
+    assert all(ok)
+    for p in range(n):
+        assert np.array_equal(outs[p].reshape(O, T), ref[p])
+    assert relion._stats["batches"] - b0 <= 6      # 11 particles, groups of up to 4

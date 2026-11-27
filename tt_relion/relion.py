@@ -381,10 +381,13 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
-        acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
-                           mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-                           padding_factor, imgX, imgY,
-                           orientation_num, translation_num, image_size, "C")
+        geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
+        if _BATCH > 1:
+            acc = _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom,
+                           orientation_num).reshape(-1)
+        else:
+            acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
+                               *geom, orientation_num, translation_num, image_size, "C")
         _book("C_s", time.time() - t0)
         out = np.frombuffer(out_mv, dtype=np.float32)
         out += acc
@@ -513,3 +516,62 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
         cross = (refc.double() @ shw.double().T)
     cross = cross.reshape(-1, n, T).permute(1, 0, 2)                                  # [N, O, T]
     return (ref2[:, :, None] + sh2[:, None, :] - 2.0 * cross).float().numpy()
+
+
+# TT_RELION_BATCH=<n>: coarse calls from RELION's --j threads that share an orientation set are
+# grouped, up to n at a time, into one diff2_coarse_batch. A thread that finds no partner within
+# TT_RELION_BATCH_WAIT_MS runs the batch it has, so a lone particle (the last of a rank's range)
+# never stalls.
+_BATCH = int(os.environ.get("TT_RELION_BATCH", "0"))
+_BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
+_groups = {}
+_gcv = threading.Condition()
+
+
+def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num):
+    """Queue this particle with its group; the first waiter with no active leader leads a batch."""
+    import hashlib
+    eul = np.frombuffer(eul_mv, dtype=np.float32)
+    tx = np.frombuffer(tx_mv, dtype=np.float32)
+    key = (_model_key(mdl_mv), hashlib.sha256(eul.tobytes()).digest(), tx.size, geom)
+    item = {"tx": tx.copy(), "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
+            "ir": np.frombuffer(re_mv, dtype=np.float32).copy(),
+            "ii": np.frombuffer(im_mv, dtype=np.float32).copy(),
+            "w": np.frombuffer(corr_mv, dtype=np.float32).copy(), "out": None, "err": None}
+    with _gcv:
+        g = _groups.setdefault(key, {"q": [], "led": False})
+        g["q"].append(item)
+        _gcv.notify_all()
+        while True:
+            if item["out"] is not None or item["err"] is not None:
+                break
+            if not g["led"]:
+                g["led"] = True
+                deadline = time.time() + _BATCH_WAIT
+                while len(g["q"]) < _BATCH and time.time() < deadline:
+                    _gcv.wait(deadline - time.time())
+                batch = g["q"][:_BATCH]
+                del g["q"][:_BATCH]
+                _gcv.release()
+                try:
+                    st = lambda k: np.stack([b[k] for b in batch])
+                    res = diff2_coarse_batch(mdl_mv, eul.reshape(orientation_num, 9), st("tx"),
+                                             st("ty"), st("ir"), st("ii"), st("w"), *geom)
+                    for b, r in zip(batch, res):
+                        b["out"] = r
+                    _stats["batches"] = _stats.get("batches", 0) + 1
+                    _stats["batched"] = _stats.get("batched", 0) + len(batch)
+                except Exception as exc:            # every particle of the batch declines
+                    for b in batch:
+                        b["err"] = exc
+                finally:
+                    _gcv.acquire()
+                    g["led"] = False
+                    if not g["q"]:
+                        _groups.pop(key, None)
+                    _gcv.notify_all()
+            else:
+                _gcv.wait()
+    if item["err"] is not None:
+        raise item["err"]
+    return item["out"]
