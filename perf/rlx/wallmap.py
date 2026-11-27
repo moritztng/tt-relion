@@ -49,8 +49,8 @@ dev = []
 for m in re.finditer(r"^TTDEV chip=(\S+) calls=(\d+) busy_s=([0-9.]+) up_s=([0-9.]+) mm_s=([0-9.]+) "
                      r"down_s=([0-9.]+) life_s=([0-9.]+) client=(\{.*?\})$", log, re.M):
     c = json.loads(m.group(8))
-    dev.append(dict(chip=m.group(1), calls=int(m.group(2)), busy=float(m.group(3)), up=float(m.group(4)),
-                    mm=float(m.group(5)), down=float(m.group(6)), life=float(m.group(7)), **c))
+    dev.append(dict(c, chip=m.group(1), calls=int(m.group(2)), busy=float(m.group(3)), up=float(m.group(4)),
+                    mm=float(m.group(5)), down=float(m.group(6)), life=float(m.group(7))))
 
 clk, cols = [], None
 for line in (d / "aiclk.tsv").read_text().splitlines():
