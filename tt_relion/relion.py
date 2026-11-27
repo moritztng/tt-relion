@@ -203,14 +203,14 @@ class _Server:
             raise RuntimeError("device server died, rc=%s" % self.p.poll())
         return r
 
-    def model(self, mkey, mdl):
-        """Make this chip keep the model mkey (fp32 [nvox, 2]); a no-op if it already does."""
+    def model(self, mkey, mdl, geom):
+        """Make this chip keep the model mkey (fp32 [nvox, 2], box geom); a no-op if it already does."""
         with self.lock:
             if mkey in self.models:
                 return
             self._seg(mdl.nbytes)
             np.ndarray(mdl.shape, np.float32, self.shm.buf)[...] = mdl
-            self._ask({"shm": self.shm.name, "model": mkey, "nvox": int(mdl.shape[0])})
+            self._ask({"shm": self.shm.name, "model": mkey, "nvox": int(mdl.shape[0]), "geom": geom})
             self.models = (self.models + [mkey])[-2:]
 
     def cross_proj(self, mkey, g, eul, shw, w):
@@ -337,7 +337,7 @@ def _keep_model(mdl_mv, geom):
     _pool()
     mdl = np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2)
     for s in _srv:
-        s.model(mkey, mdl)
+        s.model(mkey, mdl, geom)
     _tl.dp = (mkey, geom)
 
 

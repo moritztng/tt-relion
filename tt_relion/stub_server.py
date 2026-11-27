@@ -27,7 +27,7 @@ class _Numpy:
             return np.matmul(a, rhs)
         return np.zeros((a.shape[0], a.shape[1], rhs.shape[2]), np.float32)
 
-    def set_model(self, mkey, mdl):
+    def set_model(self, mkey, mdl, geom):
         import torch
         self.models[mkey] = torch.from_numpy(mdl.copy())
         while len(self.models) > 2:
@@ -36,13 +36,13 @@ class _Numpy:
     def project(self, mkey, eul, g):
         """The bridge's own torch fp32 _project, then the same lhs layout an uploaded reference gets."""
         import torch
-        from tt_relion.cross import lhs_operand, pixels
+        from tt_relion.cross import KCHUNK, pixels, proj_lhs
         from tt_relion.relion import _project
         x, y = (torch.from_numpy(v) for v in pixels(g))
         r, i = _project(torch, self.models[mkey], x, y, torch.from_numpy(eul.copy()), g["mdlX"], g["mdlY"],
                         g["mdlZ"], g["mdlInitY"], g["mdlInitZ"], g["maxR2"], g["pf"])
         ref = torch.cat([r, i], 1).numpy()
-        return lhs_operand(ref), lhs_operand(ref * ref)
+        return proj_lhs(ref, g["P"], KCHUNK), proj_lhs(ref * ref, g["P"], KCHUNK)
 
     def free(self, a):
         pass
