@@ -43,6 +43,7 @@ ap.add_argument("--out", required=True)
 ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--balance", type=int, default=1)
+ap.add_argument("--fused", type=int, default=1, help="oz_fused kernel (1) or the composed ttnn matmul+add path (0)")
 ap.add_argument("--fast", action="store_true", help="skip the host fp32/Ozaki arms (timing at production row counts)")
 a = ap.parse_args()
 APIX, ORI = 1.34, 360
@@ -383,7 +384,77 @@ if not a.nodev:
         return ttnn.multiply(XA, put(np.ldexp(1.0, e.astype(int)).reshape(1, -1))), \
             ttnn.multiply(XB, put(np.ldexp(1.0, -e.astype(int)).reshape(1, -1)))
 
+    from oz_fused import oz_fused
+
+    def oz_fused_dev(Xa, Xb, n):
+        """Xa [Ra, K], Xb [Ob, K] fp32 TILE -> (hi, lo) df32 of Xa Xb^T, Ozaki n through oz_fused. Row exponents per side;
+        rows padded to oz_fused's blocks (zero rows cut to zero digits); B digits transposed after the cut (exact)."""
+        Ra, Ob = Xa.shape[0], Xb.shape[0]
+        Rp, Op = -(-Ra // 512) * 512, -(-Ob // 256) * 256
+        ea_, eb_ = row_exp_dev(Xa), row_exp_dev(Xb)
+
+        def digits(X_, e_, npad, tr):
+            Xp = ttnn.pad(X_, [(0, npad - X_.shape[0]), (0, Kp - K)], 0.0)
+            r = ttnn.multiply(Xp, put(np.ldexp(1.0, -np.pad(e_, (0, npad - len(e_)))).reshape(-1, 1)))
+            out = []
+            for i in range(n):
+                q = ttnn.round(ttnn.multiply(r, 2.0 ** (2 * i + 1)))
+                qb = ttnn.typecast(q, ttnn.bfloat16)
+                if tr:
+                    qb = ttnn.transpose(qb, -2, -1)
+                out.append(ttnn.reshape(qb, (1,) + tuple(qb.shape)))
+                if i + 1 < n:
+                    r = ttnn.subtract(r, ttnn.multiply(q, 2.0 ** -(2 * i + 1)))
+            return ttnn.concat(out, dim=0)
+
+        Ad, Bd = digits(Xa, ea_, Rp, False), digits(Xb, eb_, Op, True)
+        S = oz_fused(Ad, Bd, n)
+        cs = put(np.ldexp(1.0, np.pad(ea_, (0, Rp - Ra))).reshape(-1, 1))
+        rs = put(np.ldexp(1.0, np.pad(eb_, (0, Op - Ob))).reshape(1, -1))
+        hi = lo = None
+        for k in range(n):
+            tk = ttnn.multiply(ttnn.multiply(ttnn.multiply(ttnn.reshape(S[k:k + 1], (Rp, Op)), 2.0 ** -(2 * k + 2)), cs), rs)
+            if hi is None:
+                hi, lo = tk, ttnn.multiply(tk, 0.0)
+            else:
+                hi, e2 = tsum(hi, tk)
+                lo = ttnn.add(lo, e2)
+        return hi[:Ra, :Ob], lo[:Ra, :Ob]
+
+    def chip_pass_fused(n, check=False):
+        t = {}
+        t0 = time.perf_counter()
+        pr = proj_rot(t_tab, t_pix, t_rot, gm)
+        B_ = ttnn.to_layout(ttnn.reshape(pr, (a.O, K)), ttnn.TILE_LAYOUT)
+        ttnn.synchronize_device(dev); t["proj"] = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        Braw = B_
+        B2 = ttnn.multiply(B_, B_)
+        tA, B_ = balance(t_A, B_) if a.balance else (t_A, B_)
+        tA2, B2 = balance(t_A2, B2) if a.balance else (t_A2, B2)
+        Ch, Cl = oz_fused_dev(tA, B_, n)
+        Nh, Nl = oz_fused_dev(tA2, B2, n)
+        Nh = ttnn.concat([Nh] * T, dim=0)
+        Nl = ttnn.concat([Nl] * T, dim=0)
+        Nxp = Nx[perm]
+        Nxh = Nxp.astype(np.float32); Nxl = (Nxp - Nxh).astype(np.float32)
+        sh, se = tsum(ttnn.multiply(Nh, 0.5), put(np.repeat(Nxh[:, None] / 2, a.O, 1)))
+        lo_ = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), put(np.repeat(Nxl[:, None] / 2, a.O, 1)))
+        dh, de = tsum(sh, ttnn.neg(Ch))
+        D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo_), Cl))
+        ttnn.synchronize_device(dev); t["cut_oz_combine"] = time.perf_counter() - t0
+        out = dict(t=t)
+        if check:
+            out["B"] = ttnn.to_torch(Braw).double().numpy()
+            Dd = ttnn.to_torch(D).double().numpy()[:len(rows), :a.O]
+            out["D"] = np.empty_like(Dd)
+            out["D"][perm] = Dd
+            out["diag"] = {}
+        return out
+
     def chip_pass(n, check=False):
+        if a.fused:
+            return chip_pass_fused(n, check)
         t = {}
         t0 = time.perf_counter()
         pr = proj_rot(t_tab, t_pix, t_rot, gm)                                    # [2 O NC, 1024] RM
@@ -477,7 +548,8 @@ if not a.nodev:
     lo_c, med = clk.stop()
     tw = {k_: round(min(t_[k_] for t_ in ts), 4) for k_ in ts[0]}
     fl = n * (n + 1) / 2 * 2 * (len(rows) + a.B) * a.O * Kp      # Ozaki pair matmuls, C and |CTF P|^2 terms
-    rec = {"timing_warm": tw, "oz_TFLOPs": round(fl / tw["oz_combine"] / 1e12, 1), "real_TFLOP_equiv_per_s":
+    rec = {"timing_warm": tw, "fused": a.fused,
+           "oz_TFLOPs_incl_cut_combine" if a.fused else "oz_TFLOPs": round(fl / tw.get("oz_combine", tw.get("cut_oz_combine")) / 1e12, 1), "real_TFLOP_equiv_per_s":
            round(2 * len(rows) * a.O * K / sum(tw.values()) / 1e12, 3), "R": len(rows), "O": a.O, "K": K,
            "P": P, "aiclk_min": lo_c, "aiclk_med": med, "load1": open("/proc/loadavg").read().split()[0], "nodes": nodes}
     print(json.dumps(rec), flush=True)
