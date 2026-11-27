@@ -45,6 +45,7 @@ ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--balance", type=int, default=1)
 ap.add_argument("--fused", type=int, default=1, help="oz_fused kernel (1) or the composed ttnn matmul+add path (0)")
+ap.add_argument("--pchip", type=int, default=0, help="build the particle operand on chip from the resident stack")
 ap.add_argument("--fcut", type=int, default=1, help="fused SFPU digit-cut kernel (1) or the ttnn chain (0)")
 ap.add_argument("--fcomb", type=int, default=1, help="fused SFPU combine kernel (1) or the ttnn TwoSum chain (0)")
 ap.add_argument("--frac", type=float, default=0.999, help="RELION adaptive_fraction")
@@ -355,6 +356,34 @@ if not a.nodev:
     prior_t = np.array([(dx * dx + dy * dy) / (2 * a.sig_off ** 2) for dx, dy in tr])   # -log pdf_offset
     Ah = Ah[perm]
     t_A, t_A2 = put(Ah), put(A2h)
+    # resident particle side for --pchip: pre-centred images (pose offset applied once at upload, I/O-side), the
+    # per-particle w*sc*CTF and w*(sc*CTF)^2 spectra, and the T translation phases; the [T*B, K] operand is then
+    # built on chip each pass (rows translation-major, the same order as perm).
+    Xs = np.array([X[b] * shiftp(poses[b][3], poses[b][4]) for b in range(a.B)])
+    wcf = np.array([w * sc[b] * CTF[b] for b in range(a.B)])
+    PH = np.array([shiftp(dx, dy) for dx, dy in tr])
+
+    def half(v):
+        z = np.zeros((v.shape[0], NC * 1024), np.float32); z[:, :P] = v
+        return z
+    t_xr, t_xi, t_wc = put(half(Xs.real)), put(half(Xs.imag)), put(half(wcf))
+    t_wc2 = put(half(wcf * np.array([sc[b] * CTF[b] for b in range(a.B)])))
+    t_pr, t_pi = put(half(PH.real)), put(half(PH.imag))
+
+    def kjoin(re, im):   # [n, NC*1024] re and im -> [n, K] chip order (chunk c = re 1024 px, im 1024 px); tile-aligned copies
+        parts = []
+        for c in range(NC):
+            parts += [re[:, c * 1024:(c + 1) * 1024], im[:, c * 1024:(c + 1) * 1024]]
+        return ttnn.concat(parts, dim=1)
+
+    def particle_operand():
+        ar, ai = ttnn.multiply(t_xr, t_wc), ttnn.multiply(t_xi, t_wc)
+        rr, ri = [], []
+        for t in range(T):
+            pr, pi_ = t_pr[t:t + 1], t_pi[t:t + 1]
+            rr.append(ttnn.subtract(ttnn.multiply(ar, pr), ttnn.multiply(ai, pi_)))
+            ri.append(ttnn.add(ttnn.multiply(ar, pi_), ttnn.multiply(ai, pr)))
+        return kjoin(ttnn.concat(rr, dim=0), ttnn.concat(ri, dim=0)), kjoin(t_wc2, t_wc2)
     Kp = -(-K // KC) * KC
     nc = Kp // KC
 
@@ -462,8 +491,19 @@ if not a.nodev:
         t0 = time.perf_counter()
         Braw = B_
         B2 = ttnn.multiply(B_, B_)
-        tA, B_ = balance(t_A, B_) if a.balance else (t_A, B_)
-        tA2, B2 = balance(t_A2, B2) if a.balance else (t_A2, B2)
+        if a.pchip:
+            ttnn.synchronize_device(dev); t1 = time.perf_counter()
+            A_, A2_ = particle_operand()
+            ttnn.synchronize_device(dev); t["particle_op"] = time.perf_counter() - t1
+            t2 = time.perf_counter()
+            if check:   # vs the host float64-built operand rounded to fp32
+                pa = ttnn.to_torch(A_).numpy()[:Ah.shape[0], :K]
+                t["particle_op_maxrel"] = float(np.abs(pa - Ah).max() / np.abs(Ah).max())
+            t0 += time.perf_counter() - t1   # cut_oz_combine excludes the operand build (timed on its own)
+        else:
+            A_, A2_ = t_A, t_A2
+        tA, B_ = balance(A_, B_) if a.balance else (A_, B_)
+        tA2, B2 = balance(A2_, B2) if a.balance else (A2_, B2)
         Ch, Cl = oz_fused_dev(tA, B_, n)
         Nh, Nl = oz_fused_dev(tA2, B2, a.ns_n or n)   # N = sum |CTF P|^2 w is all-positive: no cancellation inside it
         Nh = ttnn.concat([Nh] * T, dim=0)
