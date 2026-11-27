@@ -52,6 +52,8 @@ ap.add_argument("--fcomb", type=int, default=1, help="fused SFPU combine kernel 
 ap.add_argument("--cand", type=int, default=0, help="on-chip candidate compaction: only d2 within --cand-th of each particle's min comes back")
 ap.add_argument("--cand-th", type=float, default=40.0, help="candidate window in delta (exp(-40) * 53k < 3e-13 of the weight sum)")
 ap.add_argument("--cand-cap", type=int, default=8192, help="per-core candidate capacity (multiple of 256); overflow = full readback")
+ap.add_argument("--local", type=int, default=0, help="local-pass prototype: the --O orientations are the shared table, each particle scores its --own nearest")
+ap.add_argument("--own", type=int, default=160, help="own orientations per particle in --local (RELION local search: ~155)")
 ap.add_argument("--frac", type=float, default=0.999, help="RELION adaptive_fraction")
 ap.add_argument("--sig-off", type=float, default=3.0, help="offset prior sigma, px")
 ap.add_argument("--fast", action="store_true", help="skip the host fp32/Ozaki arms (timing at production row counts)")
@@ -666,6 +668,105 @@ if not a.nodev:
                 digA_max=float(max(np.abs(th(q_)).max() for q_ in Ad)),
                 digB_max=float(max(np.abs(th(q_)).max() for q_ in Bd)))
         return out
+
+    def local_pass(n, check=False):
+        """Local-pass prototype. The --O chip projections are a shared table; it is cut ONCE into n bf16 Ozaki digit
+        planes (row exponent per orientation), each particle gathers its own orientations' digit rows (ttnn.embedding,
+        bf16, in (particle, digit, orientation) order = oz_fused's q-batched B layout), and one q-batched program forms
+        every particle's [T pad 32, K] x [own, K] cross term; q-batched combine with per-particle exponents."""
+        t = {}
+        mark = lambda w: print(f"[local] {w} done {time.strftime('%H:%M:%S')}", file=sys.stderr, flush=True) if check else None  # noqa: E731
+        Bn, On = a.B, a.own
+        R1 = 32
+        assert T <= R1 and On % 32 == 0
+        pr = proj_rot(t_tab, t_pix, t_rot, gm)
+        B_ = ttnn.to_layout(ttnn.reshape(pr, (a.O, K)), ttnn.TILE_LAYOUT)
+        # particle rows b-major, T padded to 32 per particle (host-built operand, as --pchip 0)
+        Ab = np.zeros((Bn * R1, K), np.float32)
+        Ab.reshape(Bn, R1, K)[:, :T] = Ah_b.reshape(Bn, T, K)
+        tA, B_ = balance(put(Ab), B_) if a.balance else (put(Ab), B_)
+        ttnn.synchronize_device(dev)
+        t0 = time.perf_counter()
+        Op = -(-a.O // 32) * 32
+        eb_ = row_exp_dev(B_)
+        ebp = np.pad(eb_, (0, Op - a.O)).astype(np.int32)
+        tB = ttnn.pad(B_, [(0, Op - a.O), (0, Kp - K)], 0.0)
+        Bd = oz_cut(tB, ttnn.from_torch(torch.from_numpy(ebp.reshape(-1, 32)), dtype=ttnn.int32,
+                                        layout=ttnn.ROW_MAJOR_LAYOUT, device=dev), n)      # [n, Op, Kp]
+        # K chunks of <= 8160 columns: a gather of 37 KB rows (s146, K 18720) hung the chip (runs/lp1); 16 KB rows
+        # are the measured, exact shape (results/table_gather_digits_bh_chip16.jsonl)
+        KT_ = Kp // 480
+        nck = next(c for c in range(1, KT_ + 1) if KT_ % c == 0 and Kp // c <= 8160)
+        KCH = Kp // nck
+        Bd2 = ttnn.reshape(Bd, (n * Op, Kp))
+        tabs = [ttnn.to_layout(Bd2[:, c * KCH:(c + 1) * KCH] if nck > 1 else Bd2, ttnn.ROW_MAJOR_LAYOUT)
+                for c in range(nck)]
+        ttnn.synchronize_device(dev); mark("table_cut"); t["table_cut"] = time.perf_counter() - t0
+        # own sets: the On table orientations nearest each particle's pose (rotation angle)
+        Rm = np.array([euler(*e) for e in eul])
+        own = np.zeros((Bn, On), np.int64)
+        for b in range(Bn):
+            Rb = euler(*poses[b][:3])
+            ang = np.arccos(np.clip((np.einsum("oij,ij->o", Rm, Rb) - 1) / 2, -1, 1))
+            own[b] = np.sort(np.argsort(ang, kind="stable")[:On])
+        idx_h = (np.arange(n)[None, :, None] * Op + own[:, None, :]).reshape(1, -1).astype(np.int32)
+        t_idx = ttnn.from_torch(torch.from_numpy(idx_h), dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
+        ea_ = row_exp_dev(tA)
+        t_ea = ttnn.from_torch(torch.from_numpy(ea_.astype(np.int32).reshape(-1, 32)), dtype=ttnn.int32,
+                               layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
+        t_eb = ttnn.from_torch(torch.from_numpy(eb_[own].astype(np.int32).reshape(-1, 32)), dtype=ttnn.int32,
+                               layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
+        assert int(ea_.min()) + int(eb_.min()) - 2 * n > -126 and int(ea_.max()) + int(eb_.max()) < 127
+        tAp = ttnn.pad(tA, [(0, 0), (0, Kp - K)], 0.0) if Kp > K else tA
+        ttnn.synchronize_device(dev)
+        t0 = time.perf_counter()
+        Gs = [ttnn.embedding(t_idx, tb_, layout=ttnn.TILE_LAYOUT) for tb_ in tabs]
+        G = ttnn.reshape(Gs[0] if nck == 1 else ttnn.concat(Gs, dim=-1), (Bn * n, On, Kp))
+        t["nck"] = nck
+        ttnn.synchronize_device(dev); mark("gather"); t["gather"] = time.perf_counter() - t0; t0 = time.perf_counter()
+        Ad = ttnn.reshape(oz_cut(tAp, t_ea, n), (n * Bn, R1, Kp))
+        ttnn.synchronize_device(dev); mark("cutA"); t["cutA"] = time.perf_counter() - t0; t0 = time.perf_counter()
+        S = oz_fused(Ad, G, n, rb=1, nb=On // 32, bt=True, q=Bn, adm=True)
+        ttnn.synchronize_device(dev); mark("oz"); t["oz"] = time.perf_counter() - t0; t0 = time.perf_counter()
+        hi, lo = oz_combine(S, t_ea, t_eb, n, q=Bn)
+        ttnn.synchronize_device(dev); mark("combine"); t["combine"] = time.perf_counter() - t0; t0 = time.perf_counter()
+        Cc = (ttnn.to_torch(hi).double().numpy() + ttnn.to_torch(lo).double().numpy()).reshape(Bn, R1, On)[:, :T]
+        t["readback"] = time.perf_counter() - t0
+        out = dict(t=t)
+        if check:
+            bi = np.arange(Bn)[:, None, None] * T + np.arange(T)[None, :, None]
+            C_ref = C64[bi, own[:, None, :]]
+            d_ref = d64[bi, own[:, None, :]]
+            d_chip = Nx[bi[..., 0]][..., None] + Ncp[bi, own[:, None, :]] - 2 * Cc
+            near = (d_ref - d_ref.min((1, 2), keepdims=True)) < 30
+            am = lambda d: d.reshape(Bn, -1).argmin(1)  # noqa: E731
+            pt = prior_t[None, :, None]
+            sig_c = significance((d_chip + 0).transpose(1, 0, 2), prior_t, a.frac)
+            sig_r = significance(d_ref.transpose(1, 0, 2), prior_t, a.frac)
+            out["parity"] = dict(C_rel=float(np.abs(Cc - C_ref).max() / np.abs(C_ref).max()),
+                                 err_near=float(np.abs(d_chip - d_ref)[near].max()),
+                                 argmax_agree=f"{int((am(d_chip + pt) == am(d_ref + pt)).sum())}/{Bn}",
+                                 same_set=f"{sum(int(np.array_equal(x[1], y[1])) for x, y in zip(sig_c, sig_r))}/{Bn}",
+                                 own_contains_pose=int(sum(int(b in set(own[b])) for b in range(Bn))))
+        return out
+
+    if a.local:
+        Ah_b = np.empty_like(Ah)
+        Ah_b[perm] = Ah
+        n = a.nchip
+        r0 = local_pass(n, check=True)
+        rec = dict(arm=f"LOCAL table+gather n{n}", size=s, B=a.B, O_tab=a.O, own=a.own, T=T, K=K, **r0["parity"])
+        print(json.dumps(rec), flush=True); fh.write(json.dumps(rec) + "\n")
+        clk = Clock(nodes)
+        ts = [local_pass(n)["t"] for _ in range(a.reps)]
+        amin, amed = clk.stop()
+        tw = {k: round(float(np.median([x[k] for x in ts])), 5) for k in ts[0] if k != "nck"}
+        per = (tw["gather"] + tw["cutA"] + tw["oz"] + tw["combine"]) / a.B
+        rec = dict(arm="LOCAL timing_warm", B=a.B, O_tab=a.O, own=a.own, T=T, K=K, n=n, t=tw,
+                   ms_per_particle_device=round(per * 1e3, 4), aiclk_min=amin, aiclk_med=amed,
+                   load1=open("/proc/loadavg").read().split()[0], nodes=nodes)
+        print(json.dumps(rec), flush=True); fh.write(json.dumps(rec) + "\n")
+        sys.exit(0)
 
     n = a.nchip
     r0 = chip_pass(n, check=True)
