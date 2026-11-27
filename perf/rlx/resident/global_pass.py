@@ -436,8 +436,10 @@ if not a.nodev:
         Nl = ttnn.concat([Nl] * T, dim=0)
         Nxp = Nx[perm]
         Nxh = Nxp.astype(np.float32); Nxl = (Nxp - Nxh).astype(np.float32)
-        sh, se = tsum(ttnn.multiply(Nh, 0.5), put(np.repeat(Nxh[:, None] / 2, a.O, 1)))
-        lo_ = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), put(np.repeat(Nxl[:, None] / 2, a.O, 1)))
+        # |X|^2 / 2 per row as [R, 1] columns broadcast on chip (an [R, O] host upload per pass cost ~100 ms)
+        nxh = ttnn.add(ttnn.multiply(Nh, 0.0), put(Nxh[:, None] / 2))
+        sh, se = tsum(ttnn.multiply(Nh, 0.5), nxh)
+        lo_ = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), put(Nxl[:, None] / 2))
         dh, de = tsum(sh, ttnn.neg(Ch))
         D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo_), Cl))
         ttnn.synchronize_device(dev); t["cut_oz_combine"] = time.perf_counter() - t0
