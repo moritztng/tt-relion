@@ -1,6 +1,7 @@
 #ifdef _TT_ENABLED
 
 #include "src/acc/tt/tt_bridge.h"
+#include "src/acc/tt/tt_profile.h"
 
 #include <Python.h>
 
@@ -166,7 +167,11 @@ bool diff2Coarse(
 		return false;
 	}
 
+	// TTPROF rows: ttGilCoarse is the wait to enter this rank's interpreter, ttPyCoarse the Python call
+	// itself, so a stage's thread time outside the bridge's own C_s clock is attributed, not inferred.
+	TTProf::tic("ttGilCoarse");
 	PyGILState_STATE gil = PyGILState_Ensure();
+	TTProf::toc("ttGilCoarse");
 
 	const long nvox = (long)mdlX * (long)mdlY * (long)mdlZ;
 	const Py_ssize_t f = (Py_ssize_t)sizeof(float);
@@ -185,12 +190,14 @@ bool diff2Coarse(
 
 	// Trailing (ref, can_ref): diff2_coarse answers 2 for "project these and call again".
 	PyObject *res = nullptr;
+	TTProf::tic("ttPyCoarse");
 	if (a_mdl && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_out && a_ref)
 		res = PyObject_CallFunction(g_diff2, "OOOOOOOOiiiiiiifiilllOO",
 				a_mdl, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_out,
 				mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
 				(double)padding_factor, imgX, imgY,
 				orientation_num, translation_num, image_size, a_ref, Py_True);
+	TTProf::toc("ttPyCoarse");
 
 	Py_XDECREF(a_mdl); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
 	Py_XDECREF(a_re);  Py_XDECREF(a_im);  Py_XDECREF(a_corr); Py_XDECREF(a_out); Py_XDECREF(a_ref);
@@ -261,7 +268,9 @@ bool diff2Fine(
 		dst = t_ours.data();
 	}
 
+	TTProf::tic("ttGilFine");
 	PyGILState_STATE gil = PyGILState_Ensure();
+	TTProf::toc("ttGilFine");
 
 	const Py_ssize_t f = (Py_ssize_t)sizeof(float);
 	const Py_ssize_t u = (Py_ssize_t)sizeof(unsigned long);
@@ -283,12 +292,14 @@ bool diff2Fine(
 	PyObject *a_out  = PyMemoryView_FromMemory((char*)dst,        significant_num * f, PyBUF_WRITE);
 
 	PyObject *res = nullptr;
+	TTProf::tic("ttPyFine");
 	if (a_ref && a_mdl && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_ri && a_ti && a_out)
 		res = PyObject_CallFunction(g_diff2f, "OOOOOOOOOOOiiiiiiifiidlllll",
 				a_ref, a_mdl, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_ri, a_ti, a_out,
 				mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
 				(double)padding_factor, imgX, imgY, (double)sum_init,
 				orientation_num, translation_num, significant_num, image_size, job_num_count);
+	TTProf::toc("ttPyFine");
 
 	Py_XDECREF(a_ref); Py_XDECREF(a_mdl); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
 	Py_XDECREF(a_re);  Py_XDECREF(a_im);  Py_XDECREF(a_corr);
