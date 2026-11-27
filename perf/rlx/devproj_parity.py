@@ -25,6 +25,7 @@ ap.add_argument("--s", type=int, default=50)
 ap.add_argument("--O", type=int, default=64)
 ap.add_argument("--T", type=int, default=21)
 ap.add_argument("--chip", default=None)
+ap.add_argument("--reps", type=int, default=0, help="warm timed fine calls per arm (AICLK sampled with --chip)")
 a = ap.parse_args()
 
 PF = 2
@@ -99,3 +100,32 @@ scale = np.abs(d64).max()
 print("chip=%s s=%d O=%d T=%d  d2 max %.4g | err vs f64: given %.3g  devproj %.3g  (rel %.2e / %.2e) | devproj vs given %.3g"
       % (a.chip, a.s, a.O, a.T, scale, np.abs(given - d64).max(), np.abs(dev - d64).max(),
          np.abs(given - d64).max() / scale, np.abs(dev - d64).max() / scale, np.abs(dev - given).max()))
+
+if a.reps:
+    import threading
+    import time
+    clk, run = [], [True]
+
+    def sample():
+        while run[0]:
+            try:
+                clk.append(int(open("/sys/class/tenstorrent/tenstorrent!%s/tt_aiclk" % a.chip).read().split()[0]))
+            except (OSError, ValueError, TypeError):
+                pass
+            time.sleep(0.1)
+
+    th = threading.Thread(target=sample, daemon=True)
+    th.start()
+    wall = {}
+    for arm, on, r in (("given", False, ref32), ("devproj", True, ref32 * 0)):
+        relion._DEVPROJ = on
+        fine(r)
+        t0 = time.time()
+        for _ in range(a.reps):
+            fine(r)
+        wall[arm] = (time.time() - t0) / a.reps
+    run[0] = False
+    th.join()
+    print("timing s=%d O=%d T=%d: fine call wall given %.4f s, devproj %.4f s; AICLK min/median %s/%s MHz"
+          % (a.s, a.O, a.T, wall["given"], wall["devproj"], min(clk) if clk else None,
+             sorted(clk)[len(clk) // 2] if clk else None))
