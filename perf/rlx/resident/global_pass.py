@@ -671,6 +671,8 @@ if not a.nodev:
                 digB_max=float(max(np.abs(th(q_)).max() for q_ in Bd)))
         return out
 
+    BAL = {}
+
     def local_lerp(n, Ab, own, check):
         t = {}
         Bn, On = a.B, a.own
@@ -683,7 +685,18 @@ if not a.nodev:
         pr = proj_rot(t_tab, t_pix, t_ro, gm)
         Bo = ttnn.to_layout(ttnn.reshape(pr, (Bn * On, K)), ttnn.TILE_LAYOUT)
         ttnn.synchronize_device(dev); t["proj"] = time.perf_counter() - t0; t0 = time.perf_counter()
-        tA, Bo = balance(tA0, Bo) if a.balance else (tA0, Bo)
+        if a.balance:   # the K-diagonal powers of two are per iteration (column maxima of the stack and the
+            # reference), computed once and cached, not per batch (it cost 5.3 ms/particle at s352 per batch)
+            if "d" not in BAL:
+                ma = ttnn.to_torch(ttnn.max(ttnn.abs(tA0), dim=0)).double().numpy().reshape(-1)[:K]
+                mb = ttnn.to_torch(ttnn.max(ttnn.abs(Bo), dim=0)).double().numpy().reshape(-1)[:K]
+                ok = (ma > 0) & (mb > 0)
+                e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mb, 1)) - np.log2(np.where(ok, ma, 1)))), 0)
+                BAL["d"] = (put(np.ldexp(1.0, e.astype(int)).reshape(1, -1)), put(np.ldexp(1.0, -e.astype(int)).reshape(1, -1)))
+                ttnn.synchronize_device(dev); t0 = time.perf_counter()
+            tA, Bo = ttnn.multiply(tA0, BAL["d"][0]), ttnn.multiply(Bo, BAL["d"][1])
+        else:
+            tA = tA0
         ttnn.synchronize_device(dev); t["balance"] = time.perf_counter() - t0; t0 = time.perf_counter()
         ea_, eb_ = row_exp_dev(tA), row_exp_dev(Bo)
         ttnn.synchronize_device(dev); t["row_exp"] = time.perf_counter() - t0; t0 = time.perf_counter()

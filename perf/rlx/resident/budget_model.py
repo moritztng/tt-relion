@@ -24,7 +24,7 @@ if DC:
 LOC_DC_MS_K2400 = 0.2991 + 5.73 / 128
 # measured final route (runs/lp3, --local 1 --lerp 1, s352 stand-in for s360: K 98304, B8 x own 160): per particle
 # proj 21.5 + balance 5.3 + row exp 0.9 + cut 8.3 + product 9.0 + combine 0.1 ms = 45.1 ms all-in device
-FIN_MS_K98304 = 45.1   # local passes from a shared per-half digit table (final stays on proj_lerp: 788 GB/half)
+FIN_MS_K98304 = 41.45   # balance computed once per iteration (runs/lp3 rerun); 45.1 with per-batch balance   # local passes from a shared per-half digit table (final stays on proj_lerp: 788 GB/half)
 FINE_S = 1030.0         # fine pass: 0.4e12 px of child projections at PROJ_PX_S + 1.9e13 FLOP (state doc), chip-s
 rows = [l.split("\t") for l in open("results/work_full_s0.tsv") if l[0].isdigit()]
 tot = {}
