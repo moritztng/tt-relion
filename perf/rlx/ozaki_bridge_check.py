@@ -1,7 +1,7 @@
 """The bridge's cross term with TT_RELION_OZAKI on vs off: d2 error vs float64 and warm s/call, through the real
 server loop (tt_relion/cross.py). Stub server (numpy, exact digit sums) by default; --chip N uses the device server.
     TT_RELION_PYTHON=<python> python ozaki_bridge_check.py --s 146 --O 256 --T 84 [--chip N] [--ns 0,14]
-sha (of C) compares two runs bitwise.
+sha (of C) compares two runs bitwise. --fine ships the reference on every call (a fine call) instead of keeping it.
 TT_RELION_PHASES=1 in the environment adds the device server's per-phase split (TTPHASES line on stderr).
 """
 import argparse
@@ -26,6 +26,7 @@ ap.add_argument("--T", type=int, default=21)
 ap.add_argument("--chip", default=None)
 ap.add_argument("--ns", default="0,14")
 ap.add_argument("--reps", type=int, default=3)
+ap.add_argument("--fine", action="store_true", help="every call ships the reference (a fine call), none kept")
 a = ap.parse_args()
 
 # whitened Fourier data as perf/rlx/diff2_parity360.py (wk/rlx-kernels) builds it
@@ -56,14 +57,14 @@ for n in map(int, a.ns.split(",")):
             node = subprocess.check_output([os.path.join(os.path.dirname(__file__), "ttvd_nodes.sh"), str(a.chip)], text=True)
             clk = Clock([int(node)])   # the chip id is a UMD (PCI-order) id, the clock lives on its device node
         t0 = time.time()
-        C = srv.cross(lambda: ref, a.O, shw, "k", 1, 0)     # rep 0 ships and keeps the reference
+        C = srv.cross(lambda: ref, a.O, shw, None if a.fine else "k", 1, 0)   # rep 0 ships and keeps the reference
         tim.append(time.time() - t0)
     cl = clk.stop() if clk else (None, None)
     srv.p.stdin.close()
     srv.p.wait()
     srv.shm.close(), srv.shm.unlink()
     e = np.abs(ref2[:, None] + sh2[None, :] - 2 * C - d64)
-    print(json.dumps(dict(s=a.s, O=a.O, T=a.T, ozaki=n, chip=a.chip, err_max=float(e.max()),
+    print(json.dumps(dict(s=a.s, O=a.O, T=a.T, fine=a.fine, ozaki=n, chip=a.chip, err_max=float(e.max()),
                           err_near=float(e[near].max()), sha=hashlib.sha1(np.ascontiguousarray(C).tobytes()).hexdigest()[:12],
                           first_s=round(tim[0], 4),
                           warm_s=round(float(np.median(tim[1:])), 4), aiclk_min=cl[0], aiclk_med=cl[1])), flush=True)

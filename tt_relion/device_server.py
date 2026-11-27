@@ -42,8 +42,13 @@ class _Ttnn:
             self._call, self._open, self._t = {}, True, time.perf_counter()
 
     def _put(self, a):
-        return self.ttnn.from_torch(self.torch.from_numpy(a), dtype=self.ttnn.float32,
-                                    layout=self.ttnn.TILE_LAYOUT, device=self.dev)
+        """fp32 numpy -> tiled device tensor. Shipped row-major and tilized on the chip: the same bits as a host
+        tilize, 1.2-1.9x faster for a large operand (perf/rlx/up_bench.py)."""
+        ttnn = self.ttnn
+        t = ttnn.from_torch(self.torch.from_numpy(a), dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.dev)
+        u = ttnn.to_layout(t, ttnn.TILE_LAYOUT)
+        ttnn.deallocate(t)
+        return u
 
     def upload(self, lhs):
         return (self._put(lhs), lhs.shape[0], lhs.shape[2])
