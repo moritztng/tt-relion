@@ -72,3 +72,26 @@ seed floor, never per call.
 RELION calls the device once per particle batch from `MlOptimiser::expectation` (not per particle, not per orientation
 chunk). Each call passes particle ids, the orientation and translation sets and returns the weights and sums above. No
 Python runs per call.
+
+### Hook points (RELION 5, `src/acc/acc_ml_optimiser_impl.h`)
+
+`accDoExpectationOneParticle` runs per particle and per thread in two passes. Pass 0 calls
+`getAllSquaredDifferencesCoarse`, which fills the dense `Mweight` array
+`[class][dir][psi][trans]` with diff2, then `convertAllSquaredDifferencesToWeights`. Pass 1 builds the fine
+projection set from the coarse significant samples, calls `getAllSquaredDifferencesFine` into
+`FinePassWeights`, converts again, and `storeWeightedSums` backprojects.
+
+The batch call goes in `MlOptimiser::expectationSomeParticles`, before the threads start, over
+`[my_first_part_id, my_last_part_id]`:
+
+1. `TTBridge::estepBatch` sends the particle ids, each particle's direction and psi prior ranges and the translation
+   grid. The chips already hold the particles and the half's reference for this iteration.
+2. The chips return, per particle, its coarse significant set (sample index, diff2) and min diff2. This replaces
+   pass 0's `getAllSquaredDifferencesCoarse` and the coarse half of `convertAllSquaredDifferencesToWeights`: the
+   per-particle code copies the returned diff2 into `Mweight` (all other entries stay at `lowest()`, which RELION
+   already treats as insignificant) and runs its own convert, so the fine set it builds is RELION's own.
+3. In the next step the fine diff2 and weights come back in the same call and pass 1 is skipped the same way, leaving
+   `storeWeightedSums` on the host. Moving it on card is the last step.
+
+Each particle that the batch did not cover (declined shape, broken chip) runs RELION's own code unchanged, so a
+failure degrades to the CPU path instead of failing the run.

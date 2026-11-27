@@ -50,6 +50,19 @@ namespace TTBridge
 	// grades one against the other. Returns immediately when the mode is off.
 	void diff2FineCheck(const float *diff2s, long significant_num);
 
+	// Resident E-step, one call per particle batch from MlOptimiser::expectationSomeParticles.
+	// The chips hold the particles and this iteration's reference; the call names particles and
+	// their sampling. For every particle it covers it fills sig_off[p]..sig_off[p+1] of sig_idx
+	// (flat RELION Mweight index, [class][dir][psi][trans]) and sig_d2, plus min_d2[p], and sets
+	// covered[p] = 1. Entries absent from the set are insignificant. covered[p] = 0 means RELION
+	// runs its own pass 0 for that particle. Returns false when no particle was covered.
+	bool estepBatch(
+			const long *part_ids, long nr_parts,
+			const int *dir_lo, const int *dir_hi, const int *psi_lo, const int *psi_hi,
+			long nr_trans, int iter,
+			long *sig_off, unsigned long *sig_idx, float *sig_d2, long sig_cap,
+			float *min_d2, unsigned char *covered);
+
 	// Diagnostics: how many calls were handled on device and how many declined.
 	void report();
 }
