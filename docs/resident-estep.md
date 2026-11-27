@@ -20,7 +20,7 @@ which is the target for that kernel.
 
 ## Layout
 
-- **Sharding by particle and half-set.** Chips 0-15 hold half 1 and chips 16-31 hold half 2, about 6,600 particles each
+- **Sharding by particle and half-set.** Chips 0-15 hold half 1 and chips 16-31 hold half 2, about 3,300 particles each
   at 32 chips. Each chip therefore needs only its own half's reference. Particle Fourier images (full 360 half-transform,
   fp32, 0.5 MB each) plus CTF parameters are loaded once, about 1.7 GB per chip, and stay resident.
 - **Reference per iteration.** The host uploads the half's Fourier volume (pad 2, fp32) once per iteration, about 1.5 GB
