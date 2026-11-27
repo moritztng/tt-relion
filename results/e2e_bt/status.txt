@@ -1,0 +1,7 @@
+A rc=0 22:11:18 load1 15.18
+B rc=0 22:11:53 load1 21.67
+--- pass9 own binary 22:56:15
+A rc=0 22:56:54 load1 15.48
+B rc=0 22:57:30 load1 13.93
+--- pass9b B only 22:58:14
+B rc=0 22:58:49 load1 8.84
