@@ -499,7 +499,9 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom):
         for o0 in range(0, eul.shape[0], _DEV_CHUNK):
             a, b = _project(t, mdl, x, y, eul[o0:o0 + _DEV_CHUNK], *geom)
             rr.append(a), ri.append(b)
-        hit = _refcache[key] = (t.cat(rr), t.cat(ri), hashlib.sha256(repr(key).encode()).digest())
+        ref_r, ref_i = t.cat(rr), t.cat(ri)
+        a2 = (ref_r.double() ** 2 + ref_i.double() ** 2).T.contiguous()               # [P, O], |ref|^2
+        hit = _refcache[key] = (ref_r, ref_i, a2, hashlib.sha256(repr(key).encode()).digest())
     return hit
 
 
@@ -521,7 +523,7 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     x = (pix % imgX).to(t.float32)
     yi = pix // imgX
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
-    ref_r, ref_i, ref_key = _shared_refs(t, mdl, eul, x, y,
+    ref_r, ref_i, ref_a2, ref_key = _shared_refs(t, mdl, eul, x, y,
                                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
     w = t.from_numpy(np.asarray(corr, np.float32)) * 0.5                      # [N, P]
     ir, ii = t.from_numpy(np.asarray(img_r, np.float32)), t.from_numpy(np.asarray(img_i, np.float32))
@@ -532,7 +534,7 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     sh_i = c * ii[:, None] + s * ir[:, None]
     wd = w.double()
     sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * wd[:, None]).sum(-1)          # [N, T]
-    ref2 = wd @ (ref_r.double() ** 2 + ref_i.double() ** 2).T                         # [N, O]
+    ref2 = wd @ ref_a2                                                               # [N, O]
     shw = t.cat([sh_r * w[:, None], sh_i * w[:, None]], -1).reshape(n * T, -1)       # [N*T, 2P]
     refc = t.cat([ref_r, ref_i], 1)                                                  # [O, 2P]
     if _BACKEND == "ttnn":

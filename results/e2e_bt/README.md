@@ -23,3 +23,10 @@ TT_RELION_SUM0=1 vs A (host float64 sum): poses and origins identical 400/400; M
 differs in 280 rows by at most 2.1e-5, LogLikeliContribution in 354 rows by at most 6e-5. Per chip:
 readback 1.2-1.3 s -> 0.10-0.15 s, chip busy ~1.9 s -> 0.57-0.77 s, host coarse time (C_s) ~8.7 s -> ~5.0 s.
 load1 7.8. `perf/rlx/star_cmp.py` does the row comparison.
+
+## |ref|^2 cached per iteration (pass 10, 23:06Z)
+
+The weighted |ref|^2 term squared the whole projection set in float64 on every batch (87 ms per
+batch at O=4608, P=1300, 2 threads). It is now built once with the projections: 3.4 ms per batch.
+data.star vs the previous arm: identical in every compared column, 400/400. The smoke cannot show it in
+the wall (31.2 vs 31.4 s, startup-dominated); C_s is summed thread time including collector waits, not wall.
