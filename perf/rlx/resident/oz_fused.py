@@ -16,10 +16,12 @@ KDIR = Path(__file__).resolve().parent / "kernels" / "oz_fused"
 RB, NB, KR = 16, 8, 15
 
 
-def oz_fused(A, B, n, rb=RB, nb=NB):
+def oz_fused(A, B, n, rb=RB, nb=NB, bt=False):
+    """bt: B is [n, O, K] (row-major digits of the reference, no transpose needed); the unpacker transposes each tile."""
     dev = A.device()
-    R, K, O = int(A.shape[-2]), int(A.shape[-1]), int(B.shape[-1])
-    assert R % (32 * rb) == 0 and O % (32 * nb) == 0 and K % (32 * KR) == 0 and int(B.shape[-2]) == K
+    R, K = int(A.shape[-2]), int(A.shape[-1])
+    O = int(B.shape[-2]) if bt else int(B.shape[-1])
+    assert R % (32 * rb) == 0 and O % (32 * nb) == 0 and K % (32 * KR) == 0 and int(B.shape[-1 if bt else -2]) == K
     RT, OT, KT = R // 32, O // 32, K // 32
     NRB, NCB, NRUN = RT // rb, OT // nb, KT // KR
     S = ttnn.allocate_tensor_on_device(ttnn.Shape([n, R, O]), ttnn.float32, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
@@ -46,7 +48,7 @@ def oz_fused(A, B, n, rb=RB, nb=NB):
     acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
     path = ttnn.KernelDescriptor.SourceType.FILE_PATH
     reader = ttnn.KernelDescriptor(kernel_source=str(KDIR / "reader.cpp"), source_type=path, core_ranges=grid,
-                                   compile_time_args=acc(A) + acc(B) + [rb, nb, KR, NRUN, RT, OT, NRB, NCB],
+                                   compile_time_args=acc(A) + acc(B) + [rb, nb, KR, NRUN, RT, OT, NRB, NCB, int(bt)],
                                    runtime_args=rt, common_runtime_args=[A.buffer_address(), B.buffer_address()],
                                    config=ttnn.ReaderConfigDescriptor())
     writer = ttnn.KernelDescriptor(kernel_source=str(KDIR / "writer.cpp"), source_type=path, core_ranges=grid,
@@ -57,6 +59,6 @@ def oz_fused(A, B, n, rb=RB, nb=NB):
     modes[24] = ttnn.UnpackToDestMode.UnpackToDestFp32
     cfg.unpack_to_dest_mode = modes
     compute = ttnn.KernelDescriptor(kernel_source=str(KDIR / "compute.cpp"), source_type=path, core_ranges=grid,
-                                    compile_time_args=[rb, nb, KR, NRUN, NRB, NCB], runtime_args=rt, config=cfg)
+                                    compile_time_args=[rb, nb, KR, NRUN, NRB, NCB, int(bt)], runtime_args=rt, config=cfg)
     ttnn.generic_op([A, B, S], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
     return S

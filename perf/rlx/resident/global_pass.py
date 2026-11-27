@@ -388,7 +388,7 @@ if not a.nodev:
 
     def oz_fused_dev(Xa, Xb, n):
         """Xa [Ra, K], Xb [Ob, K] fp32 TILE -> (hi, lo) df32 of Xa Xb^T, Ozaki n through oz_fused. Row exponents per side;
-        rows padded to oz_fused's blocks (zero rows cut to zero digits); B digits transposed after the cut (exact)."""
+        rows padded to oz_fused's blocks (zero rows cut to zero digits); B digits stay row-major (oz_fused bt)."""
         Ra, Ob = Xa.shape[0], Xb.shape[0]
         Rp, Op = -(-Ra // 512) * 512, -(-Ob // 256) * 256
         ea_, eb_ = row_exp_dev(Xa), row_exp_dev(Xb)
@@ -400,15 +400,13 @@ if not a.nodev:
             for i in range(n):
                 q = ttnn.round(ttnn.multiply(r, 2.0 ** (2 * i + 1)))
                 qb = ttnn.typecast(q, ttnn.bfloat16)
-                if tr:
-                    qb = ttnn.transpose(qb, -2, -1)
                 out.append(ttnn.reshape(qb, (1,) + tuple(qb.shape)))
                 if i + 1 < n:
                     r = ttnn.subtract(r, ttnn.multiply(q, 2.0 ** -(2 * i + 1)))
             return ttnn.concat(out, dim=0)
 
-        Ad, Bd = digits(Xa, ea_, Rp, False), digits(Xb, eb_, Op, True)
-        S = oz_fused(Ad, Bd, n)
+        Ad, Bd = digits(Xa, ea_, Rp, False), digits(Xb, eb_, Op, False)
+        S = oz_fused(Ad, Bd, n, bt=True)   # B digits stay [n, O, K]; the unpacker transposes each tile
         cs = put(np.ldexp(1.0, np.pad(ea_, (0, Rp - Ra))).reshape(-1, 1))
         rs = put(np.ldexp(1.0, np.pad(eb_, (0, Op - Ob))).reshape(1, -1))
         hi = lo = None

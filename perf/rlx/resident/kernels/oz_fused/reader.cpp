@@ -11,6 +11,7 @@ void kernel_main() {
     constexpr uint32_t KR = get_compile_time_arg_val(base + 2), NRUN = get_compile_time_arg_val(base + 3);
     constexpr uint32_t RT = get_compile_time_arg_val(base + 4), OT = get_compile_time_arg_val(base + 5);
     constexpr uint32_t NRB = get_compile_time_arg_val(base + 6), NCB = get_compile_time_arg_val(base + 7);
+    constexpr bool BT = get_compile_time_arg_val(base + 8);   // B stored [n, O, K]: read tile (o, k) for (k, o)
     constexpr uint32_t KT = KR * NRUN;
     constexpr uint32_t cb_a = 0, cb_b = 1, cb_acc = 24, cb_tok = 26;
     constexpr uint32_t TB = 2048, TF = 4096;
@@ -35,7 +36,8 @@ void kernel_main() {
                 uint32_t p = get_write_ptr(cb_b);
                 for (uint32_t kk = 0; kk < KR; ++kk)
                     for (uint32_t c = 0; c < NB; ++c, p += TB)
-                        noc_async_read_page(j * KT * OT + (run * KR + kk) * OT + cbk * NB + c, sb, p);
+                        noc_async_read_page(BT ? j * OT * KT + (cbk * NB + c) * KT + run * KR + kk
+                                               : j * KT * OT + (run * KR + kk) * OT + cbk * NB + c, sb, p);
                 noc_async_read_barrier();
                 cb_push_back(cb_b, KR * NB);
                 for (uint32_t r = 0; r < RB; ++r) {
