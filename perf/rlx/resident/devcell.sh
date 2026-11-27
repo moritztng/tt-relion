@@ -15,11 +15,11 @@ echo "start $(date -u +%FT%TZ) chips=[$CHIPS] NG=$NG NL=$NL load: $(cat /proc/lo
 t0=$(date +%s.%N)
 for c in $CHIPS; do
   ( s=$(date +%s.%N)
-    TT_VISIBLE_DEVICES=$c timeout 900 python $P $D --seed $c --size 50 --B 256 --O 4096 --pchip 1 --cand 1 --reps $NG --out out_$c.jsonl > ${c}_g.log 2>&1; rg=$?
+    TT_VISIBLE_DEVICES=$c timeout -k 30 -s INT ${TO:-900} python $P $D --seed $c --size 50 --B 256 --O 4096 --pchip 1 --cand 1 --reps $NG --out out_$c.jsonl > ${c}_g.log 2>&1; rg=$?
     m=$(date +%s.%N)
-    TT_VISIBLE_DEVICES=$c timeout 900 python $P $D --seed $c --size 50 --B 128 --O 4096 --local 1 --reps $NL --out out_$c.jsonl > ${c}_l.log 2>&1; rl=$?
+    TT_VISIBLE_DEVICES=$c timeout -k 30 -s INT ${TO:-900} python $P $D --seed $c --size 50 --B 128 --O 4096 --local 1 --reps $NL --out out_$c.jsonl > ${c}_l.log 2>&1; rl=$?
     e=$(date +%s.%N)
-    TT_VISIBLE_DEVICES=$c timeout 900 python $P $D --seed $c --size 352 --B 8 --O 256 --local 1 --lerp 1 --reps $NF --out out_f_$c.jsonl > ${c}_f.log 2>&1; rf=$?
+    TT_VISIBLE_DEVICES=$c timeout -k 30 -s INT ${TO:-900} python $P $D --seed $c --size 352 --B 8 --O 256 --local 1 --lerp 1 --reps $NF --out out_f_$c.jsonl > ${c}_f.log 2>&1; rf=$?
     f=$(date +%s.%N)
     echo -e "$c\t$rg\t$rl\t$rf\t$(echo "$m - $s" | bc)\t$(echo "$e - $m" | bc)\t$(echo "$f - $e" | bc)" >> wall.tsv ) &
 done
