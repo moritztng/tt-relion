@@ -68,7 +68,8 @@ _DUMP = os.environ.get("TT_RELION_DUMP", "")
 _DUMP_N = int(os.environ.get("TT_RELION_DUMP_N", "1"))
 _dumped = [0]
 _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
-          "proj_hit": 0, "proj_miss": 0, "ref_asked": 0, "devproj": 0, "once_cpu": 0}
+          "proj_hit": 0, "proj_miss": 0, "ref_asked": 0, "devproj": 0, "once_cpu": 0,
+          "batch_req": 0, "batch_calls": 0}
 # TT_RELION_PROJ_CACHE_MB: cap on kept coarse references (device path), per rank on the host and per
 # chip on the device. In a global search every particle's coarse pass asks for the same orientation set
 # against the same reference, so the projection and its left operand are per-iteration constants:
@@ -333,15 +334,60 @@ def _pool():
     return _free
 
 
+# TT_RELION_BATCH=N: up to N coarse calls that want the same kept reference chunk at the same moment go to
+# the chip as one request, their translation rows stacked. While a rank's servers are busy its other
+# threads queue anyway; stacking turns that queue into one matmul over more columns, so the per-request
+# cost (dispatch, the n Ozaki matmuls, tile padding of T) is paid once. Every output column depends only
+# on its own row (the Ozaki exponent is per row), so each caller gets the bits it would have alone.
+_BATCH = max(1, int(os.environ.get("TT_RELION_BATCH", "1")))
+_pend = {}                 # key -> [[shw, result, event], ...] waiting for a server
+_pend_lock = threading.Lock()
+
+
 def _cross(ref, o, shw, key, kbytes):
     """C [O, T] float64 on whichever of this rank's chips is idle."""
     free = _pool()
-    s = free.get()
-    try:
-        _tl.srv = s
-        return s.cross(ref, o, shw, key, _pc["gen"], kbytes)
-    finally:
-        free.put(s)
+    if _BATCH == 1 or key is None:
+        s = free.get()
+        try:
+            _tl.srv = s
+            return s.cross(ref, o, shw, key, _pc["gen"], kbytes)
+        finally:
+            free.put(s)
+    mine = [shw, None, threading.Event()]
+    with _pend_lock:
+        _pend.setdefault(key, []).append(mine)
+    while not mine[2].is_set():
+        s = free.get()
+        try:
+            with _pend_lock:          # whoever holds a server serves what waits under this key, mine or not
+                q = _pend.get(key, [])
+                batch, rest = q[:_BATCH], q[_BATCH:]
+                if rest:
+                    _pend[key] = rest
+                else:
+                    _pend.pop(key, None)
+            if batch:
+                _tl.srv = s
+                try:
+                    out = s.cross(ref, o, np.concatenate([b[0] for b in batch]), key, _pc["gen"], kbytes)
+                    c0 = 0
+                    for b in batch:
+                        b[1], c0 = out[:, c0:c0 + b[0].shape[0]], c0 + b[0].shape[0]
+                except BaseException as exc:  # noqa: BLE001  (every caller in the batch sees the failure)
+                    for b in batch:
+                        b[1] = exc
+                _stats["batch_req"] += 1
+                _stats["batch_calls"] += len(batch)
+                for b in batch:
+                    b[2].set()
+        finally:
+            free.put(s)
+        if not batch:
+            mine[2].wait()
+    if isinstance(mine[1], BaseException):
+        raise mine[1]
+    return mine[1]
 
 
 def _cross_proj(eul, shw, w, g):
@@ -378,7 +424,7 @@ def _progress():
     for s in _srv:
         for k, v in list(s.c.items()):     # copy: other threads insert keys
             tot[k] = tot.get(k, 0) + v
-    keys = ("handled", "fine_handled", "proj_hit", "proj_miss", "ref_asked", "once_cpu")
+    keys = ("handled", "fine_handled", "proj_hit", "proj_miss", "ref_asked", "once_cpu", "batch_req", "batch_calls")
     return (f"tt_relion pid {os.getpid()} " + " ".join(f"{k} {_stats[k]}" for k in keys)
             + f" cached_mb {_pc['bytes'] >> 20} "
             + " ".join(f"{k} {tot.get(k, 0):.1f}" for k in ("C_s", "F_s", "rt_s", "copy_s", "calls")))
