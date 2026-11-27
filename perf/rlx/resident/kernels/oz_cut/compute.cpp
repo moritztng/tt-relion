@@ -53,9 +53,11 @@ void kernel_main() {
             tile_regs_commit();
             tile_regs_wait();
             pack_reconfig_data_format(cb_o);
-            cb_reserve_back(cb_o, g);
-            for (uint32_t j = 0; j < g; ++j) pack_tile(2 + j, cb_o);
-            cb_push_back(cb_o, g);
+            for (uint32_t j = 0; j < g; ++j) {   // one page per reserve: a g-page reserve straddles the ring's
+                cb_reserve_back(cb_o, 1);        // wrap when g does not divide its depth (n13 broke that way)
+                pack_tile(2 + j, cb_o);
+                cb_push_back(cb_o, 1);
+            }
             if (i0 + G >= N) {
                 cb_pop_front(cb_x, 1);
                 cb_pop_front(cb_e, 1);

@@ -31,7 +31,7 @@ def emul(S, ea, eb, n):   # same op order as the kernel (Horner, Knuth TwoSum, l
     return (H * E).astype(f32), (L * E).astype(f32)
 
 
-for (n, R, O, check) in ((3, 512, 256, True), (14, 1024, 512, True), (14, 3584, 4096, False)):
+for (n, R, O, check) in ((3, 512, 256, True), (13, 1024, 512, True), (14, 1024, 512, True), (14, 3584, 4096, False)):
     S = rng.integers(-(1 << 22), 1 << 22, (n, R, O)).astype(f32)
     ea = rng.integers(-12, 12, (R // 32, 32)).astype(np.int32)
     eb = rng.integers(-12, 12, (O // 32, 32)).astype(np.int32)

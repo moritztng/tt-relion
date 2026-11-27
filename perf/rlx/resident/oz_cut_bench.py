@@ -18,7 +18,7 @@ from oz_fused import oz_cut  # noqa: E402
 
 dev, nodes = open_dev()
 rng = np.random.default_rng(3)
-for (n, R, K, check) in ((14, 64, 64, True), (14, 512, 960, True), (14, 3584, 2400, True)):
+for (n, R, K, check) in ((14, 64, 64, True), (13, 512, 960, True), (14, 512, 960, True), (14, 3584, 2400, True)):
     X = (rng.standard_normal((R, K)) * np.exp(rng.uniform(-8, 8, (R, 1)))).astype(np.float32)
     X[:, -5:] = 0.0
     ea = np.ceil(np.log2(np.abs(X).max(1) + 1e-30)).astype(np.int32)
