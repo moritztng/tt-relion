@@ -1,0 +1,2 @@
+{"O_tab": 4096, "n": 13, "K": 8160, "q": 32, "rows": 66560, "layout": "tile", "bit_exact": true, "sec": 0.00541, "GBs": 200.9, "us_per_particle": 168.9, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "1.38"}
+{"O_tab": 4096, "n": 13, "K": 8160, "q": 32, "rows": 66560, "layout": "rm", "bit_exact": true, "sec": 0.00605, "GBs": 179.6, "us_per_particle": 189.0, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "1.43"}
