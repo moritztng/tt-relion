@@ -684,7 +684,9 @@ if not a.nodev:
         Bo = ttnn.to_layout(ttnn.reshape(pr, (Bn * On, K)), ttnn.TILE_LAYOUT)
         ttnn.synchronize_device(dev); t["proj"] = time.perf_counter() - t0; t0 = time.perf_counter()
         tA, Bo = balance(tA0, Bo) if a.balance else (tA0, Bo)
+        ttnn.synchronize_device(dev); t["balance"] = time.perf_counter() - t0; t0 = time.perf_counter()
         ea_, eb_ = row_exp_dev(tA), row_exp_dev(Bo)
+        ttnn.synchronize_device(dev); t["row_exp"] = time.perf_counter() - t0; t0 = time.perf_counter()
         ti32 = lambda e_: ttnn.from_torch(torch.from_numpy(e_.astype(np.int32).reshape(-1, 32)), dtype=ttnn.int32,  # noqa: E731
                                           layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
         t_ea, t_eb = ti32(ea_), ti32(eb_)
@@ -692,7 +694,7 @@ if not a.nodev:
         padK = lambda X_: ttnn.pad(X_, [(0, 0), (0, Kp - K)], 0.0) if Kp > K else X_  # noqa: E731
         Ad = ttnn.reshape(oz_cut(padK(tA), t_ea, n), (n * Bn, R1, Kp))
         Bd = ttnn.reshape(oz_cut(padK(Bo), t_eb, n), (n * Bn, On, Kp))
-        ttnn.synchronize_device(dev); t["balance_cut"] = time.perf_counter() - t0; t0 = time.perf_counter()
+        ttnn.synchronize_device(dev); t["cut"] = time.perf_counter() - t0; t0 = time.perf_counter()
         S = oz_fused(Ad, Bd, n, rb=1, nb=On // 32, bt=True, q=Bn, adm=True, bdm=True)
         ttnn.synchronize_device(dev); t["oz"] = time.perf_counter() - t0; t0 = time.perf_counter()
         hi, lo = oz_combine(S, t_ea, t_eb, n, q=Bn)

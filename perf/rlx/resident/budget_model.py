@@ -21,7 +21,10 @@ if DC:
     PROD.update(oz=0.1723, rb=0.0114, sig=0.0170)
 # dc2 local pass all-in per particle (gather + particle cut + q-batched product + combine + readback), B128 x own
 # 160, T 13 padded to 32, K 2400: 0.2991 + 0.0057 / 128 * 1e3 ms; T padded to 64 costs 1.17x (runs/loc1 rb2 vs rb1)
-LOC_DC_MS_K2400 = 0.2991 + 5.73 / 128   # local passes from a shared per-half digit table (final stays on proj_lerp: 788 GB/half)
+LOC_DC_MS_K2400 = 0.2991 + 5.73 / 128
+# measured final route (runs/lp3, --local 1 --lerp 1, s352 stand-in for s360: K 98304, B8 x own 160): per particle
+# proj 21.5 + balance 5.3 + row exp 0.9 + cut 8.3 + product 9.0 + combine 0.1 ms = 45.1 ms all-in device
+FIN_MS_K98304 = 45.1   # local passes from a shared per-half digit table (final stays on proj_lerp: 788 GB/half)
 FINE_S = 1030.0         # fine pass: 0.4e12 px of child projections at PROJ_PX_S + 1.9e13 FLOP (state doc), chip-s
 rows = [l.split("\t") for l in open("results/work_full_s0.tsv") if l[0].isdigit()]
 tot = {}
@@ -35,6 +38,9 @@ for r in rows:
         s = per * NP / 256
         tot[ph] = tot.get(ph, 0) + s
     else:                    # local / final: per-particle product (T padded to 64) + own-orientation projections
+        if DC and ph == "fin":   # measured all-in (projection included), scaled by K
+            tot["fin_measured"] = tot.get("fin_measured", 0) + FIN_MS_K98304 * 1e-3 * K / 98304 * NP
+            continue
         if DC and ph == "loc":
             s = LOC_DC_MS_K2400 * 1e-3 * K / 2400 * (1.17 if Tc > 32 else 1.0) * NP
         else:
