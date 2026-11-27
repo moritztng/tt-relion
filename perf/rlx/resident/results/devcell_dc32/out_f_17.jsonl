@@ -1,0 +1,2 @@
+{"arm": "LOCAL lerp n13", "size": 352, "B": 8, "O_tab": 256, "own": 160, "T": 13, "K": 98304, "C_rel": 1.1998494086996238e-06, "err_near": 0.00017916654906002805, "argmax_agree": "8/8", "same_set": "8/8", "own_contains_pose": 8}
+{"arm": "LOCAL timing_warm", "B": 8, "O_tab": 256, "own": 160, "T": 13, "K": 98304, "n": 13, "t": {"proj": 0.17258, "balance": 0.01269, "row_exp": 0.00739, "cut": 0.06607, "oz": 0.07101, "combine": 0.00053, "readback": 0.00473}, "ms_per_particle_device": 41.2837, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "43.74", "nodes": [25]}
