@@ -4,8 +4,11 @@ Semantics are the bridge's _project (RELION AccProjectorKernel::project3Dmodel, 
 rotate the slice's half-plane pixels, trunc-radius mask, Hermitian flip for x < 0, trilinear interpolation.
 Device path (ttnn ops only, a prototype to put a number on the structure, not the final kernel):
   coords on [O, P] tiles -> floor/frac/mask/flip -> int32 corner index -> ttnn.embedding from a resident
-  table whose row v holds the 2x2x2 corners of voxel v (16 fp32, 64 B) -> permute to [16, O, P] ->
+  table whose row v holds the 2x2x2 corners of voxel v (16 fp32) -> permute to [16, O, P] ->
   three lerps as slices of that batch dim -> ref_r, ref_i resident on chip.
+  ttnn.embedding gathers bf16 only, so each fp32 corner is stored as three bf16 pieces (hi, mid, lo; their
+  fp32 sum is the value exactly) in one 48-column row and summed after the gather. The pixel axis is cut
+  into --pc chunks so no untilize row exceeds L1.
 Table column order: col = dx*8 + dy*4 + dz*2 + c, so each lerp is "first half vs second half".
 Reports error vs float64 for the chip and for torch fp32 (RELION's own class), the d2 error that error
 causes against a noisy image, warm s/call per O orientations, and AICLK sampled during the timed calls.
@@ -27,6 +30,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--sizes", default="50,100,146,360")
 ap.add_argument("--O", type=int, default=256)
 ap.add_argument("--oc", type=int, default=64, help="orientations per device call chunk")
+ap.add_argument("--pc", type=int, default=1024, help="pixels per device call chunk")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--out", default="proj.jsonl")
 ap.add_argument("--cpu-only", action="store_true", help="check the reference and table layout, no device")
@@ -57,6 +61,16 @@ def table(mdl, gm):
         k = dx * 8 + dy * 4 + dz * 2
         T[:, k:k + 2] = m[o:o + nvox]
     return T
+
+
+def pieces3(T):
+    """fp32 [n, 16] -> bf16 [n, 48]: hi | mid | lo, with hi + mid + lo == T exactly in fp32."""
+    t = T.double()
+    hi = t.to(torch.bfloat16)
+    mid = (t - hi.double()).to(torch.bfloat16)
+    lo = (t - hi.double() - mid.double()).to(torch.bfloat16)
+    assert torch.equal(hi.float() + mid.float() + lo.float(), T.float())
+    return torch.cat([hi, mid, lo], 1)
 
 
 def pixels(s):
@@ -149,7 +163,9 @@ if not a.cpu_only:
         Oc, P = idx.shape[0], idx.shape[1]
         idx = ttnn.reshape(ttnn.to_layout(ttnn.typecast(idx, ttnn.uint32), ttnn.ROW_MAJOR_LAYOUT), (1, Oc * P))
         G = ttnn.embedding(idx, Tdev, layout=ttnn.ROW_MAJOR_LAYOUT)
-        G = ttnn.to_layout(ttnn.permute(ttnn.reshape(G, (Oc, P, 16)), (2, 0, 1)), ttnn.TILE_LAYOUT)
+        G = ttnn.to_layout(ttnn.permute(ttnn.reshape(G, (Oc, P, 48)), (2, 0, 1)), ttnn.TILE_LAYOUT)
+        G = ttnn.typecast(G, ttnn.float32)
+        G = ttnn.add(ttnn.add(G[:16], G[16:32]), G[32:])
 
         def lerp(lo, hi, f):
             return ttnn.add(lo, ttnn.multiply(ttnn.subtract(hi, lo), f))
@@ -183,7 +199,7 @@ for s in [int(v) for v in a.sizes.split(",")]:
         d0 = ((r64 - img_r) ** 2 + (i64 - img_i) ** 2).sum(1)
         return float((d - d0).abs().max()), float(d0.mean())
 
-    base = dict(s=s, O=a.O, P=int(x.numel()), nvox=int(mdl.shape[0]), table_MB=round(T.numel() * 4 / 2**20, 1))
+    base = dict(s=s, O=a.O, P=int(x.numel()), nvox=int(mdl.shape[0]), table_MB=round(T.numel() * 6 / 2**20, 1))
     emit(**base, cfg="emulate f64 (device algorithm)", rel=max(rel(re_, r64), rel(ie_, i64)),
          d2_err=d2err(re_, ie_)[0])
     de, d2m = d2err(r32, i32)
@@ -193,8 +209,9 @@ for s in [int(v) for v in a.sizes.split(",")]:
         continue
     try:
         t0 = time.time()
-        Tdev = up(T, ttnn.ROW_MAJOR_LAYOUT)
-        Xd, Yd = up(x.float().reshape(1, -1)), up(y.float().reshape(1, -1))
+        Tdev = up(pieces3(T), ttnn.ROW_MAJOR_LAYOUT, ttnn.bfloat16)
+        pcs = [(p, min(p + a.pc, x.numel())) for p in range(0, x.numel(), a.pc)]
+        XY = [(up(x[p:q].float().reshape(1, -1)), up(y[p:q].float().reshape(1, -1))) for p, q in pcs]
         table_up_s = time.time() - t0
         cols = (0, 1, 3, 4, 6, 7)
         chunks = [[up(e[o:o + a.oc, c:c + 1].float()) for c in cols] for o in range(0, a.O, a.oc)]
@@ -202,11 +219,15 @@ for s in [int(v) for v in a.sizes.split(",")]:
         def run(keep):
             outs = []
             for ec in chunks:
-                rr, ii = project_dev(Tdev, Xd, Yd, ec, gm)
+                row = []
+                for (p, q), (Xd, Yd) in zip(pcs, XY):
+                    rr, ii = project_dev(Tdev, Xd, Yd, ec, gm)
+                    if keep:
+                        row.append((ttnn.to_torch(rr)[:, :q - p], ttnn.to_torch(ii)[:, :q - p]))
+                    ttnn.deallocate(rr)
+                    ttnn.deallocate(ii)
                 if keep:
-                    outs.append((ttnn.to_torch(rr)[:, :x.numel()], ttnn.to_torch(ii)[:, :x.numel()]))
-                ttnn.deallocate(rr)
-                ttnn.deallocate(ii)
+                    outs.append((torch.cat([r[0] for r in row], 1), torch.cat([r[1] for r in row], 1)))
             ttnn.synchronize_device(dev)
             return outs
 
@@ -221,7 +242,7 @@ for s in [int(v) for v in a.sizes.split(",")]:
         s_call = (time.time() - t0) / a.reps
         cmin, cmed = clk.stop()
         de, _ = d2err(rd, id_)
-        emit(**base, cfg="ttnn fp32 embedding+lerp", oc=a.oc, rel=max(rel(rd, r64), rel(id_, i64)), d2_err=de,
+        emit(**base, cfg="ttnn fp32 embedding+lerp", oc=a.oc, pc=a.pc, rel=max(rel(rd, r64), rel(id_, i64)), d2_err=de,
              s_per_call=round(s_call, 4), table_up_s=round(table_up_s, 2), aiclk_min=cmin, aiclk_med=cmed)
         ttnn.deallocate(Tdev)
     except Exception as ex:  # report and move to the next size
