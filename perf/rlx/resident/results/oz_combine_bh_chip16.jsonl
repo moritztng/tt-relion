@@ -1,0 +1,3 @@
+{"n": 3, "R": 512, "O": 256, "bitexact_hi": true, "bitexact_lo": true, "rel_err_vs_f64": 0.0, "sec": 0.0007, "GBps_S": 2.2, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "1.19"}
+{"n": 14, "R": 1024, "O": 512, "bitexact_hi": true, "bitexact_lo": true, "rel_err_vs_f64": 2.025787015193253e-14, "sec": 0.0004, "GBps_S": 70.4, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "1.19"}
+{"n": 14, "R": 3584, "O": 4096, "sec": 0.0039, "GBps_S": 208.8, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "1.19"}

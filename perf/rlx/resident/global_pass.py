@@ -44,6 +44,7 @@ ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--balance", type=int, default=1)
 ap.add_argument("--fused", type=int, default=1, help="oz_fused kernel (1) or the composed ttnn matmul+add path (0)")
+ap.add_argument("--fcomb", type=int, default=1, help="fused SFPU combine kernel (1) or the ttnn TwoSum chain (0)")
 ap.add_argument("--frac", type=float, default=0.999, help="RELION adaptive_fraction")
 ap.add_argument("--sig-off", type=float, default=3.0, help="offset prior sigma, px")
 ap.add_argument("--fast", action="store_true", help="skip the host fp32/Ozaki arms (timing at production row counts)")
@@ -407,7 +408,7 @@ if not a.nodev:
         return ttnn.multiply(XA, put(np.ldexp(1.0, e.astype(int)).reshape(1, -1))), \
             ttnn.multiply(XB, put(np.ldexp(1.0, -e.astype(int)).reshape(1, -1)))
 
-    from oz_fused import oz_fused
+    from oz_fused import oz_combine, oz_fused
 
     def oz_fused_dev(Xa, Xb, n):
         """Xa [Ra, K], Xb [Ob, K] fp32 TILE -> (hi, lo) df32 of Xa Xb^T, Ozaki n through oz_fused. Row exponents per side;
@@ -430,6 +431,11 @@ if not a.nodev:
 
         Ad, Bd = digits(Xa, ea_, Rp, False), digits(Xb, eb_, Op, False)
         S = oz_fused(Ad, Bd, n, bt=True)   # B digits stay [n, O, K]; the unpacker transposes each tile
+        if a.fcomb:   # one SFPU kernel: TwoSum over k and the exact 2^(ea + eb) scale, a single pass over S
+            ti = lambda e_, m: ttnn.from_torch(torch.from_numpy(np.pad(e_, (0, m - len(e_))).astype(np.int32).reshape(-1, 32)),  # noqa: E731
+                                              dtype=ttnn.int32, layout=ttnn.ROW_MAJOR_LAYOUT, device=dev)
+            hi, lo = oz_combine(S, ti(ea_, Rp), ti(eb_, Op), n)
+            return hi[:Ra, :Ob], lo[:Ra, :Ob]
         cs = put(np.ldexp(1.0, np.pad(ea_, (0, Rp - Ra))).reshape(-1, 1))
         rs = put(np.ldexp(1.0, np.pad(eb_, (0, Op - Ob))).reshape(1, -1))
         hi = lo = None

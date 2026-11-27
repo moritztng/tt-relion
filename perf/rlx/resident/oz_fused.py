@@ -65,3 +65,56 @@ def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1):
                                     compile_time_args=[rb, nb, KR, NRUN, NRB, NCB, int(bt), n], runtime_args=rt, config=cfg)
     ttnn.generic_op([A, B, S], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
     return S
+
+
+CDIR = Path(__file__).resolve().parent / "kernels" / "oz_combine"
+
+
+def oz_combine(S, ea, eb, n):
+    """S fp32 TILE [n, R, O] from oz_fused; ea int32 RM [R/32, 32] row exponents, eb int32 RM [O/32, 32] column
+    exponents. Returns (hi, lo) fp32 TILE [R, O], the df32 of sum_k S_k 2^-(2k+2) 2^(ea[r] + eb[c]): TwoSum on the
+    SFPU in one pass over S (the ttnn chain cost ~6 [R, O] DRAM passes per digit)."""
+    dev = S.device()
+    R, O = int(S.shape[-2]), int(S.shape[-1])
+    RT, OT = R // 32, O // 32
+    hi = ttnn.allocate_tensor_on_device(ttnn.Shape([R, O]), ttnn.float32, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
+    lo = ttnn.allocate_tensor_on_device(ttnn.Shape([R, O]), ttnn.float32, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
+    units = RT * OT
+    g = dev.compute_with_storage_grid_size()
+    _, grid, cg1, cg2, w1, w2 = core_split.split_work_to_cores(g, units, 0)
+
+    def cb(i, dt, page, depth):
+        fmt = ttnn.CBFormatDescriptor(buffer_index=i, data_format=dt, page_size=page)
+        return ttnn.CBDescriptor(total_size=depth * page, core_ranges=grid, format_descriptors=[fmt])
+
+    cbs = [cb(0, ttnn.float32, 4096, 2 * n), cb(1, ttnn.float32, 4096, n), cb(2, ttnn.float32, 4096, 2),
+           cb(3, ttnn.int32, 128, 2), cb(16, ttnn.float32, 4096, 2), cb(17, ttnn.float32, 4096, 2)]
+    rt = ttnn.RuntimeArgs()
+    first = 0
+    for group, per in ((cg1, w1), (cg2, w2)):
+        for cr in group.ranges():
+            for cx in range(cr.start.x, cr.end.x + 1):
+                for cy in range(cr.start.y, cr.end.y + 1):
+                    rt[cx][cy] = [first, per]
+                    first += per
+    assert first == units
+    acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
+    path = ttnn.KernelDescriptor.SourceType.FILE_PATH
+    reader = ttnn.KernelDescriptor(kernel_source=str(CDIR / "reader.cpp"), source_type=path, core_ranges=grid,
+                                   compile_time_args=acc(S) + acc(ea) + acc(eb) + [n, RT, OT], runtime_args=rt,
+                                   common_runtime_args=[S.buffer_address(), ea.buffer_address(), eb.buffer_address()],
+                                   config=ttnn.ReaderConfigDescriptor())
+    writer = ttnn.KernelDescriptor(kernel_source=str(CDIR / "writer.cpp"), source_type=path, core_ranges=grid,
+                                   compile_time_args=acc(hi) + acc(lo), runtime_args=rt,
+                                   common_runtime_args=[hi.buffer_address(), lo.buffer_address()],
+                                   config=ttnn.WriterConfigDescriptor())
+    cfg = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True)
+    cfg.dst_full_sync_en = True
+    modes = [ttnn.UnpackToDestMode.Default] * 64
+    for i in (0, 1, 2):
+        modes[i] = ttnn.UnpackToDestMode.UnpackToDestFp32
+    cfg.unpack_to_dest_mode = modes
+    compute = ttnn.KernelDescriptor(kernel_source=str(CDIR / "compute.cpp"), source_type=path, core_ranges=grid,
+                                    compile_time_args=[n], runtime_args=rt, config=cfg)
+    ttnn.generic_op([S, ea, eb, hi, lo], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
+    return hi, lo
