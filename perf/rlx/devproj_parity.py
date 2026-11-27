@@ -5,6 +5,7 @@ RLX_STUB_MATMUL=1: the server loop, split and chunk sums are the real ones, the 
 hands each server the model; the fine call then runs twice on the same inputs, once given the host fp32 projection
 (what RELION's projector hands over) and once with TT_RELION_DEVPROJ. Both are checked against float64.
     TT_RELION_PYTHON=<python with torch> python devproj_parity.py --s 50 --O 64 --T 21
+--chip N runs both arms through the real device server on chip N instead (TT_RELION_PYTHON must have ttnn).
 """
 import argparse
 import os
@@ -23,6 +24,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--s", type=int, default=50)
 ap.add_argument("--O", type=int, default=64)
 ap.add_argument("--T", type=int, default=21)
+ap.add_argument("--chip", default=None)
 a = ap.parse_args()
 
 PF = 2
@@ -43,7 +45,10 @@ tx, ty = (g.uniform(-3, 3, a.T).astype(np.float32) for _ in range(2))
 re, im = (g.standard_normal(P).astype(np.float32) for _ in range(2))
 corr = g.uniform(0.5, 1.5, P).astype(np.float32)
 
-relion._srv.extend(relion._Server(None, module="tt_relion.stub_server") for _ in range(2))
+if a.chip is None:
+    relion._srv.extend(relion._Server(None, module="tt_relion.stub_server") for _ in range(2))
+else:
+    relion._srv.append(relion._Server(a.chip))
 relion._pool()
 
 
@@ -91,6 +96,6 @@ n0 = relion._stats["devproj"]
 dev = fine(ref32 * 0)          # a zeroed reference: any use of it instead of the chip's projection shows
 assert relion._stats["devproj"] > n0, "fine call did not take the device-projection path"
 scale = np.abs(d64).max()
-print("s=%d O=%d T=%d  d2 max %.4g | err vs f64: given %.3g  devproj %.3g  (rel %.2e / %.2e) | devproj vs given %.3g"
-      % (a.s, a.O, a.T, scale, np.abs(given - d64).max(), np.abs(dev - d64).max(),
+print("chip=%s s=%d O=%d T=%d  d2 max %.4g | err vs f64: given %.3g  devproj %.3g  (rel %.2e / %.2e) | devproj vs given %.3g"
+      % (a.chip, a.s, a.O, a.T, scale, np.abs(given - d64).max(), np.abs(dev - d64).max(),
          np.abs(given - d64).max() / scale, np.abs(dev - d64).max() / scale, np.abs(dev - given).max()))

@@ -25,8 +25,8 @@ once:  {"shm", "model": mkey, "nvox": n, "geom": {mdlX mdlY}}  with segment [mod
 A request with "proj" then ships no reference; the server projects the O orientations itself:
     "proj": {"mkey": str, "geom": {mdlX mdlY mdlZ mdlInitY mdlInitZ maxR2 pf imgX imgY maxR P}}
 Segment: [eul fp32 O*9] [shw fp32 T*K] [w fp32 K/2] -> [out float64 O*T] [ref2 float64 O],
-ref2[o] = sum_p w[p] |ref[o, p]|^2 (the bridge needs it for d2), through the same split matmul as the
-cross term against one extra column [w | w]. The reply is "nomodel" if mkey is not kept (evicted).
+ref2[o] = sum_p w[p] |ref[o, p]|^2 (the bridge needs it for d2), summed by the backend without a matmul:
+an all-positive sum is where the chip's accumulation error shows most. The reply is "nomodel" if mkey is not kept (evicted).
 EOF on stdin closes the backend and exits; the exit line is the TTDEV line perf/rlx/wallmap.py reads.
 """
 import json
@@ -119,12 +119,9 @@ def _projected(backend, req, buf, o, t, k):
     eul = np.ndarray((o, 9), np.float32, buf, offset=off)
     shw = np.ndarray((t, k), np.float32, buf, offset=off + 36 * o)
     w = np.ndarray((k // 2,), np.float32, buf, offset=off + 36 * o + 4 * t * k)
-    a, a2 = backend.project(pj["mkey"], eul, g)      # proj_lhs layout of ref and of ref * ref, kept on the chip
-    kc = backend.shape(a)[1]
-    c = reduce(backend.mm(a, proj_rhs(shw, g["P"], kc)), t)
-    ref2 = reduce(backend.mm(a2, proj_rhs(np.concatenate([w, w])[None], g["P"], kc)), 1)[:, 0]
+    a, ref2 = backend.project(pj["mkey"], eul, g, w)  # proj_lhs layout of ref, on the chip; ref2 float64
+    c = reduce(backend.mm(a, proj_rhs(shw, g["P"], backend.shape(a)[1])), t)
     backend.free(a)
-    backend.free(a2)
     return c, ref2, off + 36 * o + 4 * t * k + 2 * k
 
 
