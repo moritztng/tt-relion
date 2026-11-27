@@ -61,3 +61,61 @@ def proj_lerp(table, idx, frc):
                                     compile_time_args=[], runtime_args=rt, config=cfg)
     ttnn.generic_op([table, idx, frc, out], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
     return out
+
+
+ROT_DIR = Path(__file__).resolve().parent / "kernels" / "proj_rot"
+CB_C, CB_XY, CB_I, CB_ROT, CB_P, CB_Q, CB_FLAG = 6, 7, 8, 9, 10, 11, 12
+
+
+def proj_rot(table, pix, rot, geom):
+    """Full on-chip projection: rot fp32 RM [O, 8] = PF * (e0, e1, e3, e4, e6, e7, 0, 0) per orientation; pix fp32 RM
+    [2 NC, 1024] = pixel x, y per 1024-pixel chunk (pad pixels far outside the radius); table as proj_lerp, laid out on the
+    padded half volume geom = dict(X, Y, Z, initY, initZ, maxR2). Out fp32 RM [2 O NC, 1024]: (o, chunk) -> re, im rows."""
+    import struct
+    dev = pix.device()
+    O, NC = int(rot.shape[0]), int(pix.shape[0]) // 2
+    assert int(rot.shape[1]) == 8 and int(pix.shape[1]) == 1024 and int(table.shape[1]) == 16
+    out = ttnn.allocate_tensor_on_device(ttnn.Shape([2 * O * NC, 1024]), ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, dev,
+                                         ttnn.DRAM_MEMORY_CONFIG)
+    g = dev.compute_with_storage_grid_size()
+    _, grid, cg1, cg2, w1, w2 = core_split.split_work_to_cores(g, O, 0)
+
+    def cb(i, dt, page, depth):
+        fmt = ttnn.CBFormatDescriptor(buffer_index=i, data_format=dt, page_size=page)
+        return ttnn.CBDescriptor(total_size=depth * page, core_ranges=grid, format_descriptors=[fmt])
+
+    f32 = ttnn.float32
+    cbs = [cb(CB_V, f32, _PAGE, 32), cb(CB_F, f32, _PAGE, 6), cb(CB_STAGE, f32, 64 * 1024, 1), cb(CB_X, f32, _PAGE, 8),
+           cb(CB_Y, f32, _PAGE, 4), cb(CB_OUT, f32, _PAGE, 4), cb(CB_C, f32, _PAGE, 6), cb(CB_XY, f32, _PAGE, 4),
+           cb(CB_I, f32, _PAGE, 10), cb(CB_ROT, f32, 32, 1), cb(CB_P, f32, _PAGE, 3), cb(CB_Q, f32, _PAGE, 3),
+           cb(CB_FLAG, ttnn.uint32, 1024, 1)]
+    rt = ttnn.RuntimeArgs()
+    first = 0
+    for group, per in ((cg1, w1), (cg2, w2)):
+        for cr in group.ranges():
+            for cx in range(cr.start.x, cr.end.x + 1):
+                for cy in range(cr.start.y, cr.end.y + 1):
+                    rt[cx][cy] = [first, per]
+                    first += per
+    assert first == O
+    acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
+    src = lambda n: str(ROT_DIR / n)  # noqa: E731
+    path = ttnn.KernelDescriptor.SourceType.FILE_PATH
+    lim = struct.unpack("<I", struct.pack("<f", float(geom["maxR2"] + 1)))[0]
+    rct = acc(table) + acc(pix) + acc(rot) + [NC, lim, geom["X"], geom["Y"], geom["Z"], -geom["initY"], -geom["initZ"]]
+    reader = ttnn.KernelDescriptor(kernel_source=src("reader.cpp"), source_type=path, core_ranges=grid,
+                                   compile_time_args=rct, runtime_args=rt,
+                                   common_runtime_args=[table.buffer_address(), pix.buffer_address(), rot.buffer_address()],
+                                   config=ttnn.ReaderConfigDescriptor())
+    writer = ttnn.KernelDescriptor(kernel_source=src("writer.cpp"), source_type=path, core_ranges=grid,
+                                   compile_time_args=acc(out) + [NC], runtime_args=rt,
+                                   common_runtime_args=[out.buffer_address()], config=ttnn.WriterConfigDescriptor())
+    cfg = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True)
+    modes = [ttnn.UnpackToDestMode.Default] * 64
+    for i in (CB_V, CB_F, CB_X, CB_Y, CB_C, CB_XY, CB_P, CB_Q):
+        modes[i] = ttnn.UnpackToDestMode.UnpackToDestFp32
+    cfg.unpack_to_dest_mode = modes
+    compute = ttnn.KernelDescriptor(kernel_source=src("compute.cpp"), source_type=path, core_ranges=grid,
+                                    compile_time_args=[NC], runtime_args=rt, config=cfg)
+    ttnn.generic_op([table, pix, rot, out], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
+    return out
