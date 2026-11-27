@@ -28,6 +28,7 @@ ap.add_argument("--cases", default="f146,f360")
 ap.add_argument("--ns", default="8,9,10")
 ap.add_argument("--kc", type=int, default=480)
 ap.add_argument("--reps", type=int, default=3)
+ap.add_argument("--grouped", type=int, default=0, help="1: one matmul per digit diagonal i+j=s over stacked runs")
 a = ap.parse_args()
 assert a.kc % 32 == 0 and a.kc * 4 < 2048
 
@@ -118,6 +119,23 @@ def cross(Ad, Bd, n):
     return out
 
 
+def cross_grouped(Ad, Bd, n):
+    """Same sums as cross(): digits stacked along the run axis once, so diagonal s is ONE matmul of the contiguous
+    slices A[0..s] x B[s..0] over (s+1)*nc runs, and the pair adds disappear into the run tree."""
+    nc, O, kc = Ad[0].shape
+    T = Bd[0].shape[2]
+    As, Bs = ttnn.concat(Ad, 0), ttnn.concat(Bd[::-1], 0)
+    out = []
+    for s in range(n):
+        L = ttnn.slice(As, [0, 0, 0], [(s + 1) * nc, O, kc])
+        R = ttnn.slice(Bs, [(n - 1 - s) * nc, 0, 0], [n * nc, kc, T])
+        C = ttnn.matmul(L, R, compute_kernel_config=CFG, dtype=ttnn.float32)
+        ttnn.deallocate(L), ttnn.deallocate(R)
+        out.append(tree_sum(C))
+    ttnn.deallocate(As), ttnn.deallocate(Bs)
+    return out
+
+
 fh = open(a.out, "a")
 
 
@@ -159,7 +177,7 @@ for case in a.cases.split(","):
             Ad, Bd = digits(A, n), digits(B, n)
             ttnn.synchronize_device(dev)
             t2 = time.time()
-            Cs = cross(Ad, Bd, n)
+            Cs = (cross_grouped if a.grouped else cross)(Ad, Bd, n)
             ttnn.synchronize_device(dev)
             t3 = time.time()
             C = sum(ttnn.to_torch(x).double().numpy().reshape(O, T) * 2.0 ** -(2 * k + 2) for k, x in enumerate(Cs))
@@ -179,7 +197,7 @@ for case in a.cases.split(","):
         Cf = C * np.ldexp(1.0, ea)[:, None] * np.ldexp(1.0, eb)[None, :]
         e = np.abs(ref2[:, None] + sh2[None, :] - 2 * Cf - d64)
         tm = np.median(np.array(tim), 0)
-        emit(dict(base, cfg="ozaki n%d" % n, n=n, matmuls=n * (n + 1) // 2, runs=nc, digits_exact=bool(ok),
+        emit(dict(base, cfg="ozaki n%d%s" % (n, " grouped" if a.grouped else ""), n=n, matmuls=n * (n + 1) // 2, runs=nc, digits_exact=bool(ok),
                   err_max=float(e.max()), err_near=float(e[near].max()), up_s=round(tm[0], 4),
                   digits_s=round(tm[1], 4), cross_s=round(tm[2], 4), down_s=round(tm[3], 4),
                   chip_s=round(tm[1] + tm[2], 4), aiclk_min=cmin, aiclk_med=cmed))
