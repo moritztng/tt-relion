@@ -96,8 +96,25 @@ On the dev cell this cuts the host time per refinement iteration from 20.2 s to 
 final iteration from 85 s to 42 s. It only changes where memory comes from, so the maps are the same
 within RELION's own run-to-run variation. The kernel needs THP set to `madvise` or `always`.
 
-Threading the big FFTs (FFTW with several threads per rank) was slower on a shared host and is not
-recommended.
+## Threaded FFTs for the reconstruction
+
+`relion5-host-threads.patch` builds RELION's bundled FFTW with threads and gives transforms of at
+least 2^22 elements (the 3D maps, not the per-particle images) up to 4 of the `--j` threads. Apply
+it on top of the other patches and rebuild from a clean `external/fftw`, then run with huge pages as
+above:
+
+```sh
+cd relion && git apply /path/to/relion5-host-threads.patch
+```
+
+With both, the host time per refinement iteration on the dev cell drops from 11.4 s (huge pages
+alone) to 6.3 s and the final iteration from 42 s to 34 s. The final map matches the huge-pages run
+to a correlation of 0.99999, well inside RELION's own run-to-run variation. The patch only touches
+RELION's CPU code, so CPU and GPU builds both pick it up.
+
+The patch also fixes an FFTW pitfall: RELION calls `fftw_cleanup()` once per iteration, which
+silently drops FFTW's coarse thread splitting from every later plan and made threaded runs 5x
+slower from the second iteration on. The patched cleanup re-initialises FFTW's threads instead.
 
 ## License
 
