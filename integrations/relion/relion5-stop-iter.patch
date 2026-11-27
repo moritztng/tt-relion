@@ -1,0 +1,16 @@
+diff --git a/src/ml_optimiser_mpi.cpp b/src/ml_optimiser_mpi.cpp
+--- a/src/ml_optimiser_mpi.cpp
++++ b/src/ml_optimiser_mpi.cpp
+@@ -4257,6 +4257,12 @@
+ 			break;
+ 		}
+ 
++		// RLX profiling arms: auto-refine ignores --iter (nr_iter = nr_iter_max), so a timed slice stops here and exits
++		// normally (exit-time TTPROF tables print). Unset = stock behaviour.
++		if (const char *stop = getenv("RLX_STOP_ITER"))
++			if (iter >= atoi(stop))
++				break;
++
+     } // end loop iters
+ 
+ 	// Hopefully this barrier will prevent some bus errors

@@ -81,6 +81,9 @@ cd relion && git apply /path/to/relion5-coarse-blocking.patch /path/to/relion5-n
 `relion5-estep-profile.patch` adds the timers used to measure the expectation step and is not needed
 to run.
 
+`relion5-stop-iter.patch` lets a timed slice of an auto-refine stop after iteration N (`RLX_STOP_ITER=N`)
+and exit normally; auto-refine otherwise ignores `--iter`. Not needed to run.
+
 ## License
 
 Everything in this directory modifies or links into RELION and is GPL-2.0, like RELION itself. See
