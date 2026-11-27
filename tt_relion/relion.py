@@ -193,6 +193,9 @@ class _Server:
         # tt-metal's inspector logs every workload to ./generated/inspector (~75 MB/min per chip). Each new server
         # deletes the previous one's files while that one keeps writing: 32 chips filled 25 GB of disk in 15 min.
         env.setdefault("TT_METAL_INSPECTOR", "0")
+        # torch defaults to one OpenMP worker per core. On a 64-thread host the first large torch op in each of 32
+        # servers started 31 spinning workers: 785 runnable threads, RELION's own threads starved from it13 on.
+        env.setdefault("OMP_NUM_THREADS", "1")
         self.p = subprocess.Popen([_PYTHON, "-m", module, _FIDELITY],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
         self.lock = threading.Lock()
