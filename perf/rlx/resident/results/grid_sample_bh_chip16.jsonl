@@ -1,0 +1,14 @@
+start 2026-11-27T16:22:18Z load: 4.35 4.61 5.13 2/969 2176343
+rc=0 end 2026-11-27T16:22:30Z load: 4.54 4.63 5.12 2/967 2177578
+{"H": 360, "W": 360, "C": 32, "Ho": 256, "Wo": 256, "input": "f32", "rel_err": 3.934072656322024, "s": 0.00123, "samples_per_s_M": 53.2, "chan_samples_per_s_M": 1703.8, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 360, "W": 360, "C": 32, "Ho": 256, "Wo": 256, "input": "bf16", "rel_err": 0.007624958880263537, "s": 0.00124, "samples_per_s_M": 52.7, "chan_samples_per_s_M": 1685.2, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 360, "W": 360, "C": 64, "Ho": 256, "Wo": 256, "input": "f32", "rel_err": 5.321724985003814, "s": 0.00124, "samples_per_s_M": 52.9, "chan_samples_per_s_M": 3386.6, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 360, "W": 360, "C": 64, "Ho": 256, "Wo": 256, "input": "bf16", "rel_err": 0.006909700348929911, "s": 0.00124, "samples_per_s_M": 53.0, "chan_samples_per_s_M": 3393.6, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 720, "W": 361, "C": 32, "Ho": 512, "Wo": 512, "input": "f32", "rel_err": 3.066875827156162, "s": 0.00482, "samples_per_s_M": 54.3, "chan_samples_per_s_M": 1739.0, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 720, "W": 361, "C": 32, "Ho": 512, "Wo": 512, "input": "bf16", "rel_err": 0.00689909413465724, "s": 0.00482, "samples_per_s_M": 54.4, "chan_samples_per_s_M": 1739.3, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 200, "W": 200, "C": 256, "Ho": 128, "Wo": 128, "input": "f32", "rel_err": 3.3669828981949523, "s": 0.00036, "samples_per_s_M": 46.0, "chan_samples_per_s_M": 11774.5, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 200, "W": 200, "C": 256, "Ho": 128, "Wo": 128, "input": "bf16", "rel_err": 0.007990948856683076, "s": 0.00034, "samples_per_s_M": 47.9, "chan_samples_per_s_M": 12273.6, "aiclk_min": 1350, "aiclk_med": 1350}
+{"H": 100, "W": 100, "C": 1024, "Ho": 64, "Wo": 64, "input": "f32", "error": "TT_FATAL @ /project/ttnn/cpp/ttnn/operations/pool/grid_sample/device/grid_sample_device_operation.cpp:153: input_tensor.padded_shape()[-1] <= tt::constants::TILE_WIDTH * max_tiles_per_reduction\ninfo:\nWide reduction not supported: input tensor width 1024 exceeds maximum 256 (TILE_WIDTH 32 * max_tiles"}
+{"H": 100, "W": 100, "C": 1024, "Ho": 64, "Wo": 64, "input": "bf16", "error": "TT_FATAL @ /project/ttnn/cpp/ttnn/operations/pool/grid_sample/device/grid_sample_device_operation.cpp:153: input_tensor.padded_shape()[-1] <= tt::constants::TILE_WIDTH * max_tiles_per_reduction\ninfo:\nWide reduction not supported: input tensor width 1024 exceeds maximum 256 (TILE_WIDTH 32 * max_tiles"}
+{"test": "bf16-exact input", "rel_err": 0.006053313633227564}
+{"test": "fp32 as 3 bf16 pieces", "rel_err": 0.006034748373732553, "fp32_host_rel": 5.088276936779785e-08}
