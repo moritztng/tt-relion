@@ -64,12 +64,15 @@ def proj(dt):
 
 
 def fine(ref):
+    """ref None: TT_RELION_FINE_PROJECT=bridge, RELION hands over the model instead of its projection."""
     out = np.zeros(a.O * a.T, np.float32)
     rot = np.repeat(np.arange(a.O, dtype=np.uint64), a.T)
     tr = np.tile(np.arange(a.T, dtype=np.uint64), a.O)
-    ok = relion.diff2_fine(memoryview(np.ascontiguousarray(ref, np.float32)), memoryview(eul), memoryview(tx),
+    rv = None if ref is None else memoryview(np.ascontiguousarray(ref, np.float32))
+    ok = relion.diff2_fine(rv, memoryview(mdl) if ref is None else None, memoryview(eul), memoryview(tx),
                            memoryview(ty), memoryview(re), memoryview(im), memoryview(corr), memoryview(rot),
-                           memoryview(tr), memoryview(out), maxR, imgX, imgY, 0.0, a.O, a.T, a.O * a.T, P, a.O)
+                           memoryview(tr), memoryview(out), X, Y, Y, geo["mdlInitY"], geo["mdlInitZ"], maxR,
+                           geo["maxR2_padded"], PF, imgX, imgY, 0.0, a.O, a.T, a.O * a.T, P, a.O)
     assert ok
     return out.astype(np.float64)
 
@@ -96,6 +99,9 @@ relion._DEVPROJ = True
 n0 = relion._stats["devproj"]
 dev = fine(ref32 * 0)          # a zeroed reference: any use of it instead of the chip's projection shows
 assert relion._stats["devproj"] > n0, "fine call did not take the device-projection path"
+n0 = relion._stats["devproj"]
+mdlonly = fine(None)           # RELION skips its projection (TT_RELION_FINE_PROJECT=bridge)
+assert relion._stats["devproj"] > n0 and np.array_equal(mdlonly, dev), "model-only fine call differs from devproj"
 scale = np.abs(d64).max()
 print("chip=%s s=%d O=%d T=%d  d2 max %.4g | err vs f64: given %.3g  devproj %.3g  (rel %.2e / %.2e) | devproj vs given %.3g"
       % (a.chip, a.s, a.O, a.T, scale, np.abs(given - d64).max(), np.abs(dev - d64).max(),
