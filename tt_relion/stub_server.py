@@ -27,6 +27,19 @@ class _Numpy:
             return np.matmul(a, rhs)
         return np.zeros((a.shape[0], a.shape[1], rhs.shape[2]), np.float32)
 
+    def oz_upload(self, runs, n):
+        from tt_relion.cross import oz_digits
+        return oz_digits(runs, n)
+
+    def oz_mm(self, a, rhs, n):
+        """Per-(i + j) digit sums, exact in float64 (the chip's are exact integers too)."""
+        from tt_relion.cross import oz_digits
+        o, t = a[0].shape[1], rhs.shape[2]
+        if not self.real:
+            return [np.zeros((o, t)) for _ in range(n)]
+        b = oz_digits(rhs, n)
+        return [sum(np.matmul(a[i].astype(np.float64), b[s - i]).sum(0) for i in range(s + 1)) for s in range(n)]
+
     def set_model(self, mkey, mdl, geom):
         import torch
         self.models[mkey] = torch.from_numpy(mdl.copy())

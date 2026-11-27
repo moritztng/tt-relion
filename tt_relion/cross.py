@@ -27,6 +27,15 @@ A request with "proj" then ships no reference; the server projects the O orienta
 Segment: [eul fp32 O*9] [shw fp32 T*K] [w fp32 K/2] -> [out float64 O*T] [ref2 float64 O],
 ref2[o] = sum_p w[p] |ref[o, p]|^2 (the bridge needs it for d2), summed by the backend without a matmul:
 an all-positive sum is where the chip's accumulation error shows most. The reply is "nomodel" if mkey is not kept (evicted).
+Exact integers (TT_RELION_OZAKI=<n>, for Blackhole). A Blackhole matmul keeps only ~11 significant bits in its
+accumulation in every config, so the bf16 split above stays ~2^-13 off whatever SPLIT is; it is exact while every
+partial sum stays below 2^11. With n > 0 each operand row is scaled by a power of two to |x| < 1 (oz_scale, exact),
+cut on the chip into n balanced base-4 digits in [-2, 2] (exact fp32 ops), every digit pair i + j < n is one LoFi
+matmul over K runs of OZ_KC = 480 (|partial| <= 1920, exact), the runs are summed on the chip in fp32 (exact
+integers) and the n per-(i + j) sums come back; oz_combine adds them in float64. n = 14 holds the d2 error within 2x
+of RELION's fp32 at box 64..360 (n = 13 suffices on the fine sizes; perf/rlx/ozaki_proto.py on wk/rlx-kernels).
+The kept operand is the n digit tensors. Projection on the chip ("model"/"proj") is declined in this mode, so
+RELION projects. Wormhole does not need this: its bf16 split meets the bar.
 EOF on stdin closes the backend and exits; the exit line is the TTDEV line perf/rlx/wallmap.py reads.
 """
 import json
@@ -38,6 +47,8 @@ import numpy as np
 
 SPLIT = int(os.environ.get("TT_RELION_SPLIT", "3"))
 KCHUNK = int(os.environ.get("TT_RELION_KCHUNK", "256"))
+OZAKI = int(os.environ.get("TT_RELION_OZAKI", "0"))
+OZ_KC = 480   # OZ_KC * 2 * 2 < 2^11: every partial sum of digit products is exact on the chip
 
 
 def bf16_split(a, k=SPLIT):
@@ -105,6 +116,34 @@ def proj_rhs(shw, p, kc):
     return rhs.reshape(-1, kc, SPLIT * n)
 
 
+def oz_scale(x):
+    """x [R, K] fp32 -> (x / 2^e cut into runs [nc, R, OZ_KC] fp32, e int [R]): |x / 2^e| < 1, exact."""
+    x = np.asarray(x, np.float32)
+    m = np.abs(x).max(1)
+    e = np.where(m > 0, np.frexp(m)[1], 0).astype(np.int32)    # m < 2^e
+    r, k = x.shape
+    nc = -(-k // OZ_KC)
+    y = np.zeros((r, nc * OZ_KC), np.float32)
+    y[:, :k] = np.ldexp(x, -e[:, None])
+    return np.ascontiguousarray(y.reshape(r, nc, OZ_KC).transpose(1, 0, 2)), e
+
+
+def oz_digits(x, n):
+    """Host twin of the chip's digit cut (stub server, checks): x fp32, |x| < 1 -> n float32 digit arrays."""
+    out, r = [], x.astype(np.float64)
+    for i in range(n):
+        q = np.round(r * 2.0 ** (2 * i + 1))     # half to even, as the chip's 1.5 * 2^23 add
+        out.append(q.astype(np.float32))
+        r = r - q * 2.0 ** -(2 * i + 1)
+    return out
+
+
+def oz_combine(sums, ea, eb):
+    """n per-(i + j) integer sums [O, T] -> C [O, T] float64."""
+    c = sum(np.asarray(v, np.float64) * 2.0 ** -(2 * s + 2) for s, v in enumerate(sums))
+    return c * np.ldexp(1.0, ea)[:, None] * np.ldexp(1.0, eb)[None, :]
+
+
 def pixels(g):
     """The Fourier pixels of one image, as the bridge's _dense_diff2 builds them: x, y float32 [P]."""
     pix = np.arange(g["P"])
@@ -140,8 +179,12 @@ def serve(backend, reply):
             resource_tracker.unregister(shm._name, "shared_memory")   # the bridge owns it
         if req.get("gen", gen) != gen:
             for a in kept.values():
-                backend.free(a)
+                backend.free(a[0] if OZAKI else a)
             gen, kept = req["gen"], {}
+        if OZAKI and ("model" in req or req.get("proj")):
+            reply.write("nomodel\n")   # the chip's projection feeds the bf16 split; RELION projects instead
+            reply.flush()
+            continue
         if "model" in req:
             try:   # a model the chip cannot hold (memory) is declined; the bridge then uses RELION's projection
                 backend.set_model(req["model"], np.ndarray((req["nvox"], 2), np.float32, shm.buf), req["geom"])
@@ -174,20 +217,29 @@ def serve(backend, reply):
         nref = o * k if req["ref"] else 0
         f32 = np.ndarray((nref + t * k,), np.float32, shm.buf)
         if req["ref"]:
-            a = backend.upload(lhs_operand(f32[:nref].reshape(o, k)))
+            if OZAKI:
+                runs, ea = oz_scale(f32[:nref].reshape(o, k))
+                a = (backend.oz_upload(runs, OZAKI), ea)
+            else:
+                a = backend.upload(lhs_operand(f32[:nref].reshape(o, k)))
             if req["key"] is not None:
                 kept[req["key"]] = a
         else:
             a = kept[req["key"]]
-        nc, kc = backend.shape(a)
-        rhs = rhs_operand(f32[nref:].reshape(t, k), nc, kc)
+        if OZAKI:
+            runs, eb = oz_scale(f32[nref:].reshape(t, k))
+            rhs = np.ascontiguousarray(runs.transpose(0, 2, 1))
+        else:
+            nc, kc = backend.shape(a)
+            rhs = rhs_operand(f32[nref:].reshape(t, k), nc, kc)
         t1 = time.time()
-        part = backend.mm(a, rhs)
+        part = backend.oz_mm(a[0], rhs, OZAKI) if OZAKI else backend.mm(a, rhs)
         t2 = time.time()
         if req["ref"] and req["key"] is None:
-            backend.free(a)
+            backend.free(a[0] if OZAKI else a)
         off = 4 * (nref + t * k)
-        np.ndarray((o, t), np.float64, shm.buf, offset=off)[...] = reduce(part, t)
+        np.ndarray((o, t), np.float64, shm.buf, offset=off)[...] = (oz_combine(part, a[1], eb) if OZAKI
+                                                                    else reduce(part, t))
         del f32
         t3 = time.time()
         up, mm, down = up + t1 - t0, mm + t2 - t1, down + t3 - t2

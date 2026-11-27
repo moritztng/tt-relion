@@ -42,7 +42,66 @@ class _Ttnn:
         return out
 
     def free(self, a):
-        self.ttnn.deallocate(a[0])
+        for x in (a if isinstance(a, list) else a[:1]):
+            self.ttnn.deallocate(x)
+
+    # ---- exact-integer cross term (cross.py TT_RELION_OZAKI) ----
+    _MAGIC = 12582912.0   # 1.5 * 2^23: (x + M) - M rounds to the nearest integer in fp32
+
+    def _digits(self, runs, n):
+        """runs fp32 numpy, |x| < 1 -> n bf16 device tensors of balanced base-4 digits (exact fp32 ops on the chip)."""
+        ttnn, out = self.ttnn, []
+        x = r = self._put(runs)
+        for i in range(n):
+            t = ttnn.multiply(r, float(2 ** (2 * i + 1)))
+            q = ttnn.subtract(ttnn.add(t, self._MAGIC), self._MAGIC)
+            out.append(ttnn.typecast(q, ttnn.bfloat16))
+            r2 = ttnn.subtract(r, ttnn.multiply(q, float(2.0 ** -(2 * i + 1))))
+            ttnn.deallocate(t), ttnn.deallocate(q)
+            if r is not x:
+                ttnn.deallocate(r)
+            r = r2
+        ttnn.deallocate(r), ttnn.deallocate(x)
+        return out
+
+    def oz_upload(self, runs, n):
+        return self._digits(runs, n)
+
+    def _tree_sum(self, c):
+        """fp32 [nc, O, T] -> [1, O, T] by pairwise elementwise adds (exact: integer sums < 2^24)."""
+        ttnn = self.ttnn
+        while c.shape[0] > 1:
+            m, h, o, t = c.shape[0], c.shape[0] // 2, c.shape[1], c.shape[2]
+            lo, hi = ttnn.slice(c, [0, 0, 0], [h, o, t]), ttnn.slice(c, [h, 0, 0], [2 * h, o, t])
+            s = ttnn.add(lo, hi)
+            if m % 2:
+                s = ttnn.concat([s, ttnn.slice(c, [2 * h, 0, 0], [m, o, t])], 0)
+            for z in (lo, hi, c):
+                ttnn.deallocate(z)
+            c = s
+        return c
+
+    def oz_mm(self, a, rhs, n):
+        """a: n lhs digit tensors [nc, O, 480]; rhs runs [nc, 480, T] fp32 -> n float64 [O, T] diagonal sums."""
+        ttnn = self.ttnn
+        if not hasattr(self, "lofi"):
+            self.lofi = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi, math_approx_mode=False,
+                                                         fp32_dest_acc_en=True, packer_l1_acc=True)
+        b, out = self._digits(rhs, n), []
+        for s in range(n):
+            acc = None
+            for i in range(s + 1):
+                c = ttnn.matmul(a[i], b[s - i], compute_kernel_config=self.lofi, dtype=ttnn.float32)
+                if acc is not None:
+                    c2 = ttnn.add(acc, c)
+                    ttnn.deallocate(acc), ttnn.deallocate(c)
+                    c = c2
+                acc = c
+            acc = self._tree_sum(acc)
+            out.append(self.torch.squeeze(ttnn.to_torch(acc), 0).double().numpy())
+            ttnn.deallocate(acc)
+        self.free(b)
+        return out
 
     # ---- projection on the chip (cross.py "proj" requests) ----
     # The model is kept as a corner table: row v holds the 2x2x2 neighbours of voxel v (16 fp32, column

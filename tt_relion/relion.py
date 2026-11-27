@@ -49,6 +49,9 @@ _CHECK = os.environ.get("TT_RELION_CHECK", "") not in ("", "0")
 _DEV_CHUNK = int(os.environ.get("TT_RELION_DEV_CHUNK", "1024"))
 _FIDELITY = os.environ.get("TT_RELION_FIDELITY", "HiFi3")
 _KCHUNK = int(os.environ.get("TT_RELION_KCHUNK", "256"))
+# TT_RELION_OZAKI=<n>: exact-integer cross term with n base-4 digits (Blackhole; 14 meets the accuracy bar
+# at every size). 0 (default): the bf16 split, which meets it on Wormhole. tt_relion/cross.py.
+_OZAKI = int(os.environ.get("TT_RELION_OZAKI", "0"))
 # TT_RELION_TRACE=<path>: append one line per call with the shape, a hash of the euler set and a
 # hash of the reference. Answers "is the coarse orientation set shared across particles" from a
 # real run rather than from reading RELION's sampling code.
@@ -480,8 +483,9 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         elif device:
             ref, rr, key = _coarse_refs(t, ckey, o0, project)
             ref2 = (rr * w.double()).sum(-1)
-            # Kept on the chip: the left operand is 3 bf16 parts (fp32 on device) padded to _KCHUNK.
-            kbytes = 3 * ref.nbytes + (o1 - o0) * _KCHUNK * 4
+            # Kept on the chip: 3 bf16 parts (fp32 on device) padded to _KCHUNK, or OZAKI bf16 digit tensors.
+            kbytes = (_OZAKI * ref.nbytes // 2 + (o1 - o0) * 480 * 2 * _OZAKI if _OZAKI
+                      else 3 * ref.nbytes + (o1 - o0) * _KCHUNK * 4)
             cross = t.from_numpy(_cross(lambda: ref, o1 - o0, shw_np, key, kbytes))
             d2 = ref2.unsqueeze(1) + sh2.unsqueeze(0) - 2.0 * cross
         else:
