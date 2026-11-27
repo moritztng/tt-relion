@@ -70,17 +70,19 @@ def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1):
 CDIR = Path(__file__).resolve().parent / "kernels" / "oz_combine"
 
 
-def oz_combine(S, ea, eb, n):
+def oz_combine(S, ea, eb, n, q=1):
     """S fp32 TILE [n, R, O] from oz_fused; ea int32 RM [R/32, 32] row exponents, eb int32 RM [O/32, 32] column
-    exponents. Returns (hi, lo) fp32 TILE [R, O], the df32 of sum_k S_k 2^-(2k+2) 2^(ea[r] + eb[c]): Horner
+    exponents. q batches (oz_fused q-batched): S [q n, R, O], ea [q R/32, 32], eb [q O/32, 32], out [q R, O].
+    Returns (hi, lo) fp32 TILE [R, O], the df32 of sum_k S_k 2^-(2k+2) 2^(ea[r] + eb[c]): Horner
     (H <- 4 H + S_k, exact x4) with TwoSum on the SFPU in one pass over S, then one exact 2^(ea + eb - 2n) scale
     (the ttnn chain cost ~6 [R, O] DRAM passes per digit). Needs ea + eb - 2n > -126."""
     dev = S.device()
     R, O = int(S.shape[-2]), int(S.shape[-1])
     RT, OT = R // 32, O // 32
-    hi = ttnn.allocate_tensor_on_device(ttnn.Shape([R, O]), ttnn.float32, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
-    lo = ttnn.allocate_tensor_on_device(ttnn.Shape([R, O]), ttnn.float32, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
-    units = RT * OT
+    assert int(S.shape[0]) == q * n and int(ea.shape[0]) == q * RT and int(eb.shape[0]) == q * OT
+    hi = ttnn.allocate_tensor_on_device(ttnn.Shape([q * R, O]), ttnn.float32, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
+    lo = ttnn.allocate_tensor_on_device(ttnn.Shape([q * R, O]), ttnn.float32, ttnn.TILE_LAYOUT, dev, ttnn.DRAM_MEMORY_CONFIG)
+    units = q * RT * OT
     g = dev.compute_with_storage_grid_size()
     _, grid, cg1, cg2, w1, w2 = core_split.split_work_to_cores(g, units, 0)
 

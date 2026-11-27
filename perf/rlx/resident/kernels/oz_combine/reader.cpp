@@ -1,4 +1,5 @@
-// oz_combine reader: output tile u = (rt, ct) of [RT, OT]. Streams the n Ozaki sums S_k (fp32 TILE [n, RT*32, OT*32])
+// oz_combine reader: output tile u = (j, rt, ct) of [Q, RT, OT] (Q independent batches, batch-major as oz_fused writes
+// them: S page (j * N + k) * RT * OT + v; row exponents ea page j * RT + rt, column exponents eb page j * OT + ct). Streams the n Ozaki sums S_k (fp32 TILE [n, RT*32, OT*32])
 // for that tile, and builds the exact scale tile E[r, c] = 2^(ea[r] + eb[c] - 2n) from the int32 row/column exponents.
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
@@ -24,10 +25,11 @@ void kernel_main() {
     volatile tt_l1_ptr int32_t* eb = reinterpret_cast<volatile tt_l1_ptr int32_t*>(xb);
     uint32_t last_rt = 0xffffffffu;
     for (uint32_t u = u0; u < u0 + nu; ++u) {
-        const uint32_t rt = u / OT, ct = u % OT;
+        const uint32_t j = u / (RT * OT), v = u % (RT * OT);
+        const uint32_t rt = j * RT + v / OT, ct = j * OT + v % OT;   // exponent pages of batch j
         for (uint32_t k = 0; k < N; ++k) {
             cb_reserve_back(cb_s, 1);
-            noc_async_read_page(k * RT * OT + u, ss, get_write_ptr(cb_s));
+            noc_async_read_page((j * N + k) * RT * OT + v, ss, get_write_ptr(cb_s));
             noc_async_read_barrier();
             cb_push_back(cb_s, 1);
         }
