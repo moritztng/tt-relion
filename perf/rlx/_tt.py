@@ -16,8 +16,8 @@ def open_dev():
     from tt_bio import tenstorrent as T
 
     dev = T.get_device()
-    vis = os.environ.get("TT_VISIBLE_DEVICES", "")
-    nodes = [int(x) for x in vis.split(",") if x.strip()] or _fd_nodes()
+    # The nodes this process holds open: TT_VISIBLE_DEVICES ids are UMD (PCI-order) ids, not node numbers.
+    nodes = _fd_nodes()
     print("device nodes:", nodes, flush=True)
     return dev, nodes
 
