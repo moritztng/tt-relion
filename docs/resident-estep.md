@@ -19,6 +19,17 @@ So the matmuls are cheap, and per-particle projection is the cost to engineer: a
 8 corners straight into tiles is DRAM-bound at about 64 B per pixel. At 1e9 px/s per chip the projections take 114 s,
 which is the target for that kernel.
 
+## Shared projection tables for local searches
+
+RELION draws every particle's local orientations from one global grid per iteration, so a half's projections at the local
+order can be built once and each particle's ~155 references fetched by row gathers. ttnn.embedding gathers rows at
+160-190 GB/s on one BH chip, about 400x the interpolation rate, so the per-particle step becomes nearly free. The table
+build is interpolation over the shared grid: 4.2e11 pixels over the job instead of 2.0e12 per particle. At order 5 a half's
+table is ~260 GB, so it is spread over that half's 16 chips (~16 GB each) and particles are routed to the chip holding their
+prior direction. The final iteration and the fine pass stay per particle (1.6e12 pixels) and need the faster kernel.
+At today's interpolation rate this route brings projection from 2,050 s to ~1,150 s. With a 5x faster kernel it drops to
+~230 s.
+
 ## Layout
 
 - **Sharding by particle and half-set.** Chips 0-15 hold half 1 and chips 16-31 hold half 2, about 3,300 particles each

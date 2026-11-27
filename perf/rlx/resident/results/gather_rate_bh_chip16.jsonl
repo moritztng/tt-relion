@@ -1,0 +1,10 @@
+start 2026-11-27T16:20:16Z load: 2.43 4.89 5.30 2/968 2174773
+rc=0 end 2026-11-27T16:20:37Z load: 2.31 4.71 5.23 2/968 2175705
+{"rows": 65536, "width": 2048, "nidx": 9920, "out_layout": "tile", "s": 0.00022, "GBps": 185.2, "px_per_s_fp32complex": 23147.0, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
+{"rows": 65536, "width": 2048, "nidx": 9920, "out_layout": "rm", "s": 0.00023, "GBps": 179.1, "px_per_s_fp32complex": 22386.8, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
+{"rows": 65536, "width": 8192, "nidx": 9920, "out_layout": "tile", "s": 0.00086, "GBps": 189.0, "px_per_s_fp32complex": 23628.4, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
+{"rows": 65536, "width": 8192, "nidx": 9920, "out_layout": "rm", "s": 0.00093, "GBps": 175.4, "px_per_s_fp32complex": 21925.5, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
+{"rows": 16384, "width": 32768, "nidx": 2480, "out_layout": "tile", "s": 0.00183, "GBps": 88.7, "px_per_s_fp32complex": 11082.5, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
+{"rows": 16384, "width": 32768, "nidx": 2480, "out_layout": "rm", "s": 0.001, "GBps": 162.5, "px_per_s_fp32complex": 20311.9, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
+{"rows": 65536, "width": 8192, "nidx": 39680, "out_layout": "tile", "s": 0.00327, "GBps": 198.9, "px_per_s_fp32complex": 24863.0, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
+{"rows": 65536, "width": 8192, "nidx": 39680, "out_layout": "rm", "s": 0.00365, "GBps": 178.3, "px_per_s_fp32complex": 22289.9, "unit": "Mpx/s", "aiclk_min": 1350, "aiclk_med": 1350}
