@@ -12,6 +12,9 @@ export RLX_CHIPS=${RLX_CHIPS:-8} RLX_CHIP_BASE=${RLX_CHIP_BASE:-16} RLX_CHIPS_PE
 n=$((RLX_CHIPS + 1)) j=${RLX_J:-7}
 while [ "$(date +%s)" -lt "${RLX_WAIT_UNTIL:-0}" ]; do sleep 30; done
 [ -e "$HOME/fleet/HANDBACK" ] && { echo "HANDBACK present, not starting"; exit 1; }
+# Never share a chip: wait until no process holds any chip of the range (a co-tenant may borrow an idle range).
+busy() { for c in $(seq "$RLX_CHIP_BASE" $((RLX_CHIP_BASE + RLX_CHIPS - 1))); do fuser -s "/dev/tenstorrent/$c" && return 0; done; return 1; }
+while busy; do echo "$(date -u +%T) range held, waiting"; sleep 60; done
 cd "$R/data"
 DEV=(--i dev.star --ref emd_2660.map --ini_high 60 --firstiter_cc --auto_refine --split_random_halves
      --particle_diameter 360 --ctf --flatten_solvent --zero_mask --oversampling 1 --healpix_order 2
