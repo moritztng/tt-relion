@@ -219,7 +219,10 @@ def _matmul(lhs, rhs):
 
 
 def _book(key, dt):
-    c = _tl.srv.c
+    srv = getattr(_tl, "srv", None)              # the torch backend has no server to book to
+    if srv is None:
+        return
+    c = srv.c
     c[key] = round(c.get(key, 0.0) + dt, 4)
 
 
@@ -445,3 +448,68 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
 
 def stats():
     return dict(_stats)
+
+
+# ---- batch entry: one call per particle batch (the resident E-step's C++ call) ----
+
+_refcache = {}       # (model key, euler hash) -> (ref_r, ref_i) for the shared coarse set
+
+
+def _shared_refs(t, mdl_mv, eul, x, y, geom):
+    """Projections of the coarse orientation set, built once per iteration and reused by every batch.
+
+    In a global pass every particle scores the same orientations against the same reference, so the
+    projection is a property of the iteration, not of the particle.
+    """
+    import hashlib
+    key = (_model_key(mdl_mv), hashlib.sha256(eul.numpy().tobytes()).digest(), x.shape[0])
+    hit = _refcache.get(key)
+    if hit is None:
+        _refcache.clear()                           # one iteration's set at a time
+        mdl = t.from_numpy(np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy())
+        rr, ri = [], []
+        for o0 in range(0, eul.shape[0], _DEV_CHUNK):
+            a, b = _project(t, mdl, x, y, eul[o0:o0 + _DEV_CHUNK], *geom)
+            rr.append(a), ri.append(b)
+        hit = _refcache[key] = (t.cat(rr), t.cat(ri))
+    return hit
+
+
+def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
+                       mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
+                       padding_factor, imgX, imgY):
+    """diff2 for N particles over one shared orientation set: float32 [N, O, T].
+
+    img_r/img_i/corr are [N, image_size], tx/ty are [N, T] (each particle's own offsets), eul is
+    [O, 9] and shared. The cross term is one product of [N*T, 2P] by [2P, O]; |ref|^2_w is one
+    product of [N, P] by [P, O]; |shift|^2_w is a row norm. Entry for entry this equals N calls of
+    diff2_coarse, which tests/test_batch.py checks.
+    """
+    t = _torch()
+    n, image_size = img_r.shape
+    T = tx.shape[1]
+    eul = t.from_numpy(np.ascontiguousarray(eul, dtype=np.float32).reshape(-1, 9))
+    pix = t.arange(image_size, dtype=t.int64)
+    x = (pix % imgX).to(t.float32)
+    yi = pix // imgX
+    y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
+    ref_r, ref_i = _shared_refs(t, mdl, eul, x, y,
+                                (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
+    w = t.from_numpy(np.asarray(corr, np.float32)) * 0.5                      # [N, P]
+    ir, ii = t.from_numpy(np.asarray(img_r, np.float32)), t.from_numpy(np.asarray(img_i, np.float32))
+    ph = (x[None, None] * t.from_numpy(np.asarray(tx, np.float32))[..., None]
+          + y[None, None] * t.from_numpy(np.asarray(ty, np.float32))[..., None])   # [N, T, P]
+    s, c = t.sin(ph), t.cos(ph)
+    sh_r = c * ir[:, None] - s * ii[:, None]
+    sh_i = c * ii[:, None] + s * ir[:, None]
+    wd = w.double()
+    sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * wd[:, None]).sum(-1)          # [N, T]
+    ref2 = wd @ (ref_r.double() ** 2 + ref_i.double() ** 2).T                         # [N, O]
+    shw = t.cat([sh_r * w[:, None], sh_i * w[:, None]], -1).reshape(n * T, -1)       # [N*T, 2P]
+    refc = t.cat([ref_r, ref_i], 1)                                                  # [O, 2P]
+    if _BACKEND == "ttnn":
+        cross = _device_cross(t, refc, shw).double()                                  # [O, N*T]
+    else:
+        cross = (refc.double() @ shw.double().T)
+    cross = cross.reshape(-1, n, T).permute(1, 0, 2)                                  # [N, O, T]
+    return (ref2[:, :, None] + sh2[:, None, :] - 2.0 * cross).float().numpy()
