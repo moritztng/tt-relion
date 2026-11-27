@@ -1,0 +1,8 @@
+start 2026-11-27T16:18:52Z load: 3.05 5.52 5.51 2/967 2173944
+rc=0 end 2026-11-27T16:19:10Z load: 5.24 5.85 5.62 2/968 2174315
+{"s": 100, "O": 1024, "P": 5100, "nvox": 4203318, "table_MB": 384.8, "cfg": "emulate f64 (device algorithm)", "rel": 0.0, "d2_err": 0.0}
+{"s": 100, "O": 1024, "P": 5100, "nvox": 4203318, "table_MB": 384.8, "cfg": "torch fp32 (host, RELION class)", "rel": 1.1613177348478156e-05, "d2_err": 0.0016785167681518942, "d2_mean": 10200.546632606174, "host32_s": 0.273, "host64_s": 0.53}
+{"s": 100, "O": 1024, "P": 5100, "nvox": 4203318, "table_MB": 384.8, "cfg": "ttnn fp32 embedding+lerp", "oc": 512, "pc": 512, "rel": 1.1613177348478156e-05, "d2_err": 0.0016785167681518942, "s_per_call": 0.0933, "table_up_s": 0.95, "aiclk_min": 1343, "aiclk_med": 1343}
+{"s": 146, "O": 1024, "P": 10804, "nvox": 12879700, "table_MB": 1179.2, "cfg": "emulate f64 (device algorithm)", "rel": 0.0, "d2_err": 0.0}
+{"s": 146, "O": 1024, "P": 10804, "nvox": 12879700, "table_MB": 1179.2, "cfg": "torch fp32 (host, RELION class)", "rel": 1.77976625969203e-05, "d2_err": 0.003719485041074222, "d2_mean": 21605.146682291437, "host32_s": 0.706, "host64_s": 1.177}
+{"s": 146, "O": 1024, "P": 10804, "nvox": 12879700, "table_MB": 1179.2, "cfg": "ttnn fp32 embedding+lerp", "oc": 512, "pc": 512, "rel": 1.77976625969203e-05, "d2_err": 0.003719485041074222, "s_per_call": 0.1995, "table_up_s": 3.07, "aiclk_min": 1350, "aiclk_med": 1350}

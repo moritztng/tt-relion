@@ -12,9 +12,10 @@ Counted from RELION's own sampling (`perf/rlx/resident/count_full.py` on the GPU
 |---|---|---|
 | diff2 cross term, exact (Ozaki n14) | 1.33e15 FLOP x 105 bf16 pair products | 152 s (43 TFLOP/s per chip on the 480-wide runs) |
 | projections shared by all particles (global passes) | 4e8 pixels | under 1 s |
-| projections per particle (local searches, final, fine pass) | 3.6e12 interpolated pixels | 2,526 s at 45 M px/s/chip (stock ttnn gather) |
+| projections per particle (local searches, final, fine pass) | 3.6e12 interpolated pixels | 2,050 s at 55 M px/s/chip (stock ttnn gather + lerp, AICLK 1350) |
 
-So the matmuls are cheap, and per-particle projection is the cost to engineer. A gather + trilinear kernel that reads the
+So the matmuls are cheap, and per-particle projection is the cost to engineer: at today's rate it alone is twice the
+1,022 s bar. A gather + trilinear kernel that reads the
 8 corners straight into tiles is DRAM-bound at about 64 B per pixel. At 1e9 px/s per chip the projections take 114 s,
 which is the target for that kernel.
 
