@@ -45,6 +45,7 @@ ap.add_argument("--nodev", action="store_true")
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--balance", type=int, default=1)
 ap.add_argument("--fused", type=int, default=1, help="oz_fused kernel (1) or the composed ttnn matmul+add path (0)")
+ap.add_argument("--nchip", type=int, default=14, help="Ozaki digits of the chip pass (C product)")
 ap.add_argument("--pchip", type=int, default=0, help="build the particle operand on chip from the resident stack")
 ap.add_argument("--fcut", type=int, default=1, help="fused SFPU digit-cut kernel (1) or the ttnn chain (0)")
 ap.add_argument("--fcomb", type=int, default=1, help="fused SFPU combine kernel (1) or the ttnn TwoSum chain (0)")
@@ -608,7 +609,7 @@ if not a.nodev:
                 digB_max=float(max(np.abs(th(q_)).max() for q_ in Bd)))
         return out
 
-    n = 14
+    n = a.nchip
     r0 = chip_pass(n, check=True)
     # chip projection vs float64 projection (same pixels, same orientations)
     Bh = r0["B"].reshape(a.O, NC, 2, 1024)
@@ -633,7 +634,7 @@ if not a.nodev:
                               "frac": a.frac}}
     print(json.dumps(rec_s), flush=True)
     fh.write(json.dumps(rec_s) + "\n")
-    grade("RESIDENT chip n14 (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, ns_n=a.ns_n or n, proj_rel_vs_f64=prel, **r0["diag"]))
+    grade(f"RESIDENT chip n{n} (proj+cut+oz+combine on chip)", 2 * r0["D"], dict(n=n, ns_n=a.ns_n or n, proj_rel_vs_f64=prel, **r0["diag"]))
     clk = Clock(nodes)
     ts = []
     for _ in range(a.reps):
