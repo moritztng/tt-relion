@@ -27,6 +27,7 @@ from pathlib import Path
 
 ap = argparse.ArgumentParser()
 ap.add_argument("run")
+ap.add_argument("--j", type=int, default=8, help="RELION --j threads per rank")
 ap.add_argument("--nodes", help="device node numbers whose AICLK counts (default: all)")
 a = ap.parse_args()
 d = Path(a.run)
@@ -49,8 +50,27 @@ dev = []
 for m in re.finditer(r"^TTDEV chip=(\S+) calls=(\d+) busy_s=([0-9.]+) up_s=([0-9.]+) mm_s=([0-9.]+) "
                      r"down_s=([0-9.]+) life_s=([0-9.]+) client=(\{.*?\})$", log, re.M):
     c = json.loads(m.group(8))
-    dev.append(dict(chip=m.group(1), calls=int(m.group(2)), busy=float(m.group(3)), up=float(m.group(4)),
-                    mm=float(m.group(5)), down=float(m.group(6)), life=float(m.group(7)), **c))
+    c.pop("calls", None)                    # the client's count of the same calls
+    dev.append(dict(c, chip=m.group(1), calls=int(m.group(2)), busy=float(m.group(3)), up=float(m.group(4)),
+                    mm=float(m.group(5)), down=float(m.group(6)), life=float(m.group(7))))
+
+# Bridge counters per iteration, for runs whose exit tables are missing (a killed run). Each rank prints a
+# cumulative "tt_relion pid ..." line when its reference changes, i.e. during the E-step after the one it
+# covers; a rank that skipped a line has its interval spread over the iterations it spans.
+bridge, last, it = {}, {}, None
+for line in log.splitlines():
+    if (m := re.match(r"\s*Expectation iteration (\d+)", line)):
+        it = int(m.group(1))
+    elif it and (m := re.match(r"tt_relion pid (\d+) .*C_s ([0-9.]+) F_s ([0-9.]+) rt_s ([0-9.]+) copy_s ([0-9.]+)", line)):
+        v = [float(x) for x in m.groups()[1:]]
+        i0, v0 = last.get(m.group(1), (0, [0.0] * 4))
+        span = range(i0 + 1, it)
+        for i in span:
+            b_ = bridge.setdefault(i, [0.0] * 4)
+            for k in range(4):
+                b_[k] += (v[k] - v0[k]) / len(span)
+        last[m.group(1)] = (it - 1, v)
+nrank = len(last)
 
 clk, cols = [], None
 for line in (d / "aiclk.tsv").read_text().splitlines():
@@ -76,6 +96,13 @@ if its:
         print(f"{i:4d}  {w:7.1f}  {e:7.1f}  {w - e:9.1f}")
     if t1:
         print(f"after it{its[-1][0]:03d} to exit: {t1 - its[-1][1]:.0f} s")
+    if bridge:
+        print(f"\nbridge per iteration, mean per follower rank ({nrank}), thread-summed s; share = of E-step wall x --j")
+        print("iter  estep_s  coarse_s  fine_s  chip_rt_s  shm_copy_s  bridge/(E x j)")
+        for i in sorted(bridge):
+            c, f, r, cp = (x / nrank for x in bridge[i])
+            e = estep.get(i, float("nan"))
+            print(f"{i:4d}  {e:7.1f}  {c:8.1f}  {f:6.1f}  {r:9.1f}  {cp:10.1f}  {(c + f) / (e * a.j):.3f}")
     E = sum(x for x in estep.values() if x == x)
     print(f"sum E-step {E:.0f} s of {its[-1][1] - its[0][1]:.0f} s iterating")
 if dev:
