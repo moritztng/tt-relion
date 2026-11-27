@@ -149,7 +149,7 @@ def oz_digits(x, n):
     """Host twin of the chip's digit cut (stub server, checks): x fp32, |x| < 1 -> n float32 digit arrays."""
     out, r = [], x.astype(np.float64)
     for i in range(n):
-        q = np.round(r * 2.0 ** (2 * i + 1))     # half to even, as the chip's 1.5 * 2^23 add
+        q = np.round(r * 2.0 ** (2 * i + 1))     # half to even, as ttnn.round on the chip
         out.append(q.astype(np.float32))
         r = r - q * 2.0 ** -(2 * i + 1)
     return out
