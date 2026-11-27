@@ -562,7 +562,8 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                         b["out"] = r
                     _stats["batches"] = _stats.get("batches", 0) + 1
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
-                    if _stats["batches"] % 50 == 0:
+                    n = _stats["batches"]
+                    if n % 50 == 0 or n & (n - 1) == 0:     # 1, 2, 4, ... then every 50
                         print(f"tt_relion: coarse batches={_stats['batches']} particles="
                               f"{_stats['batched']} mean={_stats['batched'] / _stats['batches']:.2f}",
                               file=sys.stderr, flush=True)
