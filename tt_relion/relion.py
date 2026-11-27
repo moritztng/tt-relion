@@ -422,7 +422,9 @@ def _coarse_refs(t, key, o0, project):
                 if k in _pc["hit"]:                 # another thread built it meanwhile: one entry, one chip key
                     return _pc["hit"][k]
                 if _pc["bytes"] + nb <= _PCACHE_MB << 20:
-                    got = _pc["hit"][k] = (ref, rr, str(len(_pc["hit"])))
+                    # A copy: on the L10 path ref views the caller's thread_local projection buffer,
+                    # which RELION overwrites (or reallocates) on that thread's next call.
+                    got = _pc["hit"][k] = (ref.copy(), rr, str(len(_pc["hit"])))
                     _pc["bytes"] += nb
                     return got
     return ref, rr, None
