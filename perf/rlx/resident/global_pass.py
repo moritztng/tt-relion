@@ -333,7 +333,7 @@ def significance(d2, prior, frac):
 if not a.nodev:
     import ttnn
     from _tt import Clock, open_dev
-    from proj_lerp import proj_rot
+    from tt_relion.proj_lerp import proj_rot
 
     dev, nodes = open_dev()
     CFG = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi, math_approx_mode=False,
@@ -475,7 +475,7 @@ if not a.nodev:
         return ttnn.multiply(XA, put(np.ldexp(1.0, e.astype(int)).reshape(1, -1))), \
             ttnn.multiply(XB, put(np.ldexp(1.0, -e.astype(int)).reshape(1, -1)))
 
-    from oz_fused import cand_compact, oz_combine, oz_cut, oz_fused
+    from tt_relion.oz_fused import cand_compact, oz_combine, oz_cut, oz_fused
 
     def oz_fused_dev(Xa, Xb, n):
         """Xa [Ra, K], Xb [Ob, K] fp32 TILE -> (hi, lo) df32 of Xa Xb^T, Ozaki n through oz_fused. Row exponents per side;

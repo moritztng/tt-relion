@@ -4,7 +4,7 @@ import numpy as np, torch
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path[:0] = [HERE, os.path.dirname(HERE)]
 from _tt import open_dev  # noqa
 import ttnn  # noqa
-from oz_fused import oz_fused  # noqa
+from tt_relion.oz_fused import oz_fused  # noqa
 dev, nodes = open_dev()
 rng = np.random.default_rng(1)
 up = lambda a: ttnn.from_torch(torch.from_numpy(a.astype(np.float32)), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=dev)  # noqa

@@ -16,7 +16,7 @@ sys.path[:0] = [HERE, os.path.dirname(HERE), os.path.join(HERE, "..", "..", ".."
 from _tt import Clock, open_dev  # noqa: E402
 
 import ttnn  # noqa: E402
-from proj_lerp import proj_rot  # noqa: E402
+from tt_relion.proj_lerp import proj_rot  # noqa: E402
 from tt_relion.relion import _project  # noqa: E402
 
 PF = 2

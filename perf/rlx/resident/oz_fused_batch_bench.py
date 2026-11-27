@@ -14,7 +14,7 @@ sys.path[:0] = [HERE, os.path.dirname(HERE)]
 from _tt import Clock, open_dev  # noqa: E402
 
 import ttnn  # noqa: E402
-from oz_fused import oz_fused  # noqa: E402
+from tt_relion.oz_fused import oz_fused  # noqa: E402
 
 dev, nodes = open_dev()
 rng = np.random.default_rng(1)

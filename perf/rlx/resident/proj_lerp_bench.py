@@ -13,7 +13,7 @@ sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from _tt import Clock, open_dev  # noqa: E402
 
 import ttnn  # noqa: E402
-from proj_lerp import proj_lerp  # noqa: E402
+from tt_relion.proj_lerp import proj_lerp  # noqa: E402
 
 dev, nodes = open_dev()
 rng = np.random.default_rng(0)
