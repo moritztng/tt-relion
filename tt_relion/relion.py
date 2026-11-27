@@ -68,7 +68,7 @@ _DUMP = os.environ.get("TT_RELION_DUMP", "")
 _DUMP_N = int(os.environ.get("TT_RELION_DUMP_N", "1"))
 _dumped = [0]
 _stats = {"handled": 0, "declined": 0, "fine_handled": 0, "fine_declined": 0,
-          "proj_hit": 0, "proj_miss": 0, "ref_asked": 0, "devproj": 0}
+          "proj_hit": 0, "proj_miss": 0, "ref_asked": 0, "devproj": 0, "once_cpu": 0}
 # TT_RELION_PROJ_CACHE_MB: cap on kept coarse references (device path), per rank on the host and per
 # chip on the device. In a global search every particle's coarse pass asks for the same orientation set
 # against the same reference, so the projection and its left operand are per-iteration constants:
@@ -86,6 +86,14 @@ _FINE_PROJECT = os.environ.get("TT_RELION_FINE_PROJECT", "relion")
 if _FINE_PROJECT not in ("relion", "bridge"):
     raise ValueError("TT_RELION_FINE_PROJECT must be relion or bridge, got %r" % _FINE_PROJECT)
 _pc = {"model": None, "gen": 0, "seen": set(), "hit": {}, "bytes": 0}
+# TT_RELION_COARSE_ONCE: where a coarse orientation set seen for the first time under the current
+# reference goes. "chip" (default): RELION projects it in C++ and the chip computes it. "cpu": the
+# call declines and RELION's own CPU kernel computes it; from the second sighting on the set goes to
+# the chip and is kept. A local search asks every particle for its own set, so under "cpu" its coarse
+# pass stays on the host, where one call costs less than one chip round trip with a fresh operand.
+_COARSE_ONCE = os.environ.get("TT_RELION_COARSE_ONCE", "chip")
+if _COARSE_ONCE not in ("chip", "cpu"):
+    raise ValueError("TT_RELION_COARSE_ONCE must be chip or cpu, got %r" % _COARSE_ONCE)
 # TT_RELION_DEVPROJ=1: the fine pass projects on the chip. Each server keeps the model it last saw in a
 # coarse call (the same projector the particle's fine call uses), and a fine call ships only its Euler
 # matrices instead of the [O, 2P] reference. Off by default until the dev-cell A/B.
@@ -370,7 +378,7 @@ def _progress():
     for s in _srv:
         for k, v in list(s.c.items()):     # copy: other threads insert keys
             tot[k] = tot.get(k, 0) + v
-    keys = ("handled", "fine_handled", "proj_hit", "proj_miss", "ref_asked")
+    keys = ("handled", "fine_handled", "proj_hit", "proj_miss", "ref_asked", "once_cpu")
     return (f"tt_relion pid {os.getpid()} " + " ".join(f"{k} {_stats[k]}" for k in keys)
             + f" cached_mb {_pc['bytes'] >> 20} "
             + " ".join(f"{k} {tot.get(k, 0):.1f}" for k in ("C_s", "F_s", "rt_s", "copy_s", "calls")))
@@ -398,10 +406,7 @@ def _coarse_refs(t, key, o0, project):
     mkey, ekey = key
     k = (ekey, o0)
     with _pc_lock:
-        if _pc["model"] != mkey:                    # new iteration or half: drop the old reference
-            if _pc["model"] is not None:            # one line per reference, so a run log shows hit rates
-                print(_progress(), file=sys.stderr, flush=True)
-            _pc.update(model=mkey, gen=_pc["gen"] + 1, seen=set(), hit={}, bytes=0)
+        _pc_reference(mkey)
         got = _pc["hit"].get(k)
         keep = k in _pc["seen"]
         _pc["seen"].add(k)
@@ -421,6 +426,27 @@ def _coarse_refs(t, key, o0, project):
                     _pc["bytes"] += nb
                     return got
     return ref, rr, None
+
+
+def _pc_reference(mkey):
+    """Under _pc_lock: start a fresh cache when the reference changed (new iteration or half)."""
+    if _pc["model"] != mkey:
+        if _pc["model"] is not None:                # one line per reference, so a run log shows hit rates
+            print(_progress(), file=sys.stderr, flush=True)
+        _pc.update(model=mkey, gen=_pc["gen"] + 1, seen=set(), hit={}, bytes=0)
+
+
+def _coarse_first_sighting(key, orientation_num):
+    """True, and the set is recorded as seen, when no chunk of this coarse call was seen before
+    under the current reference."""
+    mkey, ekey = key
+    ks = [(ekey, o0) for o0 in range(0, orientation_num, _DEV_CHUNK)]
+    with _pc_lock:
+        _pc_reference(mkey)
+        first = not any(k in _pc["seen"] for k in ks)
+        if first:
+            _pc["seen"].update(ks)
+    return first
 
 
 def _coarse_key(mdl_mv, eul_mv, geom):
@@ -580,10 +606,14 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         return False
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
-        if can_ref and ref_mv is None and not _coarse_cached(
-                _coarse_key(mdl_mv, eul_mv, (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
-                                             padding_factor, imgX, imgY, image_size)),
-                orientation_num):
+        key = _coarse_key(mdl_mv, eul_mv, (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded,
+                                           padding_factor, imgX, imgY, image_size))
+        if can_ref and ref_mv is None and not _coarse_cached(key, orientation_num):
+            if _COARSE_ONCE == "cpu" and key is not None and _coarse_first_sighting(key, orientation_num):
+                _stats["once_cpu"] += 1
+                _stats["declined"] += 1
+                _book("C_s", time.time() - t0)
+                return False
             _stats["ref_asked"] += 1
             _book("C_s", time.time() - t0)
             return 2
