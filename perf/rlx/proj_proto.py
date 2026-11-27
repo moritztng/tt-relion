@@ -161,7 +161,7 @@ if not a.cpu_only:
         zi = ttnn.typecast(ttnn.clamp(ttnn.subtract(z0, float(gm["initZ"])), 0.0, float(gm["Z"] - 2)), ttnn.int32)
         idx = ttnn.add(ttnn.add(ttnn.multiply(zi, gm["X"] * gm["Y"]), ttnn.multiply(yi, gm["X"])), xi)
         Oc, P = idx.shape[0], idx.shape[1]
-        idx = ttnn.reshape(ttnn.to_layout(ttnn.typecast(idx, ttnn.uint32), ttnn.ROW_MAJOR_LAYOUT), (1, Oc * P))
+        idx = ttnn.to_layout(ttnn.typecast(idx, ttnn.uint32), ttnn.ROW_MAJOR_LAYOUT)   # [Oc, P]: one gather row per orientation
         G = ttnn.embedding(idx, Tdev, layout=ttnn.ROW_MAJOR_LAYOUT)
         G = ttnn.to_layout(ttnn.permute(ttnn.reshape(G, (Oc, P, 48)), (2, 0, 1)), ttnn.TILE_LAYOUT)
         G = ttnn.typecast(G, ttnn.float32)
