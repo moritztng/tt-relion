@@ -27,6 +27,7 @@ ap.add_argument("--J", type=int, default=7)
 ap.add_argument("--M", type=int, default=6)
 ap.add_argument("--batches", default="1,4,8")
 ap.add_argument("--chip", default=None)
+ap.add_argument("--reps", type=int, default=2, help="timed passes per batch size; the first pays JIT for new T shapes")
 a = ap.parse_args()
 
 g = np.random.default_rng(0)
@@ -45,7 +46,7 @@ if a.chip is not None:
     sys.path.insert(0, here)
     from _tt import Clock   # perf/rlx/_tt.py on wk/rlx-kernels
     clk = Clock([int(subprocess.check_output([os.path.join(here, "ttvd_nodes.sh"), str(a.chip)], text=True))])
-for b in map(int, a.batches.split(",")):
+for b, rep in [(b, r) for b in map(int, a.batches.split(",")) for r in range(a.reps)]:
     relion._BATCH = b
     got = [None] * len(shws)
 
@@ -62,7 +63,7 @@ for b in map(int, a.batches.split(",")):
         t.join()
     wall = time.time() - t0
     same = all(np.array_equal(x, y) for x, y in zip(got, alone))
-    print(json.dumps(dict(s=a.s, O=a.O, T=a.T, J=a.J, M=a.M, batch=b, ozaki=relion._OZAKI, chip=a.chip,
+    print(json.dumps(dict(s=a.s, O=a.O, T=a.T, J=a.J, M=a.M, batch=b, rep=rep, ozaki=relion._OZAKI, chip=a.chip,
                           bit_identical=same, wall_s=round(wall, 3), per_call_s=round(wall / len(shws), 4),
                           requests=relion._stats["batch_req"] - r0 if b > 1 else len(shws),
                           calls=relion._stats["batch_calls"] - c0 if b > 1 else len(shws))), flush=True)
