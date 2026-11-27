@@ -1,0 +1,4 @@
+{"U": 64, "px": 65536, "bitexact_vs_fp32_emu": 1.0, "max_abs_vs_f64": 4.389879966204546e-07, "max_abs_emu_vs_f64": 4.389879966204546e-07, "s": 0.00041, "Mpx_per_s": 161.8, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "7.39"}
+{"U": 4096, "px": 4194304, "bitexact_vs_fp32_emu": 1.0, "max_abs_vs_f64": 7.411088334130511e-07, "max_abs_emu_vs_f64": 7.411088334130511e-07, "s": 0.01069, "Mpx_per_s": 392.4, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "7.11"}
+{"N": 2000000, "U": 64, "px": 65536, "bitexact_vs_fp32_emu": 1.0, "max_abs_vs_f64": 4.389879966204546e-07, "max_abs_emu_vs_f64": 4.389879966204546e-07, "s": 0.0004, "Mpx_per_s": 164.6, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "9.80"}
+{"N": 100000000, "U": 16384, "px": 16777216, "bitexact_vs_fp32_emu": 1.0, "max_abs_vs_f64": 7.068437386514859e-07, "max_abs_emu_vs_f64": 7.068437386514859e-07, "s": 0.04316, "Mpx_per_s": 388.7, "aiclk_min": 1350, "aiclk_med": 1350, "load1": "6.72"}

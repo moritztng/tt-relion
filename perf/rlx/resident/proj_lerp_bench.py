@@ -1,5 +1,5 @@
 """proj_lerp parity (vs float64 and vs an fp32 IEEE emulation of RELION's lerp order) and rate on one BH chip.
-  TT_VISIBLE_DEVICES=16 python proj_lerp_bench.py [units]
+  TT_VISIBLE_DEVICES=16 python proj_lerp_bench.py [units] [table rows]
 """
 import json
 import sys
@@ -18,7 +18,8 @@ from proj_lerp import proj_lerp  # noqa: E402
 dev, nodes = open_dev()
 rng = np.random.default_rng(0)
 out = []
-for N, U in ((2_000_000, 64), (2_000_000, int(sys.argv[1]) if len(sys.argv) > 1 else 4096)):
+NBIG = int(sys.argv[2]) if len(sys.argv) > 2 else 2_000_000
+for N, U in ((2_000_000, 64), (NBIG, int(sys.argv[1]) if len(sys.argv) > 1 else 4096)):
     tab = rng.standard_normal((N, 16)).astype(np.float32)
     idx = rng.integers(0, N, (U, 1024)).astype(np.int64)
     frc = rng.random((3 * U, 1024)).astype(np.float32)
@@ -39,7 +40,7 @@ for N, U in ((2_000_000, 64), (2_000_000, int(sys.argv[1]) if len(sys.argv) > 1 
             emu = ref
         else:
             f64 = ref
-    rec = dict(U=U, px=U * 1024, bitexact_vs_fp32_emu=float(np.mean(r == emu)),
+    rec = dict(N=N, U=U, px=U * 1024, bitexact_vs_fp32_emu=float(np.mean(r == emu)),
                max_abs_vs_f64=float(np.abs(r - f64).max()), max_abs_emu_vs_f64=float(np.abs(emu - f64).max()))
     ttnn.synchronize_device(dev)
     clk = Clock(nodes); t0 = time.perf_counter()
