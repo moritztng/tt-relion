@@ -6,10 +6,21 @@ bridge starts one of these servers with mpirun's variables removed; it owns the 
 TT_VISIBLE_DEVICES) and computes the cross term. Protocol and numerics: tt_relion/cross.py. Kept left
 operands stay on the chip as device tensors, so a coarse call ships only the shifted image up.
 """
+import json
 import os
 import sys
+import time
 
 import numpy as np
+
+# TT_RELION_PHASES=1: sync the chip after each phase of an Ozaki call and log, at exit, the median per call of
+# issue_s (host time to enqueue the phase) and wait_s (then until the chip is done). Instrument only: the syncs
+# remove the overlap a normal call has, so read the split, not the sum, against an unsynced warm call.
+PHASES = os.environ.get("TT_RELION_PHASES") == "1"
+# TT_RELION_OZ_CUT=batch: cut the digits from R_i = round(x 2^(2i+1)) for all i at once (_digits_batch), ~n + 8 ops
+# per operand instead of 6n. Default "seq" (the per-digit loop) until the chip check passes.
+OZ_CUT = os.environ.get("TT_RELION_OZ_CUT", "seq")
+OZ_CUT_MB = 256   # fp32 bytes of one stacked group of digits; bounds the batch cut's peak device memory
 
 
 class _Ttnn:
@@ -21,6 +32,18 @@ class _Ttnn:
         self.cfg = ttnn.WormholeComputeKernelConfig(math_fidelity=getattr(ttnn.MathFidelity, fidelity),
                                                     math_approx_mode=False, fp32_dest_acc_en=True,
                                                     packer_l1_acc=True)
+
+    def _mark(self, name):
+        if PHASES:
+            t = time.perf_counter()
+            self.ttnn.synchronize_device(self.dev)
+            t2 = time.perf_counter()
+            self._call[name] = (t - self._t, t2 - t)
+            self._t = t2
+
+    def _start(self):
+        if PHASES and not getattr(self, "_open", False):
+            self._call, self._open, self._t = {}, True, time.perf_counter()
 
     def _put(self, a):
         return self.ttnn.from_torch(self.torch.from_numpy(a), dtype=self.ttnn.float32,
@@ -48,10 +71,11 @@ class _Ttnn:
     # ---- exact-integer cross term (cross.py TT_RELION_OZAKI) ----
     _MAGIC = 12582912.0   # 1.5 * 2^23: (x + M) - M rounds to the nearest integer in fp32
 
-    def _digits(self, runs, n):
+    def _digits(self, runs, n, tag):
         """runs fp32 numpy, |x| < 1 -> n bf16 device tensors of balanced base-4 digits (exact fp32 ops on the chip)."""
         ttnn, out = self.ttnn, []
         x = r = self._put(runs)
+        self._mark(tag + "_put")
         for i in range(n):
             t = ttnn.multiply(r, float(2 ** (2 * i + 1)))
             q = ttnn.subtract(ttnn.add(t, self._MAGIC), self._MAGIC)
@@ -62,7 +86,46 @@ class _Ttnn:
                 ttnn.deallocate(r)
             r = r2
         ttnn.deallocate(r), ttnn.deallocate(x)
+        self._mark(tag + "_digits")
         return out
+
+    def _digits_batch(self, runs, n, tag, dim):
+        """As _digits, stacked along dim (bf16, n blocks of the runs' shape). With R_i = round(x 2^(2i+1)) (half
+        to even, R_-1 = 0), the loop's digit i is R_i - 4 R_{i-1}: shifting by the even integer 4 R_{i-1}
+        commutes with half-to-even rounding. Every R_i and 4 R_{i-1} is an fp32 integer (|x 2^27| < 2^27 is
+        exact; above 2^23 it is already whole) and their difference is |q| <= 2, so each step is exact."""
+        ttnn = self.ttnn
+        x = self._put(runs)
+        self._mark(tag + "_put")
+        g = max(1, min(n, (OZ_CUT_MB << 20) // max(1, runs.size * 4)))
+        out = []
+        for a in range(0, n, g):
+            b = min(n, a + g)
+            ys = [ttnn.multiply(x, 0.0 if i < 0 else float(2 ** (2 * i + 1))) for i in range(a - 1, b)]
+            y = ttnn.concat(ys, dim)
+            self.free(ys)
+            r = ttnn.round(y, decimals=0)
+            ttnn.deallocate(y)
+            sh = list(r.shape)
+            blk = sh[dim] // (b - a + 1)
+            end = list(sh)
+            end[dim] = blk * (b - a)
+            lo = ttnn.slice(r, [0] * len(sh), end)
+            start = [0] * len(sh)
+            start[dim] = blk
+            hi = ttnn.slice(r, start, sh)
+            lo4 = ttnn.multiply(lo, 4.0)
+            q = ttnn.subtract(hi, lo4)
+            for z in (r, lo, hi, lo4):
+                ttnn.deallocate(z)
+            out.append(ttnn.typecast(q, ttnn.bfloat16))
+            ttnn.deallocate(q)
+        ttnn.deallocate(x)
+        c = out[0] if len(out) == 1 else ttnn.concat(out, dim)
+        if len(out) > 1:
+            self.free(out)
+        self._mark(tag + "_digits")
+        return c
 
     def oz_upload(self, runs, n):
         """runs [nc, O, 480] -> (A, O, Op): the n lhs digits stacked by rows, A [nc, n * Op, 480] bf16, row block i
@@ -71,9 +134,14 @@ class _Ttnn:
         op = -(-o // 32) * 32
         if op > o:
             runs = np.pad(runs, ((0, 0), (0, op - o), (0, 0)))
-        d = self._digits(runs, n)
-        a = self.ttnn.concat(d, 1)
-        self.free(d)
+        self._start()
+        if OZ_CUT == "batch":
+            a = self._digits_batch(runs, n, "lhs", 1)
+        else:
+            d = self._digits(runs, n, "lhs")
+            a = self.ttnn.concat(d, 1)
+            self.free(d)
+            self._mark("lhs_stack")
         return a, o, op
 
     def _tree_sum(self, c):
@@ -102,7 +170,14 @@ class _Ttnn:
             self.lofi = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi, math_approx_mode=False,
                                                          fp32_dest_acc_en=True, packer_l1_acc=True)
         A, o, op = a
-        b = self._digits(rhs, n)
+        self._start()
+        if OZ_CUT == "batch":
+            bs, sh = self._digits_batch(rhs, n, "rhs", 0), rhs.shape
+            b = [ttnn.slice(bs, [j * sh[0], 0, 0], [(j + 1) * sh[0], sh[1], sh[2]]) for j in range(n)]
+            ttnn.deallocate(bs)
+            self._mark("rhs_slices")
+        else:
+            b = self._digits(rhs, n, "rhs")
         nc, t = rhs.shape[0], rhs.shape[2]
         z = acc = None
         for j in range(n - 1, -1, -1):
@@ -120,9 +195,15 @@ class _Ttnn:
         if z is not None:
             ttnn.deallocate(z)
         self.free(b)
+        self._mark("mm_chain")
         acc = self._tree_sum(acc)
+        self._mark("tree")
         out = ttnn.to_torch(acc).double().numpy().reshape(n, op, t)[:, :o]
         ttnn.deallocate(acc)
+        self._mark("download")
+        if PHASES:
+            self._open = False
+            self.calls_ph = getattr(self, "calls_ph", []) + [(o, t, self._call)]
         return list(out)
 
     # ---- projection on the chip (cross.py "proj" requests) ----
@@ -240,6 +321,13 @@ class _Ttnn:
         return (a, a.shape[0], kc), ref2
 
     def close(self):
+        if PHASES and getattr(self, "calls_ph", None):
+            by = {}
+            for o, t, c in self.calls_ph[1:] or self.calls_ph:   # the first call compiles
+                by.setdefault("O%d_T%d_%s" % (o, t, "fine" if "lhs_put" in c else "kept"), []).append(c)
+            rep = {k: {p: [round(float(np.median([c[p][j] for c in cs if p in c])), 5) for j in (0, 1)]
+                       for p in cs[-1]} | {"n": len(cs)} for k, cs in by.items()}
+            print("TTPHASES " + json.dumps(rep, separators=(",", ":")), file=sys.stderr, flush=True)
         self.ttnn.close_device(self.dev)
 
 
