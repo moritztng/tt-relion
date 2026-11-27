@@ -14,6 +14,11 @@ reference projections by iteration, so a batch ships only its particles.
 "client" carries the bridge's cumulative counters (round trips, copies, bytes); the server only echoes the
 last one in its exit line, so the WALLMAP gets the client side without RELION having to flush anything.
 The shared-memory segment holds lhs [nc, m, kc], rhs [nc, kc, n] and out [nc, m, n], float32, back to back.
+
+A request with "op": "d2" is the resident diff2 (tt_relion/resident.py): the chip projects the reference and
+returns d2 [N, O, T] for N particles. Its segment holds, float32 and back to back: the model [nvox, 2] (only when
+"model_sent"), eul [O, 9], x [P], y [P], xr [N, P], xi [N, P], w [N, P], tx [N, T], ty [N, T], then out.
+"model" = [key, X, Y, Z, initY, initZ, maxR2, pf, nvox]; "ref_key" marks an orientation set to keep on the chip.
 EOF on stdin closes the device and exits.
 """
 import json
@@ -37,6 +42,7 @@ def main():
                                           packer_l1_acc=True)
     shm = None
     held_key, held = None, None
+    res = None                          # the resident diff2 state of this chip, made on first use
     t_open, calls, client = time.time(), 0, {}
     up = mm = down = 0.0
     for line in sys.stdin:
@@ -47,6 +53,27 @@ def main():
                 shm.close()
             shm = shared_memory.SharedMemory(name=req["shm"])
             resource_tracker.unregister(shm._name, "shared_memory")   # the bridge owns it
+        if req.get("op") == "d2":
+            if res is None:
+                from tt_relion.resident import Resident
+                res = Resident(dev)
+            N, T, O, P = req["dims"]
+            key, X, Y, Z, initY, initZ, maxR2, pf, nvox = req["model"]
+            sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, N * T, N * T, N * O * T]
+            buf = np.ndarray((sum(sizes),), np.float32, shm.buf)
+            mdl, eul, x, y, xr, xi, w, tx, ty, out = np.split(buf, np.cumsum(sizes)[:-1])
+            if req.get("model_sent"):
+                res.set_model(key, mdl.reshape(nvox, 2), X, Y, Z, initY, initZ, maxR2, pf)
+            res.set_pixels((P, x.tobytes()), x, y)
+            t1 = time.time()
+            out[:] = res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx.reshape(N, T),
+                            ty.reshape(N, T), x, y, req.get("ref_key")).reshape(-1)
+            del mdl, eul, x, y, xr, xi, w, tx, ty, out, buf
+            up, mm = up + t1 - t0, mm + time.time() - t1
+            client = req.get("client", client)
+            calls += 1
+            reply.write("ok\n")
+            continue
         nc, m, kc, n = req["shape"]
         buf = np.ndarray((nc * m * kc + nc * kc * n + nc * m * n,), np.float32, shm.buf)
         lhs = buf[:nc * m * kc].reshape(nc, m, kc)

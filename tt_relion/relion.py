@@ -168,6 +168,7 @@ class _Server:
         self.lock = threading.Lock()
         self.shm = None
         self.lhs_key = None                 # key of the lhs this server's chip holds
+        self.model_key = None               # key of the model volume it holds (resident diff2)
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
 
     def matmul(self, lhs, rhs, lhs_key=None, sum0=False):
@@ -215,8 +216,50 @@ class _Server:
         return out
 
 
-def _matmul(lhs, rhs, lhs_key=None, sum0=False):
-    """On whichever of this rank's chips is idle. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
+    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, ref_key):
+        """Resident diff2 on this chip (device_server "d2"): float32 [N, O, T]. model = [key, X, Y, Z, initY,
+        initZ, maxR2, pf, nvox]; the volume is shipped only when this chip does not hold that key."""
+        from multiprocessing import shared_memory
+        N, T = tx.shape
+        O, P = eul.shape[0], x.shape[0]
+        with self.lock:
+            send = model[0] != self.model_key
+            parts = ([np.frombuffer(mdl_mv, dtype=np.float32)] if send else []) + [eul, x, y, xr, xi, w, tx, ty]
+            need = 4 * (sum(a.size for a in parts) + N * O * T)
+            if self.shm is None or self.shm.size < need:
+                if self.shm is not None:
+                    self.shm.close()
+                    self.shm.unlink()
+                self.shm = shared_memory.SharedMemory(create=True, size=need)
+            t0 = time.time()
+            buf = np.ndarray((need // 4,), np.float32, self.shm.buf)
+            o = 0
+            for a in parts:
+                buf[o:o + a.size] = a.reshape(-1)
+                o += a.size
+            t1 = time.time()
+            req = {"op": "d2", "shm": self.shm.name, "dims": [N, T, O, P], "model": model, "model_sent": send,
+                   "client": self.c}
+            if ref_key is not None:
+                req["ref_key"] = ref_key
+            self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
+            self.p.stdin.flush()
+            if self.p.stdout.readline().strip() != "ok":
+                raise RuntimeError("device server died, rc=%s" % self.p.poll())
+            t2 = time.time()
+            self.model_key = model[0]
+            out = buf[o:o + N * O * T].reshape(N, O, T).copy()
+            del buf
+            c = self.c
+            c["calls"] += 1
+            c["bytes"] += need
+            c["rt_s"] = round(c["rt_s"] + t2 - t1, 4)
+            c["copy_s"] = round(c["copy_s"] + t1 - t0 + time.time() - t2, 4)
+        return out
+
+
+def _server():
+    """One of this rank's chips, taken until _free.put. RLX_RANK_CHIPS="a,b,..." gives a rank several chips
     (one server each), so fewer ranks, and so less host memory, can still drive every chip."""
     global _free
     if _free is None:
@@ -229,8 +272,14 @@ def _matmul(lhs, rhs, lhs_key=None, sum0=False):
                     q.put(s)
                 _free = q
     s = _free.get()
+    _tl.srv = s
+    return s
+
+
+def _matmul(lhs, rhs, lhs_key=None, sum0=False):
+    """On whichever of this rank's chips is idle."""
+    s = _server()
     try:
-        _tl.srv = s
         return s.matmul(lhs, rhs, lhs_key, sum0)
     finally:
         _free.put(s)
@@ -523,6 +572,19 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     x = (pix % imgX).to(t.float32)
     yi = pix // imgX
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
+    if _RESIDENT and _BACKEND == "ttnn":
+        import hashlib
+        model = [hashlib.sha256(repr(_model_key(mdl)).encode()).hexdigest(), mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
+                 maxR2_padded, padding_factor, mdlX * mdlY * mdlZ]
+        e = eul.numpy()
+        s = _server()
+        try:
+            return s.d2(mdl, model, e, x.numpy(), y.numpy(), np.asarray(img_r, np.float32),
+                        np.asarray(img_i, np.float32), np.asarray(corr, np.float32) * 0.5,
+                        np.asarray(tx, np.float32), np.asarray(ty, np.float32),
+                        model[0] + hashlib.sha256(e.tobytes()).hexdigest())
+        finally:
+            _free.put(s)
     ref_r, ref_i, ref_a2, ref_key = _shared_refs(t, mdl, eul, x, y,
                                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
     w = t.from_numpy(np.asarray(corr, np.float32)) * 0.5                      # [N, P]
@@ -549,6 +611,9 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
 # grouped, up to n at a time, into one diff2_coarse_batch. A thread that finds no partner within
 # TT_RELION_BATCH_WAIT_MS runs the batch it has, so a lone particle (the last of a rank's range)
 # never stalls.
+# TT_RELION_RESIDENT=1: a coarse batch on ttnn goes to the chip as raw operands (tt_relion/resident.py) instead of
+# host-built split products. Off until its chip parity is recorded.
+_RESIDENT = os.environ.get("TT_RELION_RESIDENT", "") not in ("", "0")
 _BATCH = int(os.environ.get("TT_RELION_BATCH", "0"))
 _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
 _groups = {}
