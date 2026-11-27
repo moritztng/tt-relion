@@ -53,7 +53,7 @@ for m in re.finditer(r"^TTDEV chip=(\S+) calls=(\d+) busy_s=([0-9.]+) up_s=([0-9
 clk = []
 for line in (d / "aiclk.tsv").read_text().splitlines():
     f = line.split("\t")
-    if len(f) > 1:
+    if len(f) > 1 and f[0] != "t":   # "t" opens the header line naming each column's node
         clk.append([int(x) for x in f[1:]])
 busy_clk = [x for row in clk for x in row if x > 600]   # chips that were computing (idle WH sits at 500)
 

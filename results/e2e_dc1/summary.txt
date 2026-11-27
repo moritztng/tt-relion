@@ -1,0 +1,54 @@
+start 23:07:26
+restart (no firstiter_cc) 23:07:36
+N rc=0 23:08:45 load1 24.85 1:08.34
+T rc=0 23:09:58 load1 30.54 1:13.29
+== N
+TTBridge: diff2Coarse handled=0 declined=1632
+TTBridge: diff2Fine   handled=0 declined=1632
+TTBridge: diff2Coarse handled=0 declined=1680
+TTBridge: diff2Fine   handled=0 declined=1680
+TTBridge: diff2Coarse handled=0 declined=1632
+TTBridge: diff2Fine   handled=0 declined=1632
+TTBridge: diff2Coarse handled=0 declined=1632
+TTBridge: diff2Fine   handled=0 declined=1632
+TTBridge: diff2Coarse handled=0 declined=1680
+TTBridge: diff2Fine   handled=0 declined=1680
+TTBridge: diff2Coarse handled=0 declined=1643
+TTBridge: diff2Fine   handled=0 declined=1643
+TTBridge: diff2Coarse handled=0 declined=1625
+TTBridge: diff2Fine   handled=0 declined=1625
+TTBridge: diff2Coarse handled=0 declined=1632
+TTBridge: diff2Fine   handled=0 declined=1632
+== T
+TTBridge: diff2Coarse handled=1680 declined=0
+TTBridge: diff2Fine   handled=1680 declined=0
+TTBridge: diff2Coarse handled=1704 declined=0
+TTBridge: diff2Fine   handled=1704 declined=0
+TTBridge: diff2Coarse handled=1584 declined=0
+TTBridge: diff2Fine   handled=1584 declined=0
+TTBridge: diff2Coarse handled=1752 declined=0
+TTBridge: diff2Fine   handled=1752 declined=0
+TTBridge: diff2Coarse handled=1608 declined=0
+TTBridge: diff2Fine   handled=1608 declined=0
+TTBridge: diff2Coarse handled=1619 declined=0
+TTBridge: diff2Fine   handled=1619 declined=0
+TTBridge: diff2Coarse handled=1632 declined=0
+TTBridge: diff2Fine   handled=1632 declined=0
+TTBridge: diff2Coarse handled=1577 declined=0
+TTBridge: diff2Fine   handled=1577 declined=0
+TTDEV chip=23 calls=1816 busy_s=14.131 up_s=7.212 mm_s=2.380 down_s=4.540 life_s=40.697 client={"calls":1815,"bytes":35920038528,"rt_s":16.5567,"copy_s":1.4354,"C_s":39.1548,"F_s":61.8873}
+TTDEV chip=16 calls=1941 busy_s=14.814 up_s=7.847 mm_s=2.434 down_s=4.533 life_s=40.771 client={"calls":1940,"bytes":38530567936,"rt_s":17.2279,"copy_s":1.4505,"C_s":41.9878,"F_s":62.8122}
+TTDEV chip=18 calls=1952 busy_s=14.641 up_s=7.274 mm_s=2.489 down_s=4.878 life_s=40.776 client={"calls":1951,"bytes":38328912512,"rt_s":17.0787,"copy_s":1.5918,"C_s":41.0477,"F_s":64.8127}
+TTDEV chip=21 calls=1990 busy_s=12.887 up_s=5.262 mm_s=3.040 down_s=4.585 life_s=40.818 client={"calls":1989,"bytes":38704289280,"rt_s":15.3983,"copy_s":1.3949,"C_s":36.7786,"F_s":63.3221}
+TTDEV chip=17 calls=1845 busy_s=14.655 up_s=7.051 mm_s=2.983 down_s=4.621 life_s=40.833 client={"calls":1844,"bytes":36366961920,"rt_s":17.0314,"copy_s":1.4144,"C_s":38.5841,"F_s":63.5697}
+TTDEV chip=22 calls=1871 busy_s=14.944 up_s=7.234 mm_s=3.041 down_s=4.669 life_s=40.826 client={"calls":1870,"bytes":36781037312,"rt_s":17.3304,"copy_s":1.527,"C_s":41.8413,"F_s":64.0075}
+TTDEV chip=20 calls=1858 busy_s=15.052 up_s=7.272 mm_s=3.044 down_s=4.737 life_s=40.796 client={"calls":1857,"bytes":36626196608,"rt_s":17.3285,"copy_s":1.4253,"C_s":41.2832,"F_s":65.2317}
+TTDEV chip=19 calls=1827 busy_s=13.984 up_s=7.076 mm_s=2.365 down_s=4.543 life_s=40.792 client={"calls":1826,"bytes":36153343744,"rt_s":16.3496,"copy_s":1.4698,"C_s":41.1871,"F_s":60.3457}
+tt_relion: coarse batches=200 particles=1328 mean=6.64
+tt_relion: coarse batches=200 particles=1464 mean=7.32
+  28/  34 sec .................................................~~(,_,">       [oo]tt_relion: coarse batches=200 particles=1320 mean=6.60
+tt_relion: coarse batches=200 particles=1376 mean=6.88
+  29/  34 sec ..................................................~~(,_,">      [oo]  29/  33 sec ...................................................~~(,_,">     [oo]tt_relion: coarse batches=200 particles=1360 mean=6.80
+  30/  34 sec ....................................................~~(,_,">    [oo]tt_relion: coarse batches=200 particles=1367 mean=6.83
+  31/  34 sec .....................................................~~(,_,">   [oo]  31/  33 sec ......................................................~~(,_,">  [oo]  32/  34 sec .......................................................~~(,_,"> [oo]  32/  33 sec .........................................................~~(,_,">oo]  33/  34 sec ..........................................................~~(,_,">o]tt_relion: coarse batches=250 particles=1616 mean=6.46
+  34/  34 sec ...........................................................~~(,_,">]tt_relion: coarse batches=256 particles=1652 mean=6.45
