@@ -11,13 +11,14 @@ mkdir -p "$D" && cd "$D" || exit 1; t0=$(date +%s)
 [ -s emd_2660.map ] || for t in 1 2 3 4 5 6; do curl -sf --retry 5 -o map.gz \
   https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-2660/map/emd_2660.map.gz && gunzip -t map.gz &&
   gunzip -c map.gz > map.part && mv map.part emd_2660.map && rm map.gz && break; sleep 30; done &
-for t in 1 2 3 4 5 6 7 8; do
+for t in 1 2 3 4 5 6 7 8 9; do   # pass 9 only checks: the last download must be judged too
   m=$(while read -r p; do { [ -s "$p" ] && [ ! -e "$p.aria2" ]; } || echo "$p"; done < "$LIST")
   if [ -z "$m" ]; then   # all present: a stack holding EBI's error body is re-fetched whole
     c=$(python3 "$CHK" Particles); echo "$c" | tail -1
     echo "$c" | grep -q '^stacks checked' || { echo "STAGE FAILED: check_stacks.py did not run"; exit 1; }
     m=$(echo "$c" | awk '/^BAD /{print $2}'); [ -z "$m" ] && break
     echo "$m" | xargs rm -f; fi
+  [ $t = 9 ] && break
   echo "stage pass $t: $(echo "$m" | wc -l) stacks missing or bad"
   echo "$m" | awk -v u=$U '{print u"/"$1"\n  out="$1}' > aria.txt
   aria2c -q -c -j 48 -x 8 --max-tries=20 --retry-wait=5 -i aria.txt --auto-file-renaming=false
