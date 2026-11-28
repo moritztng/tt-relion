@@ -8,12 +8,12 @@ re-read an fp32 [R, O] partial per run and pair: DRAM-bound at 8.4 TFLOP/s, resu
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import ttnn
 from tt_bio import core_split
+from .kdir import kernel_dir
 
-KDIR = Path(__file__).resolve().parent / "kernels" / "oz_fused"
+KDIR = kernel_dir("oz_fused")
 RB, NB, KR = 16, 8, 15
 # TT_RELION_OZ_ZIG=1: balanced unit order. A unit is (digit k, row block, column block) and costs k + 1 digit pairs;
 # cores take consecutive units, so in the plain k-major order the cores holding the last digits do about twice the
@@ -75,7 +75,7 @@ def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, adm=False, bdm=False):
     return S
 
 
-CDIR = Path(__file__).resolve().parent / "kernels" / "oz_combine"
+CDIR = kernel_dir("oz_combine")
 
 
 def oz_combine(S, ea, eb, n, q=1):
@@ -130,7 +130,7 @@ def oz_combine(S, ea, eb, n, q=1):
     return hi, lo
 
 
-XDIR = Path(__file__).resolve().parent / "kernels" / "oz_cut"
+XDIR = kernel_dir("oz_cut")
 
 
 def oz_cut(X, ea, n, grp=2):
@@ -180,7 +180,7 @@ def oz_cut(X, ea, n, grp=2):
     return D
 
 
-KCDIR = Path(__file__).resolve().parent / "kernels" / "cand"
+KCDIR = kernel_dir("cand")
 
 
 def cand_compact(D, thr, rows, cols, cap=4096, max_cap=1 << 17):

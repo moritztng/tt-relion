@@ -7,12 +7,12 @@ fp32 on the SFPU in RELION's order (x, y, z), so the result is fp32-exact agains
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import ttnn
 from tt_bio import core_split
+from .kdir import kernel_dir
 
-KERNEL_DIR = Path(__file__).resolve().parent / "kernels" / "proj_lerp"
+KERNEL_DIR = kernel_dir("proj_lerp")
 CB_V, CB_F, CB_IDX, CB_STAGE, CB_X, CB_Y, CB_OUT = 0, 1, 2, 3, 4, 5, 16
 _PAGE = 4096
 
@@ -63,7 +63,7 @@ def proj_lerp(table, idx, frc):
     return out
 
 
-ROT_DIR = Path(__file__).resolve().parent / "kernels" / "proj_rot"
+ROT_DIR = kernel_dir("proj_rot")
 CB_C, CB_XY, CB_I, CB_ROT, CB_P, CB_Q, CB_FLAG = 6, 7, 8, 9, 10, 11, 12
 
 

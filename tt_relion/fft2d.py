@@ -18,12 +18,12 @@ Because F is dense and O(N^2), it only fits in L1 at box 256 in bf16 today.
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import numpy as np
 import torch
+from .kdir import kernel_dir
 
-KERNELS = Path(__file__).resolve().parent / "kernels" / "fft2d"
+KERNELS = kernel_dir("fft2d")
 CB_F, CB_X, CB_T, CB_O = 0, 1, 2, 16
 TILE = 32
 SUPPORTED = {(256, "bf16")}   # what fits in L1 today; other shapes are rejected, not slowed down
