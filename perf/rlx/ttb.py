@@ -6,6 +6,10 @@ chips over the logged span, and the same per E-step: the span also holds the M-s
 of the next iteration ran before the job was stopped, so a window of more than 2 s with no chip in a batch ends an
 E-step here. idle_ms_per_batch is the chips' idle time in the middle of the E-step (5 % to 90 % of it) over its
 batches there; tail_idle_s is the idle chip time of its last tenth, where the ranks run out of particles.
+slow_batches counts the batches of 2 s or more that also took over three times the median of their pass (a program
+built for a new shape: the first run of a newly placed source tree pays 60 to 130 chip seconds of them, its second
+run about 5), and slow_excess_s is their time over that median. Compare the E-step walls of two arms only when both
+are small, or take slow_excess_s / chips off each wall first.
 usage: ttb.py refine.log <chips> [T]     T: a log from before the flat rows, whose sixth field is translations per particle"""
 import sys
 from collections import defaultdict
@@ -51,5 +55,11 @@ for n, (a, b) in enumerate(zip(cuts[0::2], cuts[1::2]), 1):
             tail += (t - last) * (chips - act)
         act, last = act + d, t
     nmid = sum(1 for r in seg if 0.05 <= (r[0] - a) / wall < 0.9)
+    med = {}
+    for k in (True, False):
+        w = sorted(r[1] for r in seg if (r[4] > 64 * r[2]) == k)
+        med[k] = w[len(w) // 2] if w else 0.0
+    slow = [r[1] - med[r[4] > 64 * r[2]] for r in seg if r[1] >= 2.0 and r[1] > 3 * med[r[4] > 64 * r[2]]]
     print(f"estep {n}: wall_s {wall:.1f} batches {len(seg)} busy_s {sbusy:.1f} busy_share {sbusy / (wall * chips):.3f} "
-          f"idle_ms_per_batch {1e3 * mid / max(nmid, 1):.0f} tail_idle_s {tail:.1f}")
+          f"idle_ms_per_batch {1e3 * mid / max(nmid, 1):.0f} tail_idle_s {tail:.1f} "
+          f"slow_batches {len(slow)} slow_excess_s {sum(slow):.1f}")

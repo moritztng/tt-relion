@@ -188,10 +188,13 @@ whose result is in, or that brings a new particle, waits at most that long while
 chip (default 250, 0 turns it off).
 
 Measured through RELION on one global iteration (two chips, `--j 192`, a host at load 70 to 130): the chip waits
-for the leader 141 ms a batch before either change, 86 ms with the set reuse alone and 30 ms with the gate, and the
-chips are busy 81 %, 86 % and 91 % of the E-step, with the same orientations in every row. Between these runs the
-E-step's wall moved with the host's load (the chip-busy time of a batch varied by 15 %), so the gain is read from the
-wait: 110 ms a batch on two chips is a tenth of that E-step.
+for the leader 141 ms a batch before either change, 86 ms with the set reuse alone and 30 ms with the gate, with the
+same orientations in every row. In the gate's second run from its source tree the chips are busy 94 % of the E-step
+(142.7 s, 447 batches, 5 s of slow batches). The gain is read from the wait, not from the walls of these runs: the
+first run from a newly placed source tree builds its programs again and paid 53 to 83 chip seconds of slow batches
+in that E-step, a second run 5 (`perf/rlx/ttb.py` prints them as `slow_batches` and `slow_excess_s`), and those
+seconds count as busy. With them taken off, the E-step read about 188 s before either change, 157 s with the set
+reuse and 140 to 164 s with the gate; the spread of the last is the host's load.
 
 ### Handing a batch to a chip that is still busy
 
@@ -200,10 +203,16 @@ and copies it into the server's shared memory. `TT_RELION_STAGE=1` takes that ou
 batch. Its leader does not wait for an idle chip; it takes a chip that runs one batch and has none queued, copies
 the batch into a second shared segment of that chip and writes the request into the server's pipe. The server reads
 it the moment it has answered the batch before, and the replies are read in the order the requests were written. A
-batch that is not full waits for an idle chip as before, so batches do not get smaller. With staging on, `rt_s` on
-the client's line includes a request's wait behind the batch before it; the chip's idle time is read from the
-server's batch lines (`perf/rlx/ttb.py`, `idle_ms_per_batch`). Off by default: tested against a stand-in server
-(`tests/test_stage.py`), not measured through RELION yet.
+batch that is not full waits for an idle chip as before. With staging on, `rt_s` on the client's line includes a
+request's wait behind the batch before it; the chip's idle time is read from the server's batch lines
+(`perf/rlx/ttb.py`, `idle_ms_per_batch`).
+
+Measured through RELION once (the same iteration, two chips, `--j 192`, the first run from its tree): the chip's
+wait fell from 30 ms to 9 ms a batch and the chips were busy 97 % of the E-step, with the same orientations in
+every row. No gain in the E-step is shown: it ran 482 batches where the gate alone ran 447 (54 particles a batch
+against 57.5), its chip seconds without the slow batches were 277 against 263, and its wall without them about 144 s
+against 140 s. The 21 ms a batch it saves is 5 s of that E-step on two chips, less than the difference between two
+runs of one tree. It stays off by default until a pair of second runs, back to back, shows which way it goes.
 
 ### Leaving small orientation sets to RELION
 
