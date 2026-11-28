@@ -33,8 +33,9 @@ def _exp(m):
 class Resident:
     def __init__(self, dev, digits=13):
         self.dev, self.n = dev, digits
-        self.tab = self.pix = None
-        self.model_key = self.pix_key = self.ref_key = None
+        self.tab = None
+        self.pixsets = {}       # key -> (pixel coordinates on the chip, P, NC)
+        self.model_key = self.ref_key = None
         self.refs = []          # per orientation chunk: dict(O, B, B2) before the first batch, digits after
         self.bal = None         # (e, e2): the K-diagonal balance exponents of the held reference set
 
@@ -53,6 +54,9 @@ class Resident:
             return
         assert maxR2 < FAR * FAR
         self._drop_refs()
+        for pix, _, _ in self.pixsets.values():
+            ttnn.deallocate(pix)
+        self.pixsets = {}
         if self.tab is not None:
             ttnn.deallocate(self.tab)
         nvox = mdl.shape[0]
@@ -69,20 +73,18 @@ class Resident:
         self.pf, self.model_key = pf, key
 
     def set_pixels(self, key, x, y):
-        """x, y float32 [P]: the image's Fourier pixel coordinates, in RELION's pixel order."""
-        if key == self.pix_key:
-            return
-        self._drop_refs()
-        if self.pix is not None:
-            ttnn.deallocate(self.pix)
-        self.P = P = len(x)
-        self.NC = NC = -(-P // 1024)
-        self.K = NC * 2048
+        """x, y float32 [P]: the image's Fourier pixel coordinates, in RELION's pixel order. Coarse and fine calls
+        alternate between two image sizes, so every set of the current model stays on the chip."""
+        if key not in self.pixsets:
+            P = len(x)
+            NC = -(-P // 1024)
+            pxy = np.full((2, NC * 1024), FAR, np.float32)
+            pxy[0, :P], pxy[1, :P] = x, y
+            pix = self._put(pxy.reshape(2, NC, 1024).transpose(1, 0, 2).reshape(2 * NC, 1024), ttnn.ROW_MAJOR_LAYOUT)
+            self.pixsets[key] = (pix, P, NC)
+        self.pix, self.P, self.NC = self.pixsets[key]
+        self.K = self.NC * 2048
         self.Kp = -(-self.K // KC) * KC
-        pxy = np.full((2, NC * 1024), FAR, np.float32)
-        pxy[0, :P], pxy[1, :P] = x, y
-        self.pix = self._put(pxy.reshape(2, NC, 1024).transpose(1, 0, 2).reshape(2 * NC, 1024), ttnn.ROW_MAJOR_LAYOUT)
-        self.pix_key = key
 
     def _drop_refs(self):
         for r in self.refs:
@@ -172,7 +174,8 @@ class Resident:
         """float32 [N, O, T]. eul [O, 9]; xr, xi, w [N, P]; tx, ty [N, T] (phase = x tx + y ty, RELION's units).
 
         ref_key names an orientation set shared by many batches (a global pass): its projections and digits stay on
-        the chip until the key, the model or the pixel set changes. Without it the set is used once.
+        the chip until another key or model arrives, so the key must also identify the pixel set. Without it the set
+        is used once.
         """
         N, T = tx.shape
         R = N * T

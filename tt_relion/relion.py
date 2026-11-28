@@ -354,7 +354,7 @@ def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, geom, shared):
     s = _server()
     try:
         return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty),
-                    model[0] + hashlib.sha256(eul.tobytes()).hexdigest() if shared else None)
+                    "%s.%s.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size) if shared else None)
     finally:
         _free.put(s)
 
