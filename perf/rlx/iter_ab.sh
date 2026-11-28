@@ -3,12 +3,14 @@
 # run's it015 state. Arm N: RELION CPU kernels (nullbase). Arm T: ttnn hook + TT_RELION_BATCH=8. Chips 16-23, 9 ranks x --j 8.
 # Env: SRC (source tree under ~/rlx-e2e, default src-b), TAG (run name, default dc2), ARMS, TT_RELION_RESIDENT=1 for arm T,
 # RANKS (default 9), RLX_CHIP_LIST (explicit chips), J (threads per rank, default 8) and BATCH (TT_RELION_BATCH of arm T, default 8).
+# FROM (optimiser.star to continue, default the CPU reference run's it015) and IT (the iteration to run, default 16),
+# RLX_CHIPS_PER_RANK (default 1).
 # END_BY (epoch): the arm is stopped then, for a booked window that opens after it (default 45 min from its start).
 R=$HOME/rlx-e2e; SRC=${SRC:-src-b}; TAG=${TAG:-dc2}
-FROM=$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star
+FROM=${FROM:-$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star}; IT=${IT:-16}; it=$(printf %03d $IT)
 export RELION_BIN=$R/relion/build/bin/relion_refine_mpi
 export PYTHONPATH=$R/$SRC:$HOME/fleet/env/lib/python3.10/site-packages TT_RELION_PYTHON=$HOME/fleet/env/bin/python
-export TT_METAL_INSPECTOR=0 RLX_CHIP_BASE=16 RLX_CHIPS=8 RLX_CHIPS_PER_RANK=1
+export TT_METAL_INSPECTOR=0 RLX_CHIP_BASE=16 RLX_CHIPS=8 RLX_CHIPS_PER_RANK=${RLX_CHIPS_PER_RANK:-1}
 export RLX_LEASE_DIR=/tmp/tt-bio-device-leases RLX_LEASE_HOST=$(hostname)
 S=$R/runs/$TAG.status
 # start gate: not before NOT_BEFORE (epoch), and no process holding more than 8 chips (a whole-box mesh), 3 checks running
@@ -24,10 +26,10 @@ for arm in ${ARMS:-T N}; do
   if [ $arm = N ]; then export TT_RELION_BACKEND=nullbase; unset TT_RELION_BATCH TT_RELION_RESIDENT
   else export TT_RELION_BACKEND=ttnn TT_RELION_BATCH=${BATCH:-8} TT_RELION_BATCH_WAIT_MS=50; fi
   o=$R/runs/${TAG}_$arm; rm -rf $o; mkdir -p $o
-  setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 2700} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o ${RANKS:-9} ${J:-8} --continue $FROM --iter 16 --dont_combine_weights_via_disc --preread_images --pool 3 --o $o/run &
+  setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 2700} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o ${RANKS:-9} ${J:-8} --continue $FROM --iter $IT --dont_combine_weights_via_disc --preread_images --pool 3 --o $o/run &
   p=$!
-  ( while kill -0 $p 2>/dev/null; do sleep 15; [ -e $o/run_it016_data.star ] && { sleep 90; kill -INT -- -$p 2>/dev/null; break; }; done ) &
+  ( while kill -0 $p 2>/dev/null; do sleep 15; [ -e $o/run_it${it}_data.star ] && { sleep 90; kill -INT -- -$p 2>/dev/null; break; }; done ) &
   wait $p; rc=$?; grep -q "TTBridge: .* raised" $o/refine.log && rc=FALLBACK
-  echo "$arm rc=$rc $(date -u +%FT%TZ) load1 $(cut -d" " -f1 /proc/loadavg) wall $(grep Elapsed $o/time.txt | awk "{print \$NF}") it016=$([ -e $o/run_it016_data.star ] && echo yes || echo no)" >> $S
+  echo "$arm rc=$rc $(date -u +%FT%TZ) load1 $(cut -d" " -f1 /proc/loadavg) wall $(grep Elapsed $o/time.txt | awk "{print \$NF}") it$it=$([ -e $o/run_it${it}_data.star ] && echo yes || echo no)" >> $S
 done
 echo "done $(date -u +%FT%TZ)" >> $S
