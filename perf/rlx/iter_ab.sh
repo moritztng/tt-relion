@@ -8,7 +8,7 @@
 # END_BY (epoch): the arm is stopped then, for a booked window that opens after it (default 45 min from its start).
 R=$HOME/rlx-e2e; SRC=${SRC:-src-b}; TAG=${TAG:-dc2}
 FROM=${FROM:-$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star}; IT=${IT:-16}; it=$(printf %03d $IT)
-export RELION_BIN=$R/relion/build/bin/relion_refine_mpi
+export RELION_BIN=${RELION_BIN:-$R/relion/build/bin/relion_refine_mpi}
 export PYTHONPATH=$R/$SRC:$HOME/fleet/env/lib/python3.10/site-packages TT_RELION_PYTHON=$HOME/fleet/env/bin/python
 export TT_METAL_INSPECTOR=0 RLX_CHIP_BASE=16 RLX_CHIPS=8 RLX_CHIPS_PER_RANK=${RLX_CHIPS_PER_RANK:-1}
 export RLX_LEASE_DIR=/tmp/tt-bio-device-leases RLX_LEASE_HOST=$(hostname)
