@@ -34,8 +34,16 @@ RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a n
 TBLK = 1 << 14  # voxels per block of the table build (1 MB of table)
 TURNS = int(os.environ.get("TT_RELION_TABLE_TURNS", "4"))   # chips of a host that upload a large table at once
 SUB = os.environ.get("TT_RELION_SUBPHASE", "") not in ("", "0")   # split prod_s (a device sync per step: a profile, not a rate)
+OPT = int(os.environ.get("TT_RELION_OP_THREADS", "4"))     # host threads that build a batch's image operand
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 FARP = 1e30     # -log prior / 2 of an excluded orientation and of a pad column: never inside a window
+
+
+def _pool(p=[]):
+    if not p:
+        from concurrent.futures import ThreadPoolExecutor
+        p.append(ThreadPoolExecutor(OPT))
+    return p[0]
 
 
 def _amax(a, axis):
@@ -324,13 +332,20 @@ class Resident:
         w = w.astype(np.float64)
         xw = (xr + 1j * xi) * w                                                              # [N, P] complex128
         (xu, xj), (yu, yj) = np.unique(x, return_inverse=True), np.unique(y, return_inverse=True)
-        ex = np.exp(1j * tx[:, None].astype(np.float64) * xu)                                # [R, distinct x]
-        ey = np.exp(1j * ty[:, None].astype(np.float64) * yu)
         A = np.zeros((n, self.NC, 2, 1024), np.float32)
-        for c in range(self.NC):
-            p = slice(c * 1024, min(c * 1024 + 1024, self.P))
-            z = ex[:, xj[p]] * ey[:, yj[p]] * xw[pn, p]
-            A[dr, c, 0, :p.stop - p.start], A[dr, c, 1, :p.stop - p.start] = z.real, z.imag
+
+        def rows(a, b):                         # rows a .. b: their own rows of A, so the parts run side by side
+            ex = np.exp(1j * tx[a:b, None].astype(np.float64) * xu)                          # [rows, distinct x]
+            ey = np.exp(1j * ty[a:b, None].astype(np.float64) * yu)
+            for c in range(self.NC):
+                p = slice(c * 1024, min(c * 1024 + 1024, self.P))
+                z = ex[:, xj[p]] * ey[:, yj[p]] * xw[pn[a:b], p]
+                A[dr[a:b], c, 0, :p.stop - p.start], A[dr[a:b], c, 1, :p.stop - p.start] = z.real, z.imag
+        # The server is one thread and the chip waits while it builds this. Runs of 128 rows keep a run's complex
+        # temporaries (2 MB each) in cache, and OPT threads take the runs side by side.
+        R = len(pn)
+        cuts = list(range(0, R, 128)) + [R]
+        list(_pool().map(rows, cuts[:-1], cuts[1:])) if OPT > 1 and len(cuts) > 2 else [rows(a, b) for a, b in zip(cuts[:-1], cuts[1:])]
         nx = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)
         return A.reshape(n, self.K), self._kchip(w, w)[sel], nx[sel]
 
@@ -448,4 +463,112 @@ class Resident:
         c = self.c
         c["dev_s"] += time.time() - t1
         c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
+        return out
+
+    def d2_own(self, eul, on, xr, xi, w, tx, ty, pn, x, y):
+        """Every particle against its own orientations: a list of float32 [T_i, on_i]. eul [sum(on), 9] in particle
+        order, on [N] the particles' set sizes; xr, xi, w, tx, ty, pn as in d2.
+
+        d2 scores every row of a batch against every orientation the call brings, so a batch of N particles with
+        their own sets (a local search, the last iteration) pays N times the products it needs. Here a particle is
+        one small product of its own, [T pad 32, K] by [K, on pad 32], and q of them run as one program. Per
+        particle the image digits, the reference digits and the product are those of its own rows only. The two
+        exact sums come back as (hi, lo) for the particle's rows alone and are added in float64 on the host.
+        """
+        N, t0 = len(xr), time.time()
+        on = np.asarray(on, np.int64)
+        nt = np.bincount(pn, minlength=N)
+        r0 = np.concatenate([[0], np.cumsum(nt)])
+        e0 = np.concatenate([[0], np.cumsum(on)])
+        assert (np.diff(pn) >= 0).all() and nt.min() > 0 and on.min() > 0
+        R1 = -(-int(nt.max()) // 32) * 32
+        assert R1 <= RBLK, "more translations per particle than a row block holds"
+        On = -(-int(on.max()) // 32) * 32
+        On = On if On <= OBLK else -(-On // OBLK) * OBLK       # one column block, or whole ones
+        # particles per program: the digit planes of both products get a third of what the table left (as in d2),
+        # and a projection call takes OCH orientations. A power of two, so a rank compiles few shapes.
+        qmax = max(1, min(self.free // 3 // (2 * (self.n + self.n2) * self.Kp), OCH) // On)
+        qmax = min(32, 1 << (qmax.bit_length() - 1))            # 32: the norm rows of a program share one row block
+        eul = np.asarray(eul, np.float32).reshape(-1, 9)
+        A0, A20, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, sel=np.arange(N))     # [R, K], [N, K], [N]
+        t0 = t1 = self._mark("host_s", t0)
+        out = []
+        for p0 in range(0, N, qmax):
+            m = min(qmax, N - p0)
+            q = 1 << (m - 1).bit_length()       # the last program of a call is padded with its first particle
+            idx = np.concatenate([np.arange(p0, p0 + m), np.full(q - m, p0)])
+            rot = np.zeros((q, On, 8), np.float32)
+            for j, i in enumerate(idx):
+                e = eul[e0[i]:e0[i + 1]]
+                rot[j, :len(e), :6] = e[:, [0, 1, 3, 4, 6, 7]] * self.pf
+                rot[j, len(e):] = rot[j, 0]     # pad with one of its own, so the maxima are the set's
+            t_rot = self._put(rot.reshape(q * On, 8), ttnn.ROW_MAJOR_LAYOUT)
+            B = ttnn.to_layout(ttnn.reshape(proj_rot(self.tab, self.pix, t_rot, self.geom), (q * On, self.K)), ttnn.TILE_LAYOUT)
+            ttnn.deallocate(t_rot)
+            B2 = ttnn.multiply(B, B)
+            t0 = self._mark("proj_s", t0)
+            mb = self._colmax(B)                # the K-diagonal balance of d2, per program
+            t0 = self._mark("refdig_s", t0)     # the read waits for the projection: not host time
+            res = []
+            # the cross term: a block of R1 rows per particle against its own columns, q blocks to one program.
+            # The norm term has one row per particle: all q rows share one 32-row block against every column of the
+            # program (the product d2 runs), and a particle reads its row at its own columns.
+            for X, mbx, norm, n in ((B, mb, False, self.n), (B2, mb * mb, True, self.n2)):
+                rr, nq = (32, 1) if norm else (R1, q)
+                A = np.zeros((nq, rr, self.K), np.float32)
+                for j, i in enumerate(idx):     # a particle's rows lead its block
+                    if norm:
+                        A[0, j] = A20[i]
+                    else:
+                        A[j, :nt[i]] = A0[r0[i]:r0[i + 1]]
+                A = A.reshape(nq * rr, self.K)
+                ma = _amax(A, 0)
+                ok = (ma > 0) & (mbx > 0)
+                e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mbx, 1)) - np.log2(np.where(ok, ma, 1)))), 0).astype(int)
+                # a pixel no reference of the program reaches adds nothing, but would set its row's exponent: zero it
+                A *= (np.ldexp(1.0, e) * (mbx > 0)).astype(np.float32)
+                ea = _exp(_amax(A, 1))
+                t0 = self._mark("host_s", t0)
+                ts = self._put(np.ldexp(1.0, -e).reshape(1, -1))
+                Xb = ttnn.multiply(X, ts)
+                eb = _exp(self._rowmax(Xb))
+                Bd = self._digits(Xb, eb, q * On, n)                # [n, q On, Kp]
+                for t in (ts, Xb, X):
+                    ttnn.deallocate(t)
+                t0 = self._mark("refdig_s", t0)
+                tA = self._put(A)
+                Ad = self._digits(tA, ea, nq * rr, n)               # [n, nq rr, Kp]
+                ttnn.deallocate(tA)
+                t0 = self._mark("imgdig_s", t0)
+                assert int(ea.min()) + int(eb.min()) - 2 * n > -126 and int(ea.max()) + int(eb.max()) < 127
+                t_ea, t_eb = self._ti(ea, nq * rr), self._ti(eb, q * On)
+                if norm:
+                    S = oz_fused(Ad, Bd, n, rb=1, nb=OBLK // 32 if q * On % OBLK == 0 else On // 32, bt=True)
+                    hi, lo = oz_combine(S, t_ea, t_eb, n)
+                else:
+                    S = oz_fused(ttnn.reshape(Ad, (n * q, rr, self.Kp)), ttnn.reshape(Bd, (n * q, On, self.Kp)), n,
+                                 rb=rr // 32, nb=min(On, OBLK) // 32, bt=True, q=q, adm=True, bdm=True)
+                    hi, lo = oz_combine(S, t_ea, t_eb, n, q=q)
+                for t in (S, Ad, Bd):
+                    if t.is_allocated():
+                        ttnn.deallocate(t)
+                t0 = self._mark("prod_s", t0)
+                keep = q if norm else int(nt[idx].max())            # only the rows in use come back
+                got = 0.0
+                for v in (hi, lo):
+                    v3 = ttnn.reshape(v, (nq, rr, q * On if norm else On))
+                    v_ = ttnn.to_layout(ttnn.slice(v3, [0, 0, 0], [nq, keep, int(v3.shape[2])]), ttnn.ROW_MAJOR_LAYOUT)
+                    got = got + ttnn.to_torch(v_).double().numpy().reshape(nq, keep, -1)
+                    for t in (v_, v3, v):
+                        if t.is_allocated():
+                            ttnn.deallocate(t)
+                res.append(got)
+                t0 = self._mark("read_s", t0)
+            C, Nn = res[0], np.stack([res[1][0, j, j * On:(j + 1) * On] for j in range(q)])[:, None]
+            for j in range(m):
+                i = p0 + j
+                out.append((nx[i] + Nn[j, :1, :on[i]] - 2.0 * C[j, :nt[i], :on[i]]).astype(np.float32))
+        c = self.c
+        c["dev_s"] += time.time() - t1
+        c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + len(pn), c["rows_padded"] + N * R1
         return out
