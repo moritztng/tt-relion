@@ -52,6 +52,9 @@ Details and the measurement scripts: [`perf/fft2d/`](perf/fft2d/).
 - `relion5-prep.patch` cuts the CPU cost of preparing a particle (shift, mask, two Fourier transforms,
   CTF) from 5 to 6 ms to about 1 ms on a 360 pixel box, with the same outputs. See
   [`docs/particle-prep.md`](docs/particle-prep.md).
+- `relion5-sums-*.patch` cut the CPU cost of adding a particle to the reconstruction sums (7.05 to 3.00 ms
+  per particle in a chip run of the dev cell, same poses), and `relion5-plan-cache.patch` stops RELION from
+  building the same orientation list for every particle.
 
 Build and run instructions are in that directory's README.
 

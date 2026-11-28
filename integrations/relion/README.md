@@ -117,6 +117,49 @@ RELION's own code. Apply it after `relion5-tt.patch` and `relion5-estep-profile.
 
 Numbers and the float64 check: [`docs/particle-prep.md`](../../docs/particle-prep.md).
 
+## Weighted sums
+
+After scoring, RELION adds each particle to the sums the reconstruction is made from (`storeWeightedSums`): it
+projects the reference again for the orientations of the fine pass, forms the weighted image sums and splats them
+into the 3D volume. Once the scoring runs on chips this is one of the largest CPU stages of a rank. Four patches
+cut it without changing what is summed:
+
+- `relion5-sums-sparse.patch`: the two kernels skip orientations and translations that have no weight above
+  RELION's own significance threshold. RELION adds nothing for them either, it only does the arithmetic first.
+  Outputs are the same bits.
+- `relion5-sums-memory.patch`: the back-projected volume is one block with real part, imaginary part and weight of
+  a voxel side by side, on 2 MB pages, instead of three arrays; the reference volume is on 2 MB pages too. Same
+  adds in the same order, same bits.
+- `relion5-sums-defer.patch` (needs `relion5-sums-memory.patch`): the back-projection appends its pixels to a log
+  and applies the log in batches sorted by region of the volume. The adds reach a voxel in another order, so half
+  maps agree to rounding (relative L2 3e-8, the same as two runs of unpatched RELION with more than one thread)
+  and poses are identical. It takes about 200 MB per rank.
+- `relion5-sums-prefetch.patch`: the projection asks for the reference lines of an image row before it
+  interpolates the row. Same bits.
+
+On the 360 pixel dev cell, global-search iteration, scoring on 4 chips with 5 ranks of 40 threads, the stage costs
+7.05 ms of CPU per particle with the first patch alone, 3.99 ms with the first three (back-projection 4.23 to
+1.09 ms) and 3.00 ms with all four (projection and image sums 2.44 to 1.63 ms); poses equal the CPU run's in all
+13,156 particles every time. Without any of them the same stage read 20.0 ms in an 8-chip run. On RELION's CPU
+path, two arms side by side at one load: 12.9 ms without, 4.3 ms with the first two.
+
+`relion5-plan-cache.patch` is a fifth, outside that stage: in a search without orientation priors RELION builds
+the same coarse orientation list and its Euler matrices (36,864 orientations at healpix order 3) for every
+particle. The patch keeps the last few lists together with every input they were built from and copies one when
+a call brings the same inputs. Same bits.
+
+| variable | meaning |
+|---|---|
+| `TT_RELION_SPLAT_DEFER=0` | RELION's direct splat instead of the log |
+| `TT_RELION_SPLAT_BATCH=<pixels>` | pixels that wait in the log before a batch is applied (default 4,194,304) |
+| `TT_RELION_PLAN_CACHE=0` | build the orientation list for every particle, as RELION does |
+| `TT_RELION_PLAN_CACHE=2` | build every reused list again and stop if it is not the same bits |
+
+`perf/rlx/build_relion.sh` applies all of them in order; `SUMS_SPARSE=0`, `SUMS_MEMORY=0`, `SUMS_DEFER=0`,
+`SUMS_PREFETCH=0` and `PLAN_CACHE=0` leave one out. `relion5-sums-record.patch` with
+`src_acc_tt/tt_sums_record.{h,cpp}` records the stage's inputs and outputs for the float64 reference in
+`tt_relion/sums.py` (`perf/rlx/wsum/check_sums.py`) and is not needed to run.
+
 `relion5-estep-profile.patch` adds the timers used to measure the expectation step and is not needed
 to run.
 
