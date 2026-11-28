@@ -63,7 +63,7 @@ def main():
                 from tt_relion.resident import Resident
                 # base-4 digits. TT_RELION_NORM_DIGITS gives the norm product sum w |P|^2 its own count (0 = the same):
                 # both its factors are positive, so what a short product drops does not cancel as in the cross term.
-                n = int(os.environ.get("TT_RELION_DIGITS", "16"))
+                n = int(os.environ.get("TT_RELION_DIGITS", "13"))
                 res = Resident(dev, n, max(n, int(os.environ.get("TT_RELION_NORM_DIGITS", "0"))))
             N, R, O, P = req["dims"]
             key, X, Y, Z, initY, initZ, maxR2, pf, nvox = req["model"]
