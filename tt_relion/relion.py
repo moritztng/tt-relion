@@ -511,7 +511,8 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     The jobs tile [0, significant_num) exactly (makeJobsForDiff2Fine, acc_helper_functions_impl.h),
     so the job list is CUDA block geometry and carries no information the flat rot_idx/trans_idx
     pair does not. Projecting each distinct orientation once and reading the requested entries out
-    of the dense matrix is therefore the same answer with strictly less projection work.
+    of the orientation x requested-translation matrix is therefore the same answer with strictly
+    less projection work.
     """
     if _SHAPE:
         rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
@@ -527,16 +528,19 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
         geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
+        rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
+        # The fine pass asks for the children of the significant coarse samples: a handful of the oversampled
+        # translations (8 of 148 at a global finer pass). Only those are scored, as in RELION's own kernel.
+        trans, trans_idx = np.unique(np.frombuffer(trans_idx_mv, dtype=np.uint64), return_inverse=True)
+        tx, ty = (np.frombuffer(mv, dtype=np.float32)[trans] for mv in (tx_mv, ty_mv))
         if _BATCH > 1:
-            acc = _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom,
+            acc = _collect(mdl_mv, eul_mv, tx, ty, re_mv, im_mv, corr_mv, geom,
                            orientation_num).reshape(-1)
         else:
-            acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
-                               *geom, orientation_num, translation_num, image_size, "F")
+            acc = _dense_diff2(t, mdl_mv, eul_mv, tx, ty, re_mv, im_mv, corr_mv,
+                               *geom, orientation_num, len(trans), image_size, "F")
         _book("F_s", time.time() - t0)
-        rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
-        trans_idx = np.frombuffer(trans_idx_mv, dtype=np.uint64)
-        take = rot_idx * np.uint64(translation_num) + trans_idx
+        take = rot_idx * np.uint64(len(trans)) + trans_idx.astype(np.uint64)
         out = np.frombuffer(out_mv, dtype=np.float32)
         out += acc[take] + np.float32(sum_init)
         _stats["fine_handled"] += 1
