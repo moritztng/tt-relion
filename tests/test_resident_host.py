@@ -226,3 +226,27 @@ def test_own_form_scores_each_particle_on_its_own_set():
             d = (w[i] * np.abs(sx[:, None] - (pr + 1j * pi)[None]) ** 2).sum(-1)        # [T, on]
             assert got[i].shape == d.shape
             assert np.abs(got[i] - d).max() < 2e-6 * np.abs(d).max(), (N, i, np.abs(got[i] - d).max())
+
+
+def test_operand_runs_and_threads_give_the_same_bits(monkeypatch):
+    import tt_relion.resident as rs
+    rng = np.random.default_rng(11)
+    P, N, T = 1300, 9, 37                       # 333 rows: three runs of 128
+    x, y = (np.arange(P) % 26).astype(np.float32), (np.arange(P) // 26 - 25).astype(np.float32)
+    r = Resident(None)
+    r.P, r.NC = P, 2
+    r.K = 4096
+    xr, xi = rng.standard_normal((2, N, P)).astype(np.float32)
+    w = rng.uniform(0.5, 2, (N, P)).astype(np.float32)
+    pn = np.repeat(np.arange(N), T)
+    tx, ty = rng.uniform(-0.2, 0.2, (2, N * T)).astype(np.float32)
+    got = {}
+    for k in (1, 4):
+        monkeypatch.setattr(rs, "OPT", k)
+        got[k] = r._operands(xr, xi, w, tx, ty, pn, x, y)
+    assert all(np.array_equal(a, b) for a, b in zip(got[1], got[4]))
+    ph = tx[:, None].astype(np.float64) * x + ty[:, None].astype(np.float64) * y
+    z = ((xr + 1j * xi) * w.astype(np.float64))[pn] * np.exp(1j * ph)
+    A = got[4][0].reshape(N * T, 2, 2, 1024)
+    assert np.allclose(A[:, 0, 0], z.real[:, :1024], rtol=1e-6, atol=1e-6)      # the direct form, phase not separated
+    assert np.allclose(A[:, 1, 1, :P - 1024], z.imag[:, 1024:], rtol=1e-6, atol=1e-6)
