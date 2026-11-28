@@ -35,6 +35,11 @@ TBLK = 1 << 14  # voxels per block of the table build (1 MB of table)
 TURNS = int(os.environ.get("TT_RELION_TABLE_TURNS", "4"))   # chips of a host that upload a large table at once
 SUB = os.environ.get("TT_RELION_SUBPHASE", "") not in ("", "0")   # split prod_s (a device sync per step: a profile, not a rate)
 OPT = int(os.environ.get("TT_RELION_OP_THREADS", "4"))     # host threads that build a batch's image operand
+# TT_RELION_SYNC_SLEEP=<f>: before it waits for the chip at a phase mark, the server sleeps f times the shortest time
+# that phase has taken at the same shapes. A wait on the device keeps one host thread busy for as long as it lasts;
+# a sleep does not, and the cores go to RELION's threads. 0 (the default): off. Below 1 the sleep ends before the chip
+# does unless a phase got faster than it has ever been.
+SYNC_SLEEP = float(os.environ.get("TT_RELION_SYNC_SLEEP", "0"))
 # Column tiles per unit of the own-form products (0: one unit per particle and digit, the widest). The fused product
 # hands whole units (digit k, row block, column block) to cores and unit k costs k + 1 digit pairs: q particles of
 # one row tile and one column block are q n unequal units, fewer than the cores of a chip, so the largest unit sets
@@ -134,12 +139,23 @@ class Resident:
         # the device synchronised at each mark), and how full the row tile was (rows used of rows computed)
         self.c = dict(host_s=0.0, dev_s=0.0, proj_s=0.0, refdig_s=0.0, imgdig_s=0.0, prod_s=0.0, read_s=0.0,
                       px_oz_s=0.0, px_comb_s=0.0, pn_oz_s=0.0, pn_comb_s=0.0, p_asm_s=0.0,
-                      batches=0, rows=0, rows_padded=0)
+                      batches=0, rows=0, rows_padded=0, slept_s=0.0)
+        self.pred = {}          # (phase, shapes) -> its shortest wall so far (TT_RELION_SYNC_SLEEP)
 
-    def _mark(self, name, t0):
+    def _mark(self, name, t0, key=None):
+        """Wait for the chip and book the seconds since t0 to phase `name`. key: the shapes that set this phase's
+        device time, for TT_RELION_SYNC_SLEEP."""
+        if SYNC_SLEEP > 0 and key is not None:
+            key = (name,) + tuple(key)
+            d = t0 + SYNC_SLEEP * self.pred.get(key, 0.0) - time.time()
+            if d > 0.003:
+                time.sleep(d)
+                self.c["slept_s"] += d
         ttnn.synchronize_device(self.dev)
         t1 = time.time()
         self.c[name] += t1 - t0
+        if SYNC_SLEEP > 0 and key is not None:
+            self.pred[key] = min(self.pred.get(key, 1e9), t1 - t0)
         return t1
 
     def _sub(self, name, t0):
@@ -421,7 +437,7 @@ class Resident:
             ea, ea2 = _exp(_amax(A, 1)), _exp(_amax(A2, 1))
             tA, tA2 = self._put(A), self._put(np.pad(A2, ((0, min(-len(A2) % RUP, nb - len(A2))), (0, 0))))
             Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb, self.n2)
-            t0 = self._mark("imgdig_s", t0)
+            t0 = self._mark("imgdig_s", t0, (rows, nb, self.Kp))
             oo = o0
             for r in refs:
                 Ch, Cl = self._product(Ad, ea, rows, r, "B")
@@ -448,7 +464,7 @@ class Resident:
                 dh, de = tsum(sh, ttnn.neg(Ch))
                 D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
                 self._sub("p_asm_s", ts)
-                t0 = self._mark("prod_s", t0)
+                t0 = self._mark("prod_s", t0, (rows, nb, self.Kp, -(-r["O"] // OBLK), prior is not None))
                 if prior is None:
                     np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, oo:oo + r["O"]])     # the chip holds d2 / 2
                 else:                           # the row minima come back; the matrix waits for its window
@@ -564,7 +580,7 @@ class Resident:
                 for t in (S, Ad, Bd):
                     if t.is_allocated():
                         ttnn.deallocate(t)
-                t0 = self._mark("prod_s", t0)
+                t0 = self._mark("prod_s", t0, (norm, q, rr, On, self.Kp))
                 keep = q if norm else int(nt[idx].max())            # only the rows in use come back
                 got = 0.0
                 for v in (hi, lo):

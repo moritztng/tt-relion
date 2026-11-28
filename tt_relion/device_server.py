@@ -50,9 +50,12 @@ def main():
     seen = {}                           # the op's phase seconds at the last batch line
     t_open, calls, client = time.time(), 0, {}
     up = mm = down = 0.0
+    cpu0 = None
     for line in sys.stdin:
         req = json.loads(line)
         t0 = time.time()
+        if cpu0 is None:
+            cpu0 = time.process_time()
         if shm is None or shm.name != req["shm"].lstrip("/"):
             if shm is not None:
                 shm.close()
@@ -172,6 +175,9 @@ def main():
           % (os.environ.get("TT_VISIBLE_DEVICES", "?"), calls, up + mm + down, up, mm, down,
              time.time() - t_open, json.dumps(client, separators=(",", ":"))), file=sys.stderr, flush=True)
     if res is not None:                 # the resident op's own split: host operand build vs chip, and row fill
+        # cpu_s: this process's CPU seconds from the first request on, all threads (a wait on the device keeps a host
+        # thread busy)
+        res.c["cpu_s"] = round(time.process_time() - (cpu0 or 0.0), 2)
         print("TTRES chip=%s %s" % (os.environ.get("TT_VISIBLE_DEVICES", "?"),
                                     json.dumps(res.c, separators=(",", ":"))), file=sys.stderr, flush=True)
 

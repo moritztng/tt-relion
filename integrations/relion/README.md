@@ -75,6 +75,7 @@ Environment read by the Python side:
 | `TT_RELION_ORI_CHUNK` | orientations per chunk, bounds peak host memory |
 | `TT_RELION_CHECK` | keep the computed scores for a residual check |
 | `TT_RELION_NICE` | `<n>`: RELION's `--j` threads lower their own priority by n after their first batch, so the device server gets a core when it asks. Default 0: off. |
+| `TT_RELION_SYNC_SLEEP` | `<f>`: the device server sleeps f times a phase's shortest time so far before it waits for the card, instead of holding a host thread busy through the wait. Default 0: off. |
 | `TT_RELION_PIX_DROP` | `0` hands every pixel to the card. Default: only the pixels RELION weights. RELION passes the whole coarse or fine image and gives the pixels past its resolution limit a weight of exactly zero (21 % of them in the recorded 3D refinement: 1300 points of which 1021 weighted on a 50-pixel coarse pass); they add nothing to any sum |
 | `TT_RELION_OWN_FORM` | `1` scores a batch of particles that bring their own orientation sets (fine pass, local searches) one particle against its own set, instead of every row against the union of the sets. Off by default |
 | `TT_RELION_OP_THREADS` | host threads that build a batch's image operand in the device server (default 4) |
