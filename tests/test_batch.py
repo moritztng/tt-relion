@@ -206,3 +206,16 @@ def test_window_keeps_the_samples_near_each_particles_best():
         got = {(int(a), int(b)) for a, b in zip(r, o) if pn[a] == p}
         assert got == want and 7 not in {b for _, b in got}
     assert np.abs(dl - (e[r, o] - best[pn[r]])).max() < 1e-5 and (np.diff(r) >= 0).all()
+
+
+def test_batch_candidate_form_is_the_window_of_the_dense_matrix():
+    rng = np.random.default_rng(7)
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case()
+    n, T = tx.shape
+    d = relion.diff2_coarse_batch(mdl, eul, tx.ravel(), ty.ravel(), np.repeat(np.arange(n), T), ir, ii, corr, **g)
+    lo, lt = rng.uniform(0, 4, d.shape[1]), rng.uniform(0, 6, d.shape[0])
+    lo[3] = np.inf
+    got = relion.diff2_coarse_batch(mdl, eul, tx.ravel(), ty.ravel(), np.repeat(np.arange(n), T), ir, ii, corr, **g,
+                                    prior=(lo, lt, 25.0))
+    want = relion._window(d, lo, lt, np.repeat(np.arange(n), T), n, 25.0)
+    assert all(np.array_equal(a, b) for a, b in zip(got, want)) and len(got[0]) > n and 3 not in got[1]

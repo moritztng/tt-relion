@@ -374,7 +374,10 @@ def _window(d2, lo, lt, pn, n, window):
     return r.astype(np.int32), o.astype(np.int32), dl[r, o].astype(np.float32), best
 
 
-def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared):
+_CAND_CAP = int(os.environ.get("TT_RELION_CAND_CAP", str(1 << 20)))     # candidates a batch may return before it falls back
+
+
+def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared, prior=None):
     """diff2 [R, O] from the resident chip op, row r = particle pn[r] at (tx[r], ty[r]). shared: the orientation set
     is the iteration's (a global coarse pass), so the chip keeps its projections; otherwise it is this call's own and
     is used once."""
@@ -385,7 +388,8 @@ def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared
     s = _server()
     try:
         return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty), f32(pn),
-                    "%s.%s.%d.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size, geom[5]) if shared else None)
+                    "%s.%s.%d.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size, geom[5]) if shared else None,
+                    None if prior is None else (f32(prior[0]), f32(prior[1]), float(prior[2]), _CAND_CAP))
     finally:
         _free.put(s)
 
@@ -625,8 +629,11 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom, keep=True):
 
 def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
                        mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-                       padding_factor, imgX, imgY, shared=True):
+                       padding_factor, imgX, imgY, shared=True, prior=None):
     """diff2 for N particles over one orientation set: float32 [R, O], one row per (particle, translation).
+
+    prior = (lo [O], lt [R], window), -log of RELION's orientation and offset priors: the candidate form instead,
+    (row, orientation, delta, best) for the samples within window of each particle's best (see _window).
 
     shared: the set is the iteration's (a global coarse pass), so its projections are kept for the next
     batch. A batch of particles with their own orientations passes the union of them and shared=False.
@@ -644,9 +651,14 @@ def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
     x = (pix % imgX).to(t.float32)
     yi = pix // imgX
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
+    rows_of = pn
     if _RESIDENT and _BACKEND == "ttnn":
-        return _resident_d2(mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty, pn,
-                            (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared=shared)
+        args = (mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty, pn,
+                (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
+        got = _resident_d2(*args, shared=shared, prior=prior)
+        if got is None:                         # more candidates than the segment holds: the dense matrix, cut here
+            got = _window(_resident_d2(*args, shared=shared), prior[0], prior[1], pn, len(img_r), prior[2])
+        return got
     ref_r, ref_i, ref_a2, ref_key = _shared_refs(t, mdl, eul, x, y,
                                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared)
     pn = t.from_numpy(pn)
@@ -666,7 +678,8 @@ def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
         cross = _device_cross(t, refc, shw, ref_key).double()                         # [O, R]
     else:
         cross = (refc.double() @ shw.double().T)
-    return (ref2 + sh2[:, None] - 2.0 * cross.T).float().numpy()
+    d = (ref2 + sh2[:, None] - 2.0 * cross.T).float().numpy()
+    return d if prior is None else _window(d, prior[0], prior[1], rows_of, len(img_r), prior[2])
 
 
 # TT_RELION_BATCH=<n>: coarse and fine calls from RELION's --j threads on the same model and image size are
