@@ -2,13 +2,14 @@
 # record.sh <tag> <optimiser.star to continue from> <iteration>
 # Runs that one iteration on RELION's own CPU kernels with the bridge call stream recorded (tt_relion/record.py),
 # RANKS-1 follower ranks x J threads, and stops RELION once every follower has N calls. No chip is opened.
-# Records land in ~/rlx-bridge/rec/<tag>/rec.<pid>.pkl, one per follower rank. Env: RANKS (3), J (8), N (1200).
+# Records land in ~/rlx-bridge/rec/<tag>/rec.<pid>.pkl, one per follower rank. Env: RANKS (3), J (8), N (1200),
+# BACKEND (nullbase; torch handles the calls on the host, slowly, so the gaps between calls are RELION's host work alone).
 tag=${1:?tag}; from=${2:?optimiser.star}; it=${3:?iteration}
 R=$HOME/rlx-bridge; here=$(cd "$(dirname "$0")" && pwd); src=$(cd "$here/../../.." && pwd)
 ranks=${RANKS:-3}; o=$R/runs/rec_$tag; rec=$R/rec/$tag
 export RELION_BIN=${RELION_BIN:-$HOME/rlx-e2e/relion/build/bin/relion_refine_mpi}
 export PYTHONPATH=$src:$HOME/fleet/env/lib/python3.10/site-packages
-export TT_RELION_BACKEND=nullbase TT_RELION_RECORD=$rec TT_RELION_RECORD_N=${N:-1200}
+export TT_RELION_BACKEND=${BACKEND:-nullbase} TT_RELION_RECORD=$rec TT_RELION_RECORD_N=${N:-1200}
 unset TT_RELION_BATCH TT_RELION_RESIDENT
 rm -rf "$o" "$rec"; mkdir -p "$o" "$rec"
 echo "start $(date -u +%FT%TZ) load: $(cat /proc/loadavg)" > $o/status
