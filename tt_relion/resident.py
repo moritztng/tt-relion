@@ -11,6 +11,8 @@ sends images, weights, translations and Euler matrices and reads back d2.
 One instance per chip, used by tt_relion.device_server. The steps are the ones perf/rlx/resident/global_pass.py
 measured against float64 on real particles; that script stays the precision reference.
 """
+import time
+
 import numpy as np
 import torch
 import ttnn
@@ -22,6 +24,8 @@ KC = 480        # K run of the digit product (oz_fused KR = 15 tiles)
 RBLK = 512      # oz_fused row block
 OBLK = 256      # oz_fused column block
 OCH = 4096      # orientations per product
+RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a new row count on every call, and
+                # each new shape costs seconds of program builds
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 
 
@@ -38,6 +42,13 @@ class Resident:
         self.model_key = self.ref_key = None
         self.refs = []          # per orientation chunk: dict(O, B, B2) before the first batch, digits after
         self.bal = None         # (e, e2): the K-diagonal balance exponents of the held reference set
+        self.t = {}             # seconds per phase, device synchronised at each mark (the server reports them)
+
+    def _mark(self, name, t0):
+        ttnn.synchronize_device(self.dev)
+        t1 = time.time()
+        self.t[name] = self.t.get(name, 0.0) + t1 - t0
+        return t1
 
     # ---- uploads -------------------------------------------------------------------------------------------
     def _put(self, x, layout=ttnn.TILE_LAYOUT):
@@ -112,19 +123,23 @@ class Resident:
         out = []
         for o0 in range(0, len(eul), OCH):
             e = eul[o0:o0 + OCH]
-            rot = np.zeros((len(e), 8), np.float32)
-            rot[:, :6] = e[:, [0, 1, 3, 4, 6, 7]] * self.pf
+            Op = -(-len(e) // OBLK) * OBLK      # whole column blocks: every set size of a block count is one program
+            rot = np.zeros((Op, 8), np.float32)
+            rot[:len(e), :6] = e[:, [0, 1, 3, 4, 6, 7]] * self.pf
+            rot[len(e):] = rot[0]               # pad with a real orientation, so the maxima are the set's own
             t_rot = self._put(rot, ttnn.ROW_MAJOR_LAYOUT)
             pr = proj_rot(self.tab, self.pix, t_rot, self.geom)
-            B = ttnn.to_layout(ttnn.reshape(pr, (len(e), self.K)), ttnn.TILE_LAYOUT)
+            B = ttnn.to_layout(ttnn.reshape(pr, (Op, self.K)), ttnn.TILE_LAYOUT)
             ttnn.deallocate(t_rot)
             out.append(dict(O=len(e), B=B, B2=ttnn.multiply(B, B)))
         return out
 
     def _digits(self, X, e, rows):
-        Xp = ttnn.pad(X, [(0, rows - int(X.shape[0])), (0, self.Kp - self.K)], 0.0)
+        pr, pk = rows - int(X.shape[0]), self.Kp - int(X.shape[1])
+        Xp = ttnn.pad(X, [(0, pr), (0, pk)], 0.0) if pr or pk else X
         d = oz_cut(Xp, self._ti(e, rows), self.n)
-        ttnn.deallocate(Xp)
+        if Xp is not X:
+            ttnn.deallocate(Xp)
         return d
 
     def _balance(self, refs, ma, ma2):
@@ -180,25 +195,31 @@ class Resident:
         N, T = tx.shape
         R = N * T
         rows = -(-R // RBLK) * RBLK
+        t0 = time.time()
         A, A2, nx = self._operands(xr, xi, w, tx, ty, x, y)
+        t0 = self._mark("host_s", t0)
 
         held = ref_key is not None and ref_key == self.ref_key
         if held:
             refs, (e, e2) = self.refs, self.bal
         else:
             refs = self._project(np.asarray(eul, np.float32).reshape(-1, 9))
+            t0 = self._mark("proj_s", t0)
             e, e2 = self._balance(refs, np.abs(A).max(0), np.abs(A2).max(0))
+            t0 = self._mark("refdig_s", t0)
             if ref_key is not None:
                 self._drop_refs()
                 self.refs, self.bal, self.ref_key = refs, (e, e2), ref_key
         A, A2 = np.ldexp(A, e), np.ldexp(A2, e2)
         ea, ea2 = _exp(np.abs(A).max(1)), _exp(np.abs(A2).max(1))
-        tA, tA2 = self._put(A), self._put(A2)
+        up = lambda v: np.pad(v, ((0, -R % RUP), (0, 0)))  # noqa: E731
+        tA, tA2 = self._put(up(A)), self._put(up(A2))
         Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, rows)
         nxh = (nx / 2).astype(np.float32)
         nxl = (nx / 2 - nxh).astype(np.float32)
         pad = lambda v: np.pad(v, (0, rows - R))[:, None]  # noqa: E731
         t_nxh, t_nxl = self._put(pad(nxh)), self._put(pad(nxl))
+        t0 = self._mark("imgdig_s", t0)
 
         def tsum(a, b):     # TwoSum in true-fp32 eltwise ops: a + b = s + err exactly
             s_ = ttnn.add(a, b)
@@ -215,7 +236,9 @@ class Resident:
             lo = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), t_nxl)
             dh, de = tsum(sh, ttnn.neg(Ch))
             D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
+            t0 = self._mark("prod_s", t0)
             out[:, o0:o0 + r["O"]] = ttnn.to_torch(D).numpy()[:R, :r["O"]]
+            t0 = self._mark("read_s", t0)
             o0 += r["O"]
             for t in (Ch, Cl, Nh, Nl, D):
                 ttnn.deallocate(t)
