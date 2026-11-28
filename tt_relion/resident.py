@@ -11,6 +11,8 @@ sends images, weights, translations and Euler matrices and reads back d2.
 One instance per chip, used by tt_relion.device_server. The steps are the ones perf/rlx/resident/global_pass.py
 measured against float64 on real particles; that script stays the precision reference.
 """
+import time
+
 import numpy as np
 import torch
 import ttnn
@@ -38,6 +40,9 @@ class Resident:
         self.model_key = self.ref_key = None
         self.refs = []          # per orientation chunk: dict(O, B, B2) before the first batch, digits after
         self.bal = None         # (e, e2): the K-diagonal balance exponents of the held reference set
+        # where a batch's wall goes: operand build on the host, everything from the first upload to the last
+        # readback on the chip, and how full the row tile was (rows used of rows computed)
+        self.c = dict(host_s=0.0, dev_s=0.0, batches=0, rows=0, rows_padded=0)
 
     # ---- uploads -------------------------------------------------------------------------------------------
     def _put(self, x, layout=ttnn.TILE_LAYOUT):
@@ -180,7 +185,9 @@ class Resident:
         N, T = tx.shape
         R = N * T
         rows = -(-R // RBLK) * RBLK
+        t0 = time.time()
         A, A2, nx = self._operands(xr, xi, w, tx, ty, x, y)
+        t1 = time.time()
 
         held = ref_key is not None and ref_key == self.ref_key
         if held:
@@ -191,8 +198,10 @@ class Resident:
             if ref_key is not None:
                 self._drop_refs()
                 self.refs, self.bal, self.ref_key = refs, (e, e2), ref_key
+        t2 = time.time()
         A, A2 = np.ldexp(A, e), np.ldexp(A2, e2)
         ea, ea2 = _exp(np.abs(A).max(1)), _exp(np.abs(A2).max(1))
+        t3 = time.time()
         tA, tA2 = self._put(A), self._put(A2)
         Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, rows)
         nxh = (nx / 2).astype(np.float32)
@@ -226,4 +235,8 @@ class Resident:
                 for v in r.values():
                     if isinstance(v, ttnn.Tensor):
                         ttnn.deallocate(v)
+        c = self.c
+        c["host_s"] += t1 - t0 + t3 - t2
+        c["dev_s"] += t2 - t1 + time.time() - t3
+        c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
         return (2.0 * out).reshape(N, T, -1).transpose(0, 2, 1)

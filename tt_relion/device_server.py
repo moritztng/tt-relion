@@ -128,6 +128,9 @@ def main():
     print("TTDEV chip=%s calls=%d busy_s=%.3f up_s=%.3f mm_s=%.3f down_s=%.3f life_s=%.3f client=%s"
           % (os.environ.get("TT_VISIBLE_DEVICES", "?"), calls, up + mm + down, up, mm, down,
              time.time() - t_open, json.dumps(client, separators=(",", ":"))), file=sys.stderr, flush=True)
+    if res is not None:                 # the resident op's own split: host operand build vs chip, and row fill
+        print("TTRES chip=%s %s" % (os.environ.get("TT_VISIBLE_DEVICES", "?"),
+                                    json.dumps(res.c, separators=(",", ":"))), file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

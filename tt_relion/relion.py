@@ -715,3 +715,10 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
     if item["err"] is not None:
         raise item["err"]
     return item["out"]
+
+
+# TT_RELION_RECORD=<dir>: write the call stream for perf/rlx/bridge/replay.py (tt_relion/record.py).
+if os.environ.get("TT_RELION_RECORD"):
+    from . import record as _record
+    diff2_coarse = _record.wrap("C", diff2_coarse, os.environ["TT_RELION_RECORD"])
+    diff2_fine = _record.wrap("F", diff2_fine, os.environ["TT_RELION_RECORD"])
