@@ -5,11 +5,11 @@
 #   w  TTPrep with the plans of $R/wisdom.<box> (measured once here, the same for every rank and run)
 # First the record arms of both iteration types, whose first particles go to check_prep.py (float64
 # reference), then per iteration type the profile arms n w e w n (thread CPU per particle by stage, split.py).
-# Status: $R/runs/$P.status. Env: R (~/rlx-prep), RELION_BIN, P (tag prefix, v2), BOX (360),
+# Status: $R/runs/$P.status. Env: R (~/rlx-prep), RELION_BIN, P (tag prefix, ab), BOX (360),
 # IT16 / IT24 (optimiser.star to continue from), N16 / N24 (particles per rank before an arm stops).
 R=${R:-$HOME/rlx-prep}; here=$(cd "$(dirname "$0")" && pwd); src=$(cd "$here/../../.." && pwd)
-P=${P:-v2}; S=$R/runs/$P.status; W=$R/wisdom.${BOX:-360}
-export R RELION_BIN=${RELION_BIN:-$R/relion-c/build/bin/relion_refine_mpi}
+P=${P:-ab}; S=$R/runs/$P.status; W=$R/wisdom.${BOX:-360}
+export R RELION_BIN=${RELION_BIN:-$R/relion/build/bin/relion_refine_mpi}
 py=${PY:-$HOME/fleet/env/bin/python}
 IT16=${IT16:-$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star}; IT24=${IT24:-$HOME/rlx/runs/d32_l_n14/run_it023_optimiser.star}
 mode() { # n|e|w -> the two switches
