@@ -7,6 +7,7 @@ re-read an fp32 [R, O] partial per run and pair: DRAM-bound at 8.4 TFLOP/s, resu
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import ttnn
@@ -14,6 +15,10 @@ from tt_bio import core_split
 
 KDIR = Path(__file__).resolve().parent / "kernels" / "oz_fused"
 RB, NB, KR = 16, 8, 15
+# TT_RELION_OZ_ZIG=1: balanced unit order. A unit is (digit k, row block, column block) and costs k + 1 digit pairs;
+# cores take consecutive units, so in the plain k-major order the cores holding the last digits do about twice the
+# mean work (2n / (n + 1)) and set the wall. The zigzag order pairs digit k with n - 1 - k. Same sums, same output.
+ZIG = int(os.environ.get("TT_RELION_OZ_ZIG", "") not in ("", "0"))
 
 
 def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, adm=False, bdm=False):
@@ -54,18 +59,18 @@ def oz_fused(A, B, n, rb=RB, nb=NB, bt=False, q=1, adm=False, bdm=False):
     acc = lambda t: list(ttnn.TensorAccessorArgs(t).get_compile_time_args())  # noqa: E731
     path = ttnn.KernelDescriptor.SourceType.FILE_PATH
     reader = ttnn.KernelDescriptor(kernel_source=str(KDIR / "reader.cpp"), source_type=path, core_ranges=grid,
-                                   compile_time_args=acc(A) + acc(B) + [rb, nb, KR, NRUN, RT, OT, NRB, NCB, int(bt), n, int(adm), q, int(bdm)],
+                                   compile_time_args=acc(A) + acc(B) + [rb, nb, KR, NRUN, RT, OT, NRB, NCB, int(bt), n, int(adm), q, int(bdm), ZIG],
                                    runtime_args=rt, common_runtime_args=[A.buffer_address(), B.buffer_address()],
                                    config=ttnn.ReaderConfigDescriptor())
     writer = ttnn.KernelDescriptor(kernel_source=str(KDIR / "writer.cpp"), source_type=path, core_ranges=grid,
-                                   compile_time_args=acc(S) + [rb, nb, RT, OT, NRB, NCB, n], runtime_args=rt,
+                                   compile_time_args=acc(S) + [rb, nb, RT, OT, NRB, NCB, n, ZIG], runtime_args=rt,
                                    common_runtime_args=[S.buffer_address()], config=ttnn.WriterConfigDescriptor())
     cfg = ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.LoFi, fp32_dest_acc_en=True)
     modes = [ttnn.UnpackToDestMode.Default] * 64
     modes[24] = ttnn.UnpackToDestMode.UnpackToDestFp32
     cfg.unpack_to_dest_mode = modes
     compute = ttnn.KernelDescriptor(kernel_source=str(KDIR / "compute.cpp"), source_type=path, core_ranges=grid,
-                                    compile_time_args=[rb, nb, KR, NRUN, NRB, NCB, int(bt), n], runtime_args=rt, config=cfg)
+                                    compile_time_args=[rb, nb, KR, NRUN, NRB, NCB, int(bt), n, ZIG], runtime_args=rt, config=cfg)
     ttnn.generic_op([A, B, S], ttnn.ProgramDescriptor(kernels=[reader, writer, compute], semaphores=[], cbs=cbs))
     return S
 

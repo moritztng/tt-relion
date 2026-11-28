@@ -128,8 +128,9 @@ and 80 fine calls each, squared differences near 1,050 / 9,800 and 12,100):
 | chip, 13 digits | 0.0010 | 0.0011 | 0.0007 | 0.0011 | 320 / 320 |
 | chip, 11 digits | 0.0015 | 0.0051 | 0.0043 | 0.0085 | 320 / 320 |
 
-At 13 digits the op is at the float32 floor of its operands. The device server runs 16 digits (`TT_RELION_DIGITS`)
-until 13 is graded through RELION on both iteration types. Run the gate after every change to the op, the bridge or
+At 13 digits the op is at the float32 floor of its operands, and through RELION it moves the same poses as 16 (table
+below), so 13 is the default (`TT_RELION_DIGITS`). 16 costs 31 % more chip time in the fine product and 49 % more in
+the coarse one. Run the gate after every change to the op, the bridge or
 the batch form, then grade one iteration through RELION against the CPU arm continued from the same state
 (`perf/rlx/iter_ab.sh`): `star_cmp.py` counts the particles whose pose differs and
 `d32_cmp.py` correlates each half map with the CPU arm's.
@@ -143,6 +144,7 @@ One iteration of the 13,156-particle dev cell through RELION on 8 chips, against
 | global finer iteration, 13 digits | 0 | 1.0e-10, 1.2e-10 |
 | local-search iteration, 16 digits, before the balance fix | 24 | 6.3e-7, 4.5e-7 |
 | local-search iteration, 16 digits | 1 | 2.7e-9, 1.5e-8 |
+| local-search iteration, 13 digits | 1 | 2.0e-10, 1.5e-8 |
 
 Two CPU runs of the same iteration that differ only in the random seed read 1.2e-3 to 1.4e-3 on the same scale, so
 the chip path sits five to seven orders of magnitude inside the variation RELION has by itself.
@@ -156,3 +158,29 @@ up to the seed pair's own resolution is more than 0.02 under the pair.
 `TT_RELION_MIN_ORI=<n>` declines a coarse call that brings fewer than n orientations, and the fine call that follows
 it on the same thread, so RELION's own kernel does that particle. A local search brings a few hundred orientations
 per particle and cannot fill a chip tile. Off by default (0).
+
+### The last iteration
+
+An auto-refinement ends with one iteration at the full image size. For a 360-pixel box that is 65,160 pixels per
+image, and the model's table on the chip is 12 GB of its 34 GB. Two things follow.
+
+A reference set that would not fit beside the table is scored a piece at a time, about 1,000 orientations a piece at
+this size, each piece with its own balance. The products stay exact. Sets that fit run as before. On one chip against
+float64 at this size (`perf/rlx/resident/d2_parity.py --size 360`, `results/e2e_fs1`): 12 particles against 2,304
+orientations, the best pose agrees for all 12, and the squared difference is off by 0.014 at a value of 100,355,
+where float32 resolves 0.008. A batch takes 3.7 s, 0.31 s per particle.
+
+The table passes through host memory on its way to the chip, about 26 GB per chip while it does, and every chip
+wants it at the start of that iteration. `TT_RELION_TABLE_TURNS=<n>` (default 4) is how many chips of a host upload at
+once; the others wait their turn. `--preread_images` also counts here: RELION keeps the whole particle set in every
+MPI rank, so with one rank per chip the host holds as many copies as it has chips.
+
+A rank can drive more than one chip. `RLX_CHIPS_PER_RANK=<k>` (read by `perf/rlx/rank.sh`) gives every follower rank
+k chips and its `--j` threads feed all of them, so the host holds fewer copies of RELION for the same chips. On the
+global finer iteration of the dev cell, four chips as two ranks with two chips and `--j 80` each gave the poses of
+the CPU arm (0 of 13,156 differ, half maps 1.0e-10 and 1.1e-10) and finished the E-step in 2.75 min; one rank per
+chip with `--j 40` took 3.28 min on the same chips with the same grade (AICLK 1343 MHz or more in every sample of
+both runs, host load 54 to 95). Split half-sets need two follower ranks, so k is at most half the chips.
+
+`TT_RELION_NORM_DIGITS=<n>` gives the norm product alone more digits than the cross product. Off by default: with
+the balance fix the norm term needs none.
