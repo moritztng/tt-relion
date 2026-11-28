@@ -495,3 +495,46 @@ index fb33d84f..9002c9f5 100644
          }
          free(mdlClassComplex);
  
+diff --git a/src/ml_optimiser_mpi.cpp b/src/ml_optimiser_mpi.cpp
+index c1805424..d4142215 100644
+--- a/src/ml_optimiser_mpi.cpp
++++ b/src/ml_optimiser_mpi.cpp
+@@ -1308,14 +1308,9 @@ void MlOptimiserMpi::expectation()
+ 			else
+ 				mdlXYZ = (size_t)mdlX*(size_t)mdlY*(size_t)mdlZ;
+ 
+-			try
+-			{
+-				mdlClassComplex[iclass] = new std::complex<XFLOAT>[mdlXYZ];
+-			}
+-			catch (std::bad_alloc& ba)
+-			{
++			mdlClassComplex[iclass] = (std::complex<XFLOAT> *)allocHugePages(mdlXYZ * sizeof(std::complex<XFLOAT>));
++			if (!mdlClassComplex[iclass])
+ 				CRITICAL(RAMERR);
+-			}
+ 
+ 			std::complex<XFLOAT> *pData = mdlClassComplex[iclass];
+ 
+@@ -1847,9 +1842,9 @@ void MlOptimiserMpi::expectation()
+ 
+ 					for (unsigned long n = 0; n < s; n++)
+ 					{
+-						wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[n];
+-						wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[n];
+-						wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[n];
++						wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[3 * n];
++						wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[3 * n];
++						wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[3 * n];
+ 					}
+ 
+ 					b->backprojectors[j].clear();
+@@ -1865,7 +1860,7 @@ void MlOptimiserMpi::expectation()
+ 				unsigned nr_classes = mymodel.nr_classes;
+ 				for (int iclass = 0; iclass < nr_classes; iclass++)
+ 				{
+-					delete [] mdlClassComplex[iclass];
++					free(mdlClassComplex[iclass]);
+ 				}
+ 				free(mdlClassComplex);
+ 
