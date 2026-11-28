@@ -129,6 +129,30 @@ and 80 fine calls each, squared differences near 1,050 / 9,800 and 12,100):
 | chip, 11 digits | 0.0015 | 0.0051 | 0.0043 | 0.0085 | 320 / 320 |
 
 At 13 digits the op is at the float32 floor of its operands. The device server runs 16 digits (`TT_RELION_DIGITS`)
-until 13 is graded through RELION. Run the gate after every change to the op, the bridge or the batch form, then
-grade one iteration through RELION against the CPU arm continued from the same state (`perf/rlx/iter_ab.sh`,
-`star_cmp.py`).
+until 13 is graded through RELION on both iteration types. Run the gate after every change to the op, the bridge or
+the batch form, then grade one iteration through RELION against the CPU arm continued from the same state
+(`perf/rlx/iter_ab.sh`): `star_cmp.py` counts the particles whose pose differs and
+`d32_cmp.py` correlates each half map with the CPU arm's.
+
+One iteration of the 13,156-particle dev cell through RELION on 8 chips, against the CPU arm:
+
+| | poses that differ (Rot) | half maps, 1 - correlation |
+|---|---|---|
+| global finer iteration, 16 digits, before the balance fix | 2 | 1.2e-8, 9.8e-9 |
+| global finer iteration, 16 digits | 0 | 1.0e-10, 1.2e-10 |
+| global finer iteration, 13 digits | 0 | 1.0e-10, 1.2e-10 |
+| local-search iteration, 16 digits, before the balance fix | 24 | 6.3e-7, 4.5e-7 |
+| local-search iteration, 16 digits | 1 | 2.7e-9, 1.5e-8 |
+
+Two CPU runs of the same iteration that differ only in the random seed read 1.2e-3 to 1.4e-3 on the same scale, so
+the chip path sits five to seven orders of magnitude inside the variation RELION has by itself.
+
+The gate for a whole refinement is `perf/rlx/fsc.py REF.mrc X.mrc --floor SEED.mrc`: the map against the CPU
+reference, shell by shell, beside the reference against a second CPU run with another seed. It passes when no shell
+up to the seed pair's own resolution is more than 0.02 under the pair.
+
+### Leaving small orientation sets to RELION
+
+`TT_RELION_MIN_ORI=<n>` declines a coarse call that brings fewer than n orientations, and the fine call that follows
+it on the same thread, so RELION's own kernel does that particle. A local search brings a few hundred orientations
+per particle and cannot fill a chip tile. Off by default (0).
