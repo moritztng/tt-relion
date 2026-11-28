@@ -161,6 +161,16 @@ def backproject(r):
     return real, imag, weight
 
 
+def post(r, parts, XA, AA):
+    """What RELION folds the per-pixel sums into: (sigma2_noise shells below the current size, their sum, scale XA,
+    scale AA). The shells above the current size are the image's own power spectrum and never depend on the sums."""
+    ires = r["Mresol_fine"].astype(np.int64)
+    in_shell = ires > -1
+    shells = np.bincount(ires[in_shell], parts[in_shell], r["image_current_size"] // 2 + 1)
+    scaled = in_shell & (r["data_vs_prior"][np.maximum(ires, 0)] > 3)
+    return shells, shells.sum(), XA[scaled].sum() / r["part_scale"], AA[scaled].sum() / r["part_scale"] ** 2
+
+
 def recorded_backprojection(r):
     """The record's sparse private volume as three dense float64 arrays."""
     n = r["bp_mdlX"] * r["bp_mdlY"] * r["bp_mdlZ"]
