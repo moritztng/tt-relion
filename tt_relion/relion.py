@@ -91,10 +91,11 @@ def _torch():
 
 
 def _project(t, mdl, x, y, e, mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
-             maxR2_padded, padding_factor):
+             maxR2_padded, padding_factor, inside=None):
     """AccProjectorKernel::project3Dmodel, the 2D-data overload, PROJECTOR_NO_TEXTURES.
 
-    e is [C, 9], x and y are [P]. Returns ref_real, ref_imag as [C, P].
+    e is [C, 9], x and y are [P]. Returns ref_real, ref_imag as [C, P]. inside: the radius test [C, P] decided
+    elsewhere (a float64 reference keeps RELION's float32 decision, which is a rule, not a rounding).
     """
     pf = padding_factor
     xp = (e[:, 0:1] * x + e[:, 1:2] * y) * pf
@@ -102,7 +103,8 @@ def _project(t, mdl, x, y, e, mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ,
     zp = (e[:, 6:7] * x + e[:, 7:8] * y) * pf
 
     # RELION truncates the radius test to int, so 4.9 becomes 4. trunc, not round and not floor.
-    inside = (xp * xp + yp * yp + zp * zp).trunc().to(t.int64) <= maxR2_padded
+    if inside is None:
+        inside = (xp * xp + yp * yp + zp * zp).trunc().to(t.int64) <= maxR2_padded
 
     # Hermitian pair for the negative-x half space.
     invers = xp < 0
