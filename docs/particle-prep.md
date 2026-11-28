@@ -37,6 +37,17 @@ CPU-only arms, 2 ranks of 8 threads on a 64-core host (load average 18 to 36):
 | global search (current size 158) | 5.08 to 5.88 ms | 1.12 ms | 0.91 to 0.97 ms |
 | local search (current size 176) | 4.92 to 4.96 ms | 1.19 ms | 0.96 to 1.00 ms |
 
+Inside a chip run the threads are busier and the same code costs more. One iteration of the 13,156 particle
+development set on 4 Blackhole chips, 5 ranks of 40 threads on the same host, same binary with the switch off and
+on (chip clock at least 1343 MHz in every one-second sample of both arms):
+
+| iteration | RELION's code | TTPrep | load average |
+|---|---|---|---|
+| global search (current size 158) | 7.47 ms | 1.76 ms | 87 to 97, 63 to 85 |
+
+All CPU of a rank fell from 36.0 to 31.3 ms per particle. Against the arm with the switch off, no particle changed
+its rotation, tilt or psi, one particle's origin moved by one pixel, and the half maps correlate to within 1e-11.
+
 FFTW's estimated plan for a 360 point transform is slow on this build (FFTW 3.3.8); a measured plan is about a
 third faster per transform. FFTW picks measured plans by timing, so two ranks that each measured would end up with
 different plans and round differently. TTPrep therefore measures once per box size and keeps the plans in a file,
