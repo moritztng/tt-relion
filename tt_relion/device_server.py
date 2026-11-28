@@ -47,6 +47,7 @@ def main():
     held_key, held = None, None
     res = None                          # the resident diff2 state of this chip, made on first use
     batchlog = os.environ.get("TT_RELION_BATCHLOG", "") not in ("", "0")
+    seen = {}                           # the op's phase seconds at the last batch line
     t_open, calls, client = time.time(), 0, {}
     up = mm = down = 0.0
     for line in sys.stdin:
@@ -99,6 +100,12 @@ def main():
             if batchlog:                # one line per batch: start, wall, the op's host and chip seconds so far, N R O P
                 print("TTB %.4f %.4f %.4f %.4f %d %d %d %d" % (t0, time.time() - t0, res.c["host_s"], res.c["dev_s"],
                                                              N, R, O, P), file=sys.stderr, flush=True)
+                # and this batch's own seconds: reading the request, then each phase of the op
+                ph = {k: v for k, v in res.c.items() if k.endswith("_s")}
+                print("TTP %d %d read_req=%.4f " % (N, P, t1 - t0) + " ".join(
+                    "%s=%.4f" % (k[:-2], v - seen.get(k, 0.0)) for k, v in ph.items() if v > seen.get(k, 0.0)),
+                    file=sys.stderr, flush=True)
+                seen = ph
             client = req.get("client", client)
             calls += 1
             reply.write("ok\n" if ncand is None else "ok %d\n" % ncand)
