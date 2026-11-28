@@ -185,7 +185,13 @@ being stacked and sent. Two things follow from it. The orientation set every par
 at 20,091 orientations) is compared bit for bit with the sets seen before and reused instead of being copied and
 hashed per particle (0.38 ms to 0.025 ms a particle on an idle host). And with `TT_RELION_YIELD_MS=<ms>` a thread
 whose result is in, or that brings a new particle, waits at most that long while a batch is on its way to a reserved
-chip. The knob is off by default until a RELION-called run has measured it.
+chip (default 250, 0 turns it off).
+
+Measured through RELION on one global iteration (two chips, `--j 192`, a host at load 70 to 130): the chip waits
+for the leader 141 ms a batch before either change, 86 ms with the set reuse alone and 30 ms with the gate, and the
+chips are busy 81 %, 86 % and 91 % of the E-step, with the same orientations in every row. Between these runs the
+E-step's wall moved with the host's load (the chip-busy time of a batch varied by 15 %), so the gain is read from the
+wait: 110 ms a batch on two chips is a tenth of that E-step.
 
 ### Leaving small orientation sets to RELION
 

@@ -849,7 +849,7 @@ _OWN_FORM = os.environ.get("TT_RELION_OWN_FORM", "") not in ("", "0")
 # when they ask: the chip waits on the server's host work, RELION's threads lose only the slices the server takes.
 # 0 (the default): off.
 _NICE = int(os.environ.get("TT_RELION_NICE", "0"))
-_YIELD = float(os.environ.get("TT_RELION_YIELD_MS", "0")) / 1e3
+_YIELD = float(os.environ.get("TT_RELION_YIELD_MS", "250")) / 1e3       # 0 = off
 _staging = [0]                      # leaders between a chip reserved and their batch sent to it
 _calm = threading.Condition(threading.Lock())
 

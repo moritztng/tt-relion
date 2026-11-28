@@ -3,7 +3,8 @@
 # TT_RELION_CAND_WINDOW) and/or as the dense block (arm D), same binary, same chips, resident path.
 # Needs a RELION built with relion5-tt.patch + relion5-tt-candidates.patch (RELION_BIN).
 # Env: SRC (tree under ~/rlx-bridge, default src-d), TAG (default ca1), ARMS (default "C"), WINDOW (default 40),
-# RLX_CHIP_LIST (default 12,13; one follower rank per chip), J (threads per rank, default 40), BATCH (default 32),
+# RLX_CHIP_LIST (default 12,13), KPR (chips per follower rank, default 1), J (threads per rank, default 40),
+# BATCH (default 32),
 # FROM / IT (state to continue and iteration to run, default the CPU reference's it015 -> 16),
 # CPU_STAR (the CPU arm's data.star of that iteration, for the pose grade), NOT_BEFORE / GIVE_UP / END_BY (epochs).
 # ~/rlx-bridge/STOP and ~/fleet/HANDBACK veto. Status: ~/rlx-bridge/runs/$TAG.status.
@@ -12,7 +13,7 @@ FROM=${FROM:-$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star}; IT=${IT:-16}; 
 CPU_STAR=${CPU_STAR:-$HOME/rlx-e2e/runs/dc2_N/run_it${it}_data.star}
 export RELION_BIN=${RELION_BIN:-$R/relion/build/bin/relion_refine_mpi}
 export PYTHONPATH=$R/$SRC:$HOME/fleet/env/lib/python3.10/site-packages TT_RELION_PYTHON=$PY
-export TT_METAL_INSPECTOR=0 RLX_CHIP_LIST=${RLX_CHIP_LIST:-12,13} RLX_CHIPS_PER_RANK=1
+export TT_METAL_INSPECTOR=0 RLX_CHIP_LIST=${RLX_CHIP_LIST:-12,13} RLX_CHIPS_PER_RANK=${KPR:-1}
 export RLX_LEASE_DIR=/tmp/tt-bio-device-leases RLX_LEASE_HOST=$(hostname)
 export TT_RELION_BACKEND=ttnn TT_RELION_RESIDENT=1 TT_RELION_BATCH=${BATCH:-32} TT_RELION_BATCH_ROWS=${ROWS:-1024} TT_RELION_BATCH_WAIT_MS=50
 export TT_RELION_BATCHLOG=1 TT_RELION_PROFILE=1
@@ -33,7 +34,7 @@ for arm in ${ARMS:-C}; do
   veto && { echo "veto $(date -u +%FT%TZ)" >> $S; exit 0; }
   if [ $arm = C ]; then export TT_RELION_CAND_WINDOW=${WINDOW:-40}; else unset TT_RELION_CAND_WINDOW; fi
   o=$R/runs/${TAG}_$arm; rm -rf $o; mkdir -p $o
-  setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 3000} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o $((NC + 1)) ${J:-40} \
+  setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 3000} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o $((NC / ${KPR:-1} + 1)) ${J:-40} \
     --continue $FROM --iter $IT --dont_combine_weights_via_disc --preread_images --pool ${POOL:-3} --o $o/run &
   p=$!
   ( while kill -0 $p 2>/dev/null; do sleep 15; [ -e $o/run_it${it}_data.star ] && { sleep 90; kill -INT -- -$p 2>/dev/null; break; }; done ) &
