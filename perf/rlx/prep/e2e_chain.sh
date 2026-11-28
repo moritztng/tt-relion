@@ -8,7 +8,7 @@
 # Arms never run into a booked whole-box window (~/fleet/HOLDER.windows), stop at ~/fleet/HANDBACK and start only
 # with $MINMEM GB of MemAvailable, so a neighbour's memory-bound run is not pushed over.
 # An arm whose line is already in the status file is skipped, so a restarted chain goes on where the last one stopped.
-# Env: PLAN (arms as tag:mode:iteration), SBIN, CHIPS (16,...,23; chip C in 16-23 is node C+8), MINMEM (150), R (~/rlx-prep), SRC (tree under $R, src-f), RELION_BIN, P (tag prefix, pe), GIVEUP (epoch), E2E (~/rlx-e2e/runs).
+# Env: PLAN (arms as tag:mode:iteration), SBIN, CHIPS (16,...,23; chip C in 16-23 is node C+8), MINMEM (150), R (~/rlx-prep), SRC (tree under $R, src-f; exported, iter_ab.sh takes its Python tree and run.sh from it), RELION_BIN, P (tag prefix, pe), GIVEUP (epoch), E2E (~/rlx-e2e/runs).
 R=${R:-$HOME/rlx-prep}; SRC=${SRC:-src-f}; P=${P:-pe}; S=$R/runs/$P.status; PY=${PY:-$HOME/fleet/env/bin/python}
 E2E=${E2E:-$HOME/rlx-e2e/runs}; CHIPS=${CHIPS:-16,17,18,19,20,21,22,23}; MINMEM=${MINMEM:-150}; NC=$(echo $CHIPS | tr , '\n' | wc -l); NODES=$(for c in ${CHIPS//,/ }; do echo -n "$((c + 8)) "; done)
 GIVEUP=${GIVEUP:-$(( $(date +%s) + 4 * 3600 ))}; W=$R/wisdom.360
