@@ -1,0 +1,152 @@
+diff --git a/src/acc/acc_projector_plan_impl.h b/src/acc/acc_projector_plan_impl.h
+index da117cf4..d7243639 100644
+--- a/src/acc/acc_projector_plan_impl.h
++++ b/src/acc/acc_projector_plan_impl.h
+@@ -25,6 +25,61 @@ using deviceStream_t = virtualSYCL*;
+ #endif
+ 
+ 
++// tt-relion (relion5-plan-cache). The coarse plan of a search without orientation priors does not depend on the
++// particle: setup() reads the sampling's angle tables and its perturbation, which directions of the class have a
++// non-zero pdf, the index ranges and the magnification matrix of the optics group. RELION builds it again for
++// every particle all the same (36,864 orientations and their Euler matrices at healpix order 3). Here the last
++// few such plans are kept together with every input they were built from, and a call whose inputs are the same
++// copies one. TT_RELION_PLAN_CACHE=0 turns this off;
++// =2 builds every reused plan again as well and stops the run if the two are not the same bits.
++#if !defined(_CUDA_ENABLED) && !defined(_HIP_ENABLED) && !defined(_SYCL_ENABLED)
++#define TT_PLAN_CACHE
++#include <atomic>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <tuple>
++struct TTCoarsePlan
++{
++	// perturbation, angular sampling, nr_dir, nr_psi, idir_min, idir_max, ipsi_min, ipsi_max, iclass, is_3D, inverse
++	typedef std::tuple<RFLOAT, RFLOAT, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long,
++			unsigned long, unsigned long, bool, bool> Scalars;
++	Scalars scalars;
++	std::vector<RFLOAT> rot, tilt, psi;          // the sampling's angle tables
++	std::vector<RFLOAT> left;                    // L_ when it is 3 x 3 (scale and anisotropy of the optics group)
++	std::vector<char> live;                      // pdf_direction > 0 for idir_min .. idir_max
++	std::vector<long unsigned> iorientclasses;   // what setup() made of the above
++	std::vector<XFLOAT> eulers;
++
++	template <typename T> static bool sameBits(const std::vector<T> &a, const std::vector<T> &b)
++	{
++		return a.size() == b.size() && (a.empty() || memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
++	}
++	bool builtFrom(const Scalars &sc, const std::vector<char> &lv, const std::vector<RFLOAT> &l,
++			const HealpixSampling &s) const
++	{
++		return scalars == sc && live == lv && sameBits(left, l) && sameBits(rot, s.rot_angles)
++				&& sameBits(tilt, s.tilt_angles) && sameBits(psi, s.psi_angles);
++	}
++	bool sameOutput(long unsigned n, const long unsigned *ioc, const XFLOAT *eul) const
++	{
++		return n == iorientclasses.size() && memcmp(ioc, iorientclasses.data(), n * sizeof(long unsigned)) == 0
++				&& memcmp(eul, eulers.data(), 9 * n * sizeof(XFLOAT)) == 0;
++	}
++};
++static struct TTPlanCache
++{
++	const int mode;
++	std::mutex mutex;
++	enum { SLOTS = 8 };                            // classes times optics groups in use at once
++	std::shared_ptr<const TTCoarsePlan> slot[SLOTS];
++	unsigned next;
++	std::atomic<unsigned long> checked;
++	TTPlanCache(): mode(getenv("TT_RELION_PLAN_CACHE") ? atoi(getenv("TT_RELION_PLAN_CACHE")) : 1), next(0), checked(0) {}
++} tt_plan_cache;
++#endif
++
+ void getOrientations(HealpixSampling &sampling, long int idir, long int ipsi, int oversampling_order,
+ 		std::vector<RFLOAT > &my_rot, std::vector<RFLOAT > &my_tilt, std::vector<RFLOAT > &my_psi,
+ 		std::vector<int> &pointer_dir_nonzeroprior, std::vector<RFLOAT> &directions_prior,
+@@ -124,6 +179,52 @@ void AccProjectorPlan::setup(
+ 		Matrix2D<RFLOAT> &L_,
+ 		Matrix2D<RFLOAT> &R_)
+ {
++#ifdef TT_PLAN_CACHE
++	// Only the coarse pass of a search without priors is the same for every particle. R_ is set for multi-body
++	// refinement alone, where L_ changes with the particle too.
++	const bool tt_shared = tt_plan_cache.mode > 0 && coarse && orientational_prior_mode == NOPRIOR
++			&& !do_skip_align && !do_skip_rotate && current_oversampling == 0 && nr_oversampled_rot == 1
++			&& pointer_dir_nonzeroprior.empty() && pointer_psi_nonzeroprior.empty()
++			&& !(R_.mdimx == 3 && R_.mdimy == 3)
++			&& idir_min <= idir_max && idir_max < MULTIDIM_SIZE(pdf_direction[iclass]);
++	TTCoarsePlan::Scalars tt_scalars;
++	std::vector<char> tt_live;
++	std::vector<RFLOAT> tt_left;
++	std::shared_ptr<const TTCoarsePlan> tt_plan;
++	if (tt_shared)
++	{
++		tt_scalars = TTCoarsePlan::Scalars(sampling.random_perturbation, sampling.getAngularSampling(), nr_dir, nr_psi,
++				idir_min, idir_max, ipsi_min, ipsi_max, iclass, sampling.is_3D, inverseMatrix);
++		for (unsigned long idir = idir_min; idir <= idir_max; idir++)
++			tt_live.push_back(DIRECT_MULTIDIM_ELEM(pdf_direction[iclass], idir) > 0.);
++		if (L_.mdimx == 3 && L_.mdimy == 3)
++			tt_left.assign(L_.mdata, L_.mdata + 9);
++		std::shared_ptr<const TTCoarsePlan> kept[TTPlanCache::SLOTS];
++		{
++			std::lock_guard<std::mutex> lock(tt_plan_cache.mutex);
++			for (int i = 0; i < TTPlanCache::SLOTS; i++)
++				kept[i] = tt_plan_cache.slot[i];
++		}
++		for (int i = 0; i < TTPlanCache::SLOTS && !tt_plan; i++)
++			if (kept[i] && kept[i]->builtFrom(tt_scalars, tt_live, tt_left, sampling))
++				tt_plan = kept[i];
++		if (tt_plan && tt_plan_cache.mode != 2)
++		{
++			orientation_num = tt_plan->iorientclasses.size();
++			iorientclasses.freeIfSet();
++			iorientclasses.setSize(orientation_num);
++			iorientclasses.hostAlloc();
++			memcpy(~iorientclasses, tt_plan->iorientclasses.data(), orientation_num * sizeof(long unsigned));
++			iorientclasses.putOnDevice();
++			eulers.freeIfSet();
++			eulers.setSize(orientation_num * 9);
++			eulers.hostAlloc();
++			memcpy(~eulers, tt_plan->eulers.data(), orientation_num * 9 * sizeof(XFLOAT));
++			eulers.deviceAlloc();
++			return;
++		}
++	}
++#endif
+ 	TIMING_TIC(TIMING_TOP);
+ 
+ 	std::vector< RFLOAT > oversampled_rot, oversampled_tilt, oversampled_psi;
+@@ -411,6 +512,32 @@ void AccProjectorPlan::setup(
+ 	eulers.streamSync();
+ #endif
+ 
++#ifdef TT_PLAN_CACHE
++	if (tt_shared && tt_plan)
++	{
++		// TT_RELION_PLAN_CACHE=2: this call would have been a copy of tt_plan
++		if (!tt_plan->sameOutput(orientation_num, ~iorientclasses, ~eulers))
++			REPORT_ERROR("tt-relion plan cache: a plan built again from the same inputs is not the same bits");
++		const unsigned long n = ++tt_plan_cache.checked;
++		if ((n & (n - 1)) == 0)   // at 1, 2, 4, ... so a long run says it a few times
++			std::cerr << "tt-relion plan cache: " << n << " reused plans built again, all the same bits" << std::endl;
++	}
++	else if (tt_shared && orientation_num > 0)
++	{
++		std::shared_ptr<TTCoarsePlan> made = std::make_shared<TTCoarsePlan>();
++		made->scalars = tt_scalars;
++		made->live = tt_live;
++		made->left = tt_left;
++		made->rot = sampling.rot_angles;
++		made->tilt = sampling.tilt_angles;
++		made->psi = sampling.psi_angles;
++		made->iorientclasses.assign(~iorientclasses, ~iorientclasses + orientation_num);
++		made->eulers.assign(~eulers, ~eulers + 9 * orientation_num);
++		std::lock_guard<std::mutex> lock(tt_plan_cache.mutex);
++		tt_plan_cache.slot[tt_plan_cache.next++ % TTPlanCache::SLOTS] = made;
++	}
++#endif
++
+ 	TIMING_TOC(TIMING_TOP);
+ }
+ 
