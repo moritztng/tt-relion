@@ -33,7 +33,7 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_IGN)    # a stopped run closes stdin: the loop ends and the totals print
     reply = os.fdopen(os.dup(1), "w", buffering=1)
     os.dup2(2, 1)                       # library chatter goes to stderr, never into the protocol
-    from multiprocessing import resource_tracker, shared_memory
+    from multiprocessing import shared_memory
 
     import numpy as np
     import torch
@@ -57,7 +57,7 @@ def main():
             if shm is not None:
                 shm.close()
             shm = shared_memory.SharedMemory(name=req["shm"])
-            resource_tracker.unregister(shm._name, "shared_memory")   # the bridge owns it
+            shm.unlink()        # both sides have it mapped: the memory now goes with the two processes, however they end
         if req.get("op") == "d2":
             if res is None:
                 from tt_relion.resident import Resident
