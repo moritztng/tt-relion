@@ -164,7 +164,8 @@ chunks of 1,024 pixels: the coarse pass goes from two chunks to one, the fine pa
 
 Replay of 160 recorded calls on one chip against float64 (`perf/rlx/bridge/replay.py`, 13 digits, batch 32, AICLK
 1,343 to 1,350): the best pose and the significant set agree for 160 of 160 calls with the drop and without, global
-iteration and local iteration alike, and the largest error is 1.0e-3 in both. Chip seconds for the 160 calls: 5.2
+iteration and local iteration alike. The largest error with the drop is 1.0e-3 (global iteration without it:
+0.9e-3). Chip seconds for the 160 calls: 5.2
 with the drop against 11.0 without (global, iteration 16), 4.3 against 5.2 (local, iteration 24).
 
 ### Waking the threads
