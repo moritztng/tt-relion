@@ -92,13 +92,14 @@ def grade(name, d):
 
 
 grade("once", res.d2(eul, xr, xi, w, tx, ty, x, y))            # first call: includes the kernel builds
-res.t = {}
+phases = lambda c0, n=1: {k: round((v - c0[k]) / n, 4) for k, v in res.c.items() if k.endswith("_s")}  # noqa: E731
+c0 = dict(res.c)
 t0 = time.perf_counter()
 res.d2(eul, xr, xi, w, tx, ty, x, y)
 rec["once_s"] = time.perf_counter() - t0
-rec["once_phases"], res.t = {k: round(v, 4) for k, v in res.t.items()}, {}
+rec["once_phases"] = phases(c0)
 vary = []                                       # unheld calls on set sizes the chip has not seen (a fine pass)
-for O, T in ((a.O - 300, a.T), (a.O - 700, a.T - 4), (a.O - 301, a.T - 5), (a.O - 699, a.T - 1)):
+for O, T in ((a.O - a.O // 15, a.T), (a.O - a.O // 7, max(1, a.T - 4)), (a.O - a.O // 15 - 1, max(1, a.T - 5)), (a.O - a.O // 7 + 1, a.T - 1)):
     t0 = time.perf_counter()
     d = res.d2(eul[:O], xr, xi, w, tx[:, :T], ty[:, :T], x, y)
     vary.append(round(time.perf_counter() - t0, 4))
@@ -106,7 +107,7 @@ for O, T in ((a.O - 300, a.T), (a.O - 700, a.T - 4), (a.O - 301, a.T - 5), (a.O 
 rec["vary_s"] = vary
 held = res.d2(eul, xr, xi, w, tx, ty, x, y, ref_key="it")
 grade("held_first", held)
-res.t = {}
+c0 = dict(res.c)
 clk = Clock(nodes)
 ts = []
 for _ in range(a.reps):
@@ -114,7 +115,7 @@ for _ in range(a.reps):
     again = res.d2(eul, xr, xi, w, tx, ty, x, y, ref_key="it")
     ts.append(time.perf_counter() - t0)
 rec["aiclk_min_med"] = clk.stop()
-rec["held_phases"] = {k: round(v / a.reps, 4) for k, v in res.t.items()}
+rec["held_phases"] = phases(c0, a.reps)
 rec["load1"] = float(open("/proc/loadavg").read().split()[0])
 grade("held_again", again)
 rec["held_same"] = bool((again == held).all())
