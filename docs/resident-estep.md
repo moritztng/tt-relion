@@ -99,23 +99,60 @@ failure degrades to the CPU path instead of failing the run.
 ### Parity of the RELION-called path
 
 The chip op is checked against float64 on synthetic operands (`perf/rlx/resident/d2_parity.py`), and that is not
-enough. Two defects passed it and were found only when RELION called the op on real data: the chip kept the radius cut
-of the coarse pass for the fine pass's references (the model is uploaded once, the cut belongs to the pass), and 13
-base-4 digits per operand were too few for a real spectrum, where a few low-frequency columns set the scale of a row.
-Together they changed the pose of one particle in eight in a single iteration.
+enough. Two defects passed it and were found only when RELION called the op on real data. The chip kept the radius cut
+of the coarse pass for the fine pass's references (the model is uploaded once, the cut belongs to the pass). And the
+balance along K left a column unscaled when every reference of the set is zero there, which is every pixel outside
+the projection radius, about a fifth of the image. Those columns then set the row exponent, up to 1e5 above the
+largest entry that multiplies anything, and half the digits were spent on them: the squared difference came out
+0.2-0.4 too small at 16 digits and 6 at 13. Together the two changed the pose of one particle in eight in a single
+iteration. The balance now gives such a column the scale zero, which is exact.
 
 So the gate for this path is the recorded call stream: `TT_RELION_RECORD` writes what a rank asked the bridge, and
 `perf/rlx/bridge/replay_gate.sh` replays it on a chip and compares every call with the CPU digest of the same record,
-coarse and fine pass apart (a mixed count hides a broken pass: 122 of 160 looks like noise, 43 of 80 does not). On a
-recorded global finer iteration (80 coarse and 80 fine calls):
+coarse and fine pass apart (a mixed count hides a broken pass: 122 of 160 looks like noise, 43 of 80 does not). The
+CPU digest is float32, like RELION, so it cannot say which side is off when the two differ. `perf/rlx/bridge/ref64.py`
+recomputes the record in float64 and `replay.py --ref` grades against that: the largest error on the samples that
+carry 99.9 % of a particle's weight, its mean (a bias common to a call cancels in the weights), its spread within a
+call (which does not), and the weight of the samples that are in one significant set and not the other.
+`perf/rlx/bridge/cut_emul.py` forms the two products of a recorded call on the CPU the way the chip does and splits
+the error into the cross and the norm term, per digit count.
 
-| digits | coarse: same argmin / same significant set / max error | fine |
+Largest error against float64 on a recorded global finer iteration and a recorded local-search iteration (80 coarse
+and 80 fine calls each, squared differences near 1,050 / 9,800 and 12,100):
+
+| | global coarse | global fine | local coarse | local fine | significant sets |
+|---|---|---|---|---|---|
+| RELION's arithmetic (float32 CPU arm) | 0.0001 | 0.0019 | 0.002 | 0.002 | 320 / 320 |
+| chip, 16 digits, before the balance fix | 0.0039 | 0.29 | 0.40 | 0.42 | 317 / 320 |
+| chip, 16 digits | 0.00008 | 0.0009 | 0.0005 | 0.0010 | 320 / 320 |
+| chip, 13 digits | 0.0010 | 0.0011 | 0.0007 | 0.0011 | 320 / 320 |
+| chip, 11 digits | 0.0015 | 0.0051 | 0.0043 | 0.0085 | 320 / 320 |
+
+At 13 digits the op is at the float32 floor of its operands. The device server runs 16 digits (`TT_RELION_DIGITS`)
+until 13 is graded through RELION on both iteration types. Run the gate after every change to the op, the bridge or
+the batch form, then grade one iteration through RELION against the CPU arm continued from the same state
+(`perf/rlx/iter_ab.sh`): `star_cmp.py` counts the particles whose pose differs and
+`d32_cmp.py` correlates each half map with the CPU arm's.
+
+One iteration of the 13,156-particle dev cell through RELION on 8 chips, against the CPU arm:
+
+| | poses that differ (Rot) | half maps, 1 - correlation |
 |---|---|---|
-| 13 | 79 / 80 / 0.26 | 79 / 78 / 9.2 |
-| 14 | 80 / 80 / 0.063 | 79 / 80 / 3.2 |
-| 15 | 80 / 80 / 0.011 | 79 / 79 / 0.84 |
-| 16 | 80 / 80 / 0.004 | 80 / 80 / 0.31 |
+| global finer iteration, 16 digits, before the balance fix | 2 | 1.2e-8, 9.8e-9 |
+| global finer iteration, 16 digits | 0 | 1.0e-10, 1.2e-10 |
+| global finer iteration, 13 digits | 0 | 1.0e-10, 1.2e-10 |
+| local-search iteration, 16 digits, before the balance fix | 24 | 6.3e-7, 4.5e-7 |
+| local-search iteration, 16 digits | 1 | 2.7e-9, 1.5e-8 |
 
-The error is on a squared difference near 1,050 (coarse) and 9,800 (fine). The device server runs 16 digits
-(`TT_RELION_DIGITS`). Run the gate after every change to the op, the bridge or the batch form, then grade one
-iteration through RELION against the CPU arm continued from the same state (`perf/rlx/iter_ab.sh`, `star_cmp.py`).
+Two CPU runs of the same iteration that differ only in the random seed read 1.2e-3 to 1.4e-3 on the same scale, so
+the chip path sits five to seven orders of magnitude inside the variation RELION has by itself.
+
+The gate for a whole refinement is `perf/rlx/fsc.py REF.mrc X.mrc --floor SEED.mrc`: the map against the CPU
+reference, shell by shell, beside the reference against a second CPU run with another seed. It passes when no shell
+up to the seed pair's own resolution is more than 0.02 under the pair.
+
+### Leaving small orientation sets to RELION
+
+`TT_RELION_MIN_ORI=<n>` declines a coarse call that brings fewer than n orientations, and the fine call that follows
+it on the same thread, so RELION's own kernel does that particle. A local search brings a few hundred orientations
+per particle and cannot fill a chip tile. Off by default (0).
