@@ -62,7 +62,7 @@ class Resident:
         self.pixsets = {}       # key -> (pixel coordinates on the chip, P, NC)
         self.model_key = self.ref_key = None
         self.refs = []          # per orientation chunk: dict(O, B, B2) before the first batch, digits after
-        self.bal = None         # (e, e2): the K-diagonal balance exponents of the held reference set
+        self.bal = None         # the K-diagonal balance of the held reference set, image side, per product
         # where a batch's wall goes: operand build on the host, then the chip (dev_s, split into its phases with
         # the device synchronised at each mark), and how full the row tile was (rows used of rows computed)
         self.c = dict(host_s=0.0, dev_s=0.0, proj_s=0.0, refdig_s=0.0, imgdig_s=0.0, prod_s=0.0, read_s=0.0,
@@ -176,12 +176,13 @@ class Resident:
 
     def _balance(self, refs, ma, ma2):
         """Exact power-of-two rebalance along K, A diag(d) and diag(1/d) B: the weights peak at high frequency and
-        the reference at low, so without it the digits are spent on the mismatch. Then the reference digits."""
+        the reference at low, so without it the digits are spent on the mismatch. Cuts the reference digits and
+        returns diag(d) for both products."""
         def ex(mb, m):
             ok = (m > 0) & (mb > 0)
             return np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mb, 1)) - np.log2(np.where(ok, m, 1)))), 0).astype(int)
-        e = ex(np.max([self._colmax(r["B"]) for r in refs], 0), ma)
-        e2 = ex(np.max([self._colmax(r["B2"]) for r in refs], 0), ma2)
+        mb, mb2 = (np.max([self._colmax(r[k]) for r in refs], 0) for k in ("B", "B2"))
+        e, e2 = ex(mb, ma), ex(mb2, ma2)
         for r in refs:
             Op = -(-r["O"] // OBLK) * OBLK
             for name, ee in (("B", e), ("B2", e2)):
@@ -192,7 +193,9 @@ class Resident:
                 for t in (s, Xb, r[name]):
                     ttnn.deallocate(t)
                 del r[name]
-        return e, e2
+        # the image side of the balance. A pixel no reference of the set reaches (outside the projection's radius)
+        # adds nothing to either product, but left in, unbalanced, it sets the row's exponent: zero it
+        return [(np.ldexp(1.0, ee) * (m > 0)).astype(np.float32) for ee, m in ((e, mb), (e2, mb2))]
 
     # ---- one batch -----------------------------------------------------------------------------------------
     def _product(self, Ad, ea, rows, r, name):
@@ -260,16 +263,16 @@ class Resident:
 
         held = ref_key is not None and ref_key == self.ref_key
         if held:
-            refs, (e, e2) = self.refs, self.bal
+            refs, (s, s2) = self.refs, self.bal
         else:
             refs = self._project(np.asarray(eul, np.float32).reshape(-1, 9))
             t0 = self._mark("proj_s", t0)
-            e, e2 = self._balance(refs, _amax(A, 0), _amax(A2, 0))
+            s, s2 = self._balance(refs, _amax(A, 0), _amax(A2, 0))
             t0 = self._mark("refdig_s", t0)
             if ref_key is not None:
                 self._drop_refs()
-                self.refs, self.bal, self.ref_key = refs, (e, e2), ref_key
-        A, A2 = np.ldexp(A, e, out=A), np.ldexp(A2, e2)        # exact in fp32
+                self.refs, self.bal, self.ref_key = refs, (s, s2), ref_key
+        A, A2 = np.multiply(A, s, out=A), A2 * s2               # powers of two: exact in fp32
         ea, ea2 = _exp(_amax(A, 1)), _exp(_amax(A2, 1))
         tA, tA2 = self._put(A), self._put(np.pad(A2, ((0, min(-len(A2) % RUP, nb - len(A2))), (0, 0))))
         Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb, self.n2)
