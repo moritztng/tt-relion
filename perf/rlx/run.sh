@@ -7,6 +7,8 @@ out=$1 n=$2 j=$3; shift 3
 mkdir -p "$out"
 # One torch thread per bridge: RELION already runs ranks x --j threads on every core.
 export TT_RELION_TORCH_THREADS=${TT_RELION_TORCH_THREADS:-1}
+# A one-iteration arm is stopped from outside and never prints the profiler's exit table: keep it in a file per rank.
+[ -n "${TT_RELION_PROFILE:-}" ] && export TT_RELION_PROFILE_FILE=${TT_RELION_PROFILE_FILE:-$out/prof}
 here=$(cd "$(dirname "$0")" && pwd)
 # Columns follow the glob (lexicographic: 0 1 10 11 ..), so the first line names the node of each column.
 ( printf 't'; for f in /sys/class/tenstorrent/*/tt_aiclk; do d=${f%/tt_aiclk}; printf '\t%s' "${d##*[!0-9]}"; done; echo
