@@ -28,6 +28,8 @@ import time
 
 
 def main():
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)    # a stopped run closes stdin: the loop ends and the totals print
     reply = os.fdopen(os.dup(1), "w", buffering=1)
     os.dup2(2, 1)                       # library chatter goes to stderr, never into the protocol
     from multiprocessing import resource_tracker, shared_memory
