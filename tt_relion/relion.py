@@ -271,7 +271,7 @@ def _server():
                 for s in _srv:
                     q.put(s)
                 _free = q
-    s = _free.get()
+    s = _tl.__dict__.pop("reserved", None) or _free.get()
     _tl.srv = s
     return s
 
@@ -644,7 +644,8 @@ _gcv = threading.Condition()
 
 
 def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num):
-    """Queue this particle with its group; the first waiter with no active leader leads a batch."""
+    """Queue this particle with its group. One waiter at a time collects a batch; it hands the lead on when it
+    cuts the batch, so batches run side by side on a rank's chips and the queue fills behind a busy chip."""
     import hashlib
     eul = np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9).copy()
     key = (_model_key(mdl_mv), geom)
@@ -653,7 +654,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
             "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
             "ir": np.frombuffer(re_mv, dtype=np.float32).copy(),
             "ii": np.frombuffer(im_mv, dtype=np.float32).copy(),
-            "w": np.frombuffer(corr_mv, dtype=np.float32).copy(), "out": None, "err": None}
+            "w": np.frombuffer(corr_mv, dtype=np.float32).copy(), "out": None, "err": None, "cut": False}
     with _gcv:
         g = _groups.setdefault(key, {"q": [], "led": False})
         g["q"].append(item)
@@ -661,13 +662,23 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
         while True:
             if item["out"] is not None or item["err"] is not None:
                 break
-            if not g["led"]:
+            if not g["led"] and not item["cut"]:
                 g["led"] = True
                 deadline = time.time() + _BATCH_WAIT
                 while len(g["q"]) < _BATCH and time.time() < deadline:
                     _gcv.wait(deadline - time.time())
+                if _BACKEND == "ttnn":              # keep collecting until one of the rank's chips is idle
+                    _gcv.release()
+                    try:
+                        _tl.reserved = _server()
+                    finally:
+                        _gcv.acquire()
                 batch = g["q"][:_BATCH]
                 del g["q"][:_BATCH]
+                for b in batch:
+                    b["cut"] = True
+                g["led"] = False                    # the next batch collects while this one runs
+                _gcv.notify_all()
                 _gcv.release()
                 try:
                     same = all(b["eh"] == batch[0]["eh"] for b in batch)
@@ -692,10 +703,12 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     for b in batch:
                         b["err"] = exc
                 finally:
+                    s = _tl.__dict__.pop("reserved", None)
+                    if s is not None:               # the batch failed before it reached the chip
+                        _free.put(s)
                     _gcv.acquire()
-                    g["led"] = False
-                    if not g["q"]:
-                        _groups.pop(key, None)
+                    if not g["q"] and not g["led"] and _groups.get(key) is g:
+                        del _groups[key]
                     _gcv.notify_all()
             else:
                 _gcv.wait()
