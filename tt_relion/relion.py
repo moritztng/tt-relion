@@ -830,6 +830,22 @@ _TILE_ROWS = 512
 _OWN_FORM = os.environ.get("TT_RELION_OWN_FORM", "") not in ("", "0")
 
 
+# TT_RELION_NICE=<n>: a RELION --j thread lowers its own priority by n once it has been through a batch. The device
+# server is a process of its own, started before that, so it and its operand threads keep theirs and get a core
+# when they ask: the chip waits on the server's host work, RELION's threads lose only the slices the server takes.
+# 0 (the default): off.
+_NICE = int(os.environ.get("TT_RELION_NICE", "0"))
+
+
+def _be_nice():
+    if _NICE > 0 and _srv and not getattr(_tl, "niced", False):
+        _tl.niced = True
+        try:
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), _NICE)     # Linux: this thread alone
+        except OSError:
+            pass
+
+
 def _take(q):
     """How many particles from the head of the queue make the next batch, and whether that batch is full."""
     n, rows, cum, full = 0, 0, [], False
@@ -979,6 +995,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                         del _groups[key]
             else:
                 item["cv"].wait(1.0)                # woken for its result or to lead; the timeout is a net only
+    _be_nice()
     if item["err"] is not None:
         raise item["err"]
     return item["out"]
