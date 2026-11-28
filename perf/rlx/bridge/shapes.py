@@ -32,4 +32,7 @@ for path in sys.argv[1:]:
                       distinct_euler_sets=len({r["eul"] for r in c}), gap_s=q(gap[~np.isnan(gap)]),
                       gap_sum_s=round(float(np.nansum(gap)), 2), in_call_s=q([r["t1"] - r["t0"] for r in c]),
                       in_call_sum_s=round(sum(r["t1"] - r["t0"] for r in c), 2))
+        if k == "F":        # the translations and orientations the fine pass actually asks for
+            out[k]["T_asked"] = q([len(np.unique(np.frombuffer(r["mv"][6], np.uint64))) for r in c])
+            out[k]["O_asked"] = q([len(np.unique(np.frombuffer(r["mv"][5], np.uint64))) for r in c])
     print(json.dumps(out))
