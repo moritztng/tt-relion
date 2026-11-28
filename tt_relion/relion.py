@@ -411,6 +411,19 @@ def _support(x, y, corr):
     return None if keep.all() or not keep.any() else np.flatnonzero(keep)
 
 
+_eul_seen = [None, None]
+
+
+def _eul_hex(eul):
+    """sha256 of a shared orientation set; the array the last batch brought is not hashed again."""
+    import hashlib
+    last, hx = _eul_seen
+    if last is not eul:
+        hx = hashlib.sha256(eul.tobytes()).hexdigest()
+        _eul_seen[:] = [eul, hx]
+    return hx
+
+
 def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared, prior=None, own=None):
     """diff2 [R, O] from the resident chip op, row r = particle pn[r] at (tx[r], ty[r]). shared: the orientation set
     is the iteration's (a global coarse pass), so the chip keeps its projections; otherwise it is this call's own and
@@ -426,7 +439,7 @@ def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared
     s = _server()
     try:
         return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty), f32(pn),
-                    "%s.%s.%d.%s.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size,
+                    "%s.%s.%d.%s.%d" % (model[0], _eul_hex(eul), x.size,
                                         hashlib.sha256(x.tobytes() + y.tobytes()).hexdigest()[:16], geom[5]) if shared else None,
                     None if prior is None else (f32(prior[0]), f32(prior[1]), float(prior[2]), _CAND_CAP), own)
     finally:
@@ -885,18 +898,46 @@ def _book_cpu(k, c0):
         _cpu[k] += time.thread_time() - c0
 
 
+_sets = {"kept": [], "new": []}     # orientation sets (eul, lo, digest): the ones seen again, the ones seen once
+
+
+def _bits(a, b):
+    return a.shape == b.shape and np.array_equal(a.view(np.uint32), b.view(np.uint32))
+
+
+def _orient(eul_mv, orientation_num, lo):
+    """-> (eul [O, 9], lo [O] or None, digest of both), never written to after. Every particle of a global pass
+    brings the same set and priors (723 KB at 20,091 orientations): a set equal bit for bit to one seen before gives
+    that one's arrays and digest back instead of being copied and hashed again."""
+    import hashlib
+    eul = np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9)
+    lo = None if lo is None else np.ascontiguousarray(lo, np.float32)
+    for tier in ("kept", "new"):
+        for ent in list(_sets[tier]):
+            if _bits(ent[0], eul) and (ent[1] is None) == (lo is None) and (lo is None or _bits(ent[1], lo)):
+                if tier == "new":           # seen twice: sets that come once (a fine pass's) cannot push it out
+                    with _lock:
+                        _sets["new"] = [e for e in _sets["new"] if e is not ent]
+                        _sets["kept"] = ([ent] + [e for e in _sets["kept"] if e is not ent])[:4]
+                return ent
+    eul = eul.copy()
+    lo = None if lo is None else np.array(lo, np.float32)
+    ent = (eul, lo, hashlib.sha256(eul.tobytes() + (b"" if lo is None else lo.tobytes())).digest())
+    with _lock:
+        _sets["new"] = ([ent] + _sets["new"])[:8]
+    return ent
+
+
 def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num, prior=None):
     """Queue this particle with its group. One waiter at a time collects a batch; it hands the lead on when it
     cuts the batch, so batches run side by side on a rank's chips and the queue fills behind a busy chip.
 
     prior = (lo [O], lt [T], window): the candidate form. The particle then gets (orientation int32, translation
     int32, delta float32, best) for its samples within window of its best instead of its [T, O] rows."""
-    import hashlib
-    eul = np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9).copy()
+    eul, lo, eh = _orient(eul_mv, orientation_num, None if prior is None else prior[0])
     key = (_model_key(mdl_mv), geom, None if prior is None else float(prior[2]))
-    lo, lt = (None, None) if prior is None else (np.array(prior[0], np.float32), np.array(prior[1], np.float32))
-    item = {"eul": eul, "eh": hashlib.sha256(eul.tobytes() + (b"" if lo is None else lo.tobytes())).digest(),
-            "lo": lo, "lt": lt,
+    lt = None if prior is None else np.array(prior[1], np.float32)
+    item = {"eul": eul, "eh": eh, "lo": lo, "lt": lt,
             "tx": np.frombuffer(tx_mv, dtype=np.float32).copy(),
             "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
             "ir": np.frombuffer(re_mv, dtype=np.float32).copy(),

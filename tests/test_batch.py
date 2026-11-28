@@ -467,3 +467,28 @@ def test_a_waiting_particle_is_woken_for_its_result_or_the_lead_only(monkeypatch
     # a particle sleeps once for its result and at most once more before it leads; a leader once per arrival
     assert wakes[0] <= 4 * n * rounds, wakes[0]
     assert not relion._groups
+
+
+def test_an_orientation_set_seen_before_is_not_copied_and_hashed_again():
+    from tt_relion import relion
+    relion._sets["kept"], relion._sets["new"] = [], []
+    rng = np.random.default_rng(0)
+    big = rng.standard_normal((500, 9)).astype(np.float32)
+    lo = rng.standard_normal(500).astype(np.float32)
+    first = relion._orient(memoryview(big.tobytes()), 500, lo.astype(np.float64))
+    again = relion._orient(memoryview(big.copy().tobytes()), 500, lo.copy())
+    assert again[0] is first[0] and again[1] is first[1] and again[2] == first[2]
+    assert np.array_equal(first[0], big) and np.array_equal(first[1], lo)
+    for k in range(40):                         # sets that come once (a fine pass's) do not push it out
+        relion._orient(memoryview(rng.standard_normal((30, 9)).astype(np.float32).tobytes()), 30, None)
+    assert relion._orient(memoryview(big.tobytes()), 500, lo)[0] is first[0]
+    other = big.copy()
+    other[499, 8] = np.nextafter(other[499, 8], np.float32(9))      # one bit apart is another set
+    third = relion._orient(memoryview(other.tobytes()), 500, lo)
+    assert third[0] is not first[0] and third[2] != first[2]
+    assert relion._orient(memoryview(big.tobytes()), 500, None)[2] != first[2]          # no priors: another key
+    lo2 = lo.copy()
+    lo2[0] += 1
+    assert relion._orient(memoryview(big.tobytes()), 500, lo2)[2] != first[2]
+    import hashlib
+    assert first[2] == hashlib.sha256(big.tobytes() + lo.tobytes()).digest()             # the digest it had before
