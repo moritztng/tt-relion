@@ -187,11 +187,12 @@ if a.digest:
     np.savez(a.digest, arg_min=arg_min, d_min=d_min, n_sig=n_sig, h_sig=h_sig, handled=handled)
 if a.ref and os.path.exists(a.ref):
     ref = np.load(a.ref)
-    ok = handled & ref["handled"]
+    m = min(n, len(ref["handled"]))                 # a reference may cover only the first calls of the record
+    ok = handled[:m] & ref["handled"][:m]
     res.update(ref=os.path.basename(a.ref), compared=int(ok.sum()),
-               same_argmin=int((arg_min == ref["arg_min"])[ok].sum()),
-               same_set=int((h_sig == ref["h_sig"])[ok].sum()),
-               max_dmin_err=float(np.abs(d_min - ref["d_min"])[ok].max()) if ok.any() else None)
+               same_argmin=int((arg_min[:m] == ref["arg_min"][:m])[ok].sum()),
+               same_set=int((h_sig[:m] == ref["h_sig"][:m])[ok].sum()),
+               max_dmin_err=float(np.abs(d_min[:m] - ref["d_min"][:m])[ok].max()) if ok.any() else None)
 with open(a.out, "a") as fh:
     fh.write(json.dumps(res) + "\n")
 print(json.dumps(res))
