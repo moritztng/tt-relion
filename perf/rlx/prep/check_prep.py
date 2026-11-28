@@ -10,7 +10,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 from tt_relion.prep import read_record, reference
 
-KEYS = ["Fimg_nomask", "Fimg", "power", "highres_Xi2"]
+KEYS = ["Fimg_nomask", "Fimg", "Fctf", "power", "highres_Xi2"]
 
 
 def rel(a, b):
@@ -37,5 +37,5 @@ for d, recs in zip(sys.argv[1:], arms):
     print(f"{d} worst of {len(recs)} vs float64: " + " ".join(f"{k} {worst[k]:.2e}" for k in KEYS))
 if len(arms) == 2:
     both = sorted(set(arms[0]) & set(arms[1]))
-    worst = {k: max([rel(arms[0][p][k], arms[1][p][k]) for p in both] or [0.0]) for k in KEYS + ["Fctf"]}
+    worst = {k: max([rel(arms[0][p][k], arms[1][p][k]) for p in both] or [0.0]) for k in KEYS}
     print(f"arm vs arm on {len(both)} shared particles: " + " ".join(f"{k} {v:.2e}" for k, v in worst.items()))

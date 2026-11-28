@@ -2,7 +2,8 @@
 
 Computed from a record's inputs alone (tt_prep.h, TT_RELION_RECORD_PREP), so it grades RELION's own path and the
 TTPrep path against the same numbers. The image is taken as the float32 values the kernels see; everything
-after that is float64. The CTF is not here yet.
+after that is float64. The CTF is CTF::initialise + getCTF for a plain optics group (no magnification matrix,
+no even Zernike terms, no CTF padding).
 """
 import numpy as np
 
@@ -70,13 +71,50 @@ def power(F, cur):
     return spectrum, spectrum[cur // 2 + 1:].sum()
 
 
+def ctf(rec):
+    """The CTF on the cur x (cur/2+1) window; frequencies are in units of the full box."""
+    if rec["ctf_padding"]:
+        raise NotImplementedError("CTF padding")
+    n, cur = rec["img"].shape[0], int(rec["current_size"])
+    if not rec["ctf_correction"]:
+        return np.ones((cur, cur // 2 + 1))
+    kv = rec["ctf_kV"] * 1e3
+    lam = 12.2643247 / np.sqrt(kv * (1 + kv * 0.978466e-6))
+    k1, k2 = np.pi * lam, np.pi / 2 * rec["ctf_Cs"] * 1e7 * lam ** 3
+    k3 = np.arctan(rec["ctf_Q0"] / np.sqrt(1 - rec["ctf_Q0"] ** 2))
+    k5 = np.deg2rad(rec["ctf_phase_shift"])
+    az = np.deg2rad(rec["ctf_angle"])
+    u, v = rec["ctf_defU"], rec["ctf_defV"]
+    axx = -(u * np.cos(az) ** 2 + v * np.sin(az) ** 2)
+    axy = (v - u) * np.sin(az) * np.cos(az)
+    ayy = -(u * np.sin(az) ** 2 + v * np.cos(az) ** 2)
+    ox = cur // 2 + 1
+    i = np.arange(cur)[:, None]
+    y = np.where(i < ox, i, i - cur) / (n * rec["angpix"])
+    x = np.arange(ox)[None, :] / (n * rec["angpix"])
+    u2 = x * x + y * y
+    gamma = k1 * (axx * x * x + 2 * axy * x * y + ayy * y * y) + k2 * u2 * u2 - k5 - k3
+    c = -np.sin(gamma)
+    if rec["ctf_intact_first_peak"]:
+        c = np.where(np.abs(gamma) < np.pi / 2, 1.0, c)
+    c = c * np.exp(-rec["ctf_Bfac"] / 4 * u2)
+    if rec["ctf_phase_flipped"]:
+        c = np.abs(c)
+    elif rec["ctf_only_flip_phases"]:
+        c = np.where(c < 0, -1.0, 1.0)
+    c = c * rec["ctf_scale"]
+    c = np.where(np.abs(c) < 1e-8, np.where(c >= 0, 1e-8, -1e-8), c)
+    return c * c if rec["ctf_premultiplied"] else c
+
+
 def reference(rec):
-    """{Fimg_nomask, Fimg, power, highres_Xi2} for one record."""
+    """{Fimg_nomask, Fimg, Fctf, power, highres_Xi2} for one record."""
     img = rec["img"]
     n, cur = img.shape[0], int(rec["current_size"])
     a = shifted(img, rec["norm"], int(rec["dx"]), int(rec["dy"]))
     m = transform(masked(a, mask_weights(n, float(np.float32(rec["radius"])), float(np.float32(rec["edge"])))))
-    out = {"Fimg_nomask": window(transform(a), cur), "Fimg": window(m, cur), "power": np.zeros((1, 0)), "highres_Xi2": 0.0}
+    out = {"Fimg_nomask": window(transform(a), cur), "Fimg": window(m, cur), "Fctf": ctf(rec),
+           "power": np.zeros((1, 0)), "highres_Xi2": 0.0}
     if cur < n:
         spectrum, out["highres_Xi2"] = power(m, cur)
         out["power"] = spectrum[None, :]
