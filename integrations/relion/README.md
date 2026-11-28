@@ -146,7 +146,8 @@ path, two arms side by side at one load: 12.9 ms without, 4.3 ms with the first 
 `relion5-plan-cache.patch` is a fifth, outside that stage: in a search without orientation priors RELION builds
 the same coarse orientation list and its Euler matrices (36,864 orientations at healpix order 3) for every
 particle. The patch keeps the last few lists together with every input they were built from and copies one when
-a call brings the same inputs. Same bits.
+a call brings the same inputs. Same bits (a check mode builds every reused list again and compares), and the
+step costs 0.16 ms of CPU per particle on the dev cell where it cost 2.0 ms.
 
 | variable | meaning |
 |---|---|
