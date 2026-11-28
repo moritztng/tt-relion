@@ -476,7 +476,7 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         _stats["declined"] += 1
         return False
     try:
-        t0 = time.time()                            # bridge wall per call, summed over threads
+        t0, c0 = time.time(), time.thread_time()    # bridge wall and CPU per call, summed over threads
         t = _torch()
         geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
         if _BATCH > 1:
@@ -488,6 +488,7 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         _book("C_s", time.time() - t0)
         out = np.frombuffer(out_mv, dtype=np.float32)
         out += acc
+        _book_cpu("C", c0)
         _stats["handled"] += 1
         return True
     except Exception as exc:                        # declining beats killing the refinement
@@ -525,7 +526,7 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         _stats["fine_declined"] += 1
         return False
     try:
-        t0 = time.time()                            # bridge wall per call, summed over threads
+        t0, c0 = time.time(), time.thread_time()    # bridge wall and CPU per call, summed over threads
         t = _torch()
         geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
         rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
@@ -543,6 +544,7 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         take = rot_idx * np.uint64(len(trans)) + trans_idx.astype(np.uint64)
         out = np.frombuffer(out_mv, dtype=np.float32)
         out += acc[take] + np.float32(sum_init)
+        _book_cpu("F", c0)
         _stats["fine_handled"] += 1
         return True
     except Exception as exc:
@@ -645,6 +647,13 @@ _BATCH = int(os.environ.get("TT_RELION_BATCH", "0"))
 _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
 _groups = {}
 _gcv = threading.Condition()
+_cpu = {"C": 0.0, "F": 0.0}         # CPU seconds this rank's threads spent inside the bridge, by pass
+_cpu_lock = threading.Lock()
+
+
+def _book_cpu(k, c0):
+    with _cpu_lock:
+        _cpu[k] += time.thread_time() - c0
 
 
 def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num):
@@ -700,8 +709,12 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
                     n = _stats["batches"]
                     if n % 50 == 0 or n & (n - 1) == 0:     # 1, 2, 4, ... then every 50
+                        # rank_cpu_s is the whole rank process (RELION's own per-particle work + the bridge),
+                        # bridge_cpu_s the part spent in here; calls counts coarse and fine calls done so far
                         print(f"tt_relion: batches={_stats['batches']} particles="
-                              f"{_stats['batched']} mean={_stats['batched'] / _stats['batches']:.2f}",
+                              f"{_stats['batched']} mean={_stats['batched'] / _stats['batches']:.2f} "
+                              f"calls={_stats['handled']}+{_stats['fine_handled']} "
+                              f"rank_cpu_s={time.process_time():.1f} bridge_cpu_s={_cpu['C']:.1f}+{_cpu['F']:.1f}",
                               file=sys.stderr, flush=True)
                 except Exception as exc:            # every particle of the batch declines
                     for b in batch:

@@ -3,6 +3,7 @@
 # run's it015 state. Arm N: RELION CPU kernels (nullbase). Arm T: ttnn hook + TT_RELION_BATCH=8. Chips 16-23, 9 ranks x --j 8.
 # Env: SRC (source tree under ~/rlx-e2e, default src-b), TAG (run name, default dc2), ARMS, TT_RELION_RESIDENT=1 for arm T,
 # RANKS (default 9), RLX_CHIP_LIST (explicit chips), J (threads per rank, default 8) and BATCH (TT_RELION_BATCH of arm T, default 8).
+# END_BY (epoch): the arm is stopped then, for a booked window that opens after it (default 45 min from its start).
 R=$HOME/rlx-e2e; SRC=${SRC:-src-b}; TAG=${TAG:-dc2}
 FROM=$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star
 export RELION_BIN=$R/relion/build/bin/relion_refine_mpi
@@ -23,7 +24,7 @@ for arm in ${ARMS:-T N}; do
   if [ $arm = N ]; then export TT_RELION_BACKEND=nullbase; unset TT_RELION_BATCH TT_RELION_RESIDENT
   else export TT_RELION_BACKEND=ttnn TT_RELION_BATCH=${BATCH:-8} TT_RELION_BATCH_WAIT_MS=50; fi
   o=$R/runs/${TAG}_$arm; rm -rf $o; mkdir -p $o
-  setsid timeout -s INT 2700 $R/$SRC/perf/rlx/run.sh $o ${RANKS:-9} ${J:-8} --continue $FROM --iter 16 --dont_combine_weights_via_disc --preread_images --pool 3 --o $o/run &
+  setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 2700} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o ${RANKS:-9} ${J:-8} --continue $FROM --iter 16 --dont_combine_weights_via_disc --preread_images --pool 3 --o $o/run &
   p=$!
   ( while kill -0 $p 2>/dev/null; do sleep 15; [ -e $o/run_it016_data.star ] && { sleep 90; kill -INT -- -$p 2>/dev/null; break; }; done ) &
   wait $p; rc=$?; grep -q "TTBridge: .* raised" $o/refine.log && rc=FALLBACK
