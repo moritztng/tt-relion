@@ -508,6 +508,7 @@ class Resident:
             B2 = ttnn.multiply(B, B)
             t0 = self._mark("proj_s", t0)
             mb = self._colmax(B)                # the K-diagonal balance of d2, per program
+            t0 = self._mark("refdig_s", t0)     # the read waits for the projection: not host time
             res = []
             # the cross term: a block of R1 rows per particle against its own columns, q blocks to one program.
             # The norm term has one row per particle: all q rows share one 32-row block against every column of the
