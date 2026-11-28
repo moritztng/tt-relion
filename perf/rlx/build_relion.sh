@@ -15,7 +15,9 @@ git checkout -q "$REV"
 # relion5-sums-sparse (rlx-wsum): the sums kernels skip samples below significance; SUMS_SPARSE=0 leaves it out.
 # relion5-sums-memory (rlx-wsum): the backprojected volume as one interleaved block on 2 MB pages, the reference
 # volume on 2 MB pages; SUMS_MEMORY=0 leaves it out.
-for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-sums-record $([ "${SUMS_SPARSE:-1}" = 1 ] && echo relion5-sums-sparse) $([ "${SUMS_MEMORY:-1}" = 1 ] && echo relion5-sums-memory) $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
+# relion5-sums-defer (rlx-wsum): the back-projection logs its pixels and applies them in batches sorted by volume
+# tile (needs relion5-sums-memory); SUMS_DEFER=0 leaves it out, TT_RELION_SPLAT_DEFER=0 turns it off at run time.
+for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-sums-record $([ "${SUMS_SPARSE:-1}" = 1 ] && echo relion5-sums-sparse) $([ "${SUMS_MEMORY:-1}" = 1 ] && echo relion5-sums-memory) $([ "${SUMS_DEFER:-1}" = 1 ] && [ "${SUMS_MEMORY:-1}" = 1 ] && echo relion5-sums-defer) $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
   git apply "$HERE/$p.patch"
 done
 mkdir -p src/acc/tt build

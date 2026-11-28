@@ -29,6 +29,11 @@ DETAIL = {
 }
 
 
+# work done for the particles outside oneParticle, added to its stage and to the total: the last batch of the
+# deferred splat (relion5-sums-defer) is applied when the volume is read, after the last particle
+OUTSIDE = {"sums": ["splat_flush_tail"]}
+
+
 def read(paths):
     cpu, wall, calls, ranks = {}, {}, {}, 0
     for p in paths:
@@ -61,13 +66,14 @@ def main():
     if not n:
         sys.exit("no particles in " + " ".join(paths))
     ms = lambda k: 1e3 * cpu.get(k, 0.0) / n
-    out = {"ranks": ranks, "particles": n, "one_particle_cpu_ms": round(ms("oneParticle"), 3),
+    outside = sum(ms(r) for rs in OUTSIDE.values() for r in rs)
+    out = {"ranks": ranks, "particles": n, "one_particle_cpu_ms": round(ms("oneParticle") + outside, 3),
            "one_particle_wall_ms": round(1e3 * wall["oneParticle"] / n, 3), "stages": {}, "detail": {}}
     for stage, region in STAGES:
-        out["stages"][stage] = round(ms(region), 3)
-        out["detail"][stage] = {r: round(ms(r), 3) for r in DETAIL.get(stage, []) if calls.get(r)}
+        out["stages"][stage] = round(ms(region) + sum(ms(r) for r in OUTSIDE.get(stage, [])), 3)
+        out["detail"][stage] = {r: round(ms(r), 3) for r in DETAIL.get(stage, []) + OUTSIDE.get(stage, []) if calls.get(r)}
     out["stages"]["weightpass_rest"] = round(ms("weightPass") - sum(ms(r) for r in IN_WEIGHTPASS), 3)
-    out["stages"]["other"] = round(ms("oneParticle") - sum(out["stages"].values()), 3)
+    out["stages"]["other"] = round(ms("oneParticle") + outside - sum(out["stages"].values()), 3)
     # what stays on the rank when both diff2 kernels run on the card
     out["own_cpu_ms"] = round(sum(v for k, v in out["stages"].items() if not k.startswith("diff2")), 3)
     if "--json" in sys.argv:
