@@ -1,0 +1,257 @@
+Particle prep without the per-particle setup (src_acc_tt/tt_prep.h), and a recorder of its inputs and outputs.
+
+Applies on top of relion5-tt.patch and relion5-estep-profile.patch. One file changes. In
+getFourierTransformsAndCtfs the common case (2D, even square box, --zero_mask, no helix, no separate
+reconstruction images) runs TTPrep: the same norm correction, whole-pixel shift, two FFTs, soft mask,
+window and power sums, with the mask weights, shell indices and FFT plans kept across particles and no
+per-particle allocation. With --preread_images it reads the stored single-precision image directly, so the
+double-precision copy of the box that RELION allocates and fills per particle is not made. Any other case
+runs RELION's code unchanged; TT_RELION_PREP=0 forces that.
+The mask radius moves up a few lines so both paths and the multibody code after them see it.
+The CTF image of a plain optics group (no magnification matrix, no even Zernike offset, no CTF padding) comes
+from TTPrep::ctf: the same phase expressions, the sin of a row at a time from glibc's vector library.
+TT_RELION_RECORD_PREP=<dir> writes a particle's inputs and the five outputs of either path.
+
+diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
+--- a/src/acc/acc_ml_optimiser_impl.h
++++ b/src/acc/acc_ml_optimiser_impl.h
+@@ -13,6 +13,17 @@ static omp_lock_t global_mutex;
+ using deviceStream_t = virtualSYCL*;
+ #endif
+ 
++#ifdef _TT_ENABLED
++#include "src/acc/tt/tt_prep.h"
++// A CTF whose phase coefficients can be read, for TTPrep::ctf. plain(): nothing but those coefficients
++// enters CTF::getCTF (no magnification matrix, no even Zernike offset, no dose weighting).
++struct TTPrepCtf : public CTF
++{
++	bool plain() const { return dose < 0. && (obsModel == 0 || (!obsModel->hasEvenZernike && !obsModel->hasMagMatrices)); }
++	TTPrep::Ctf coefficients() const { TTPrep::Ctf c = {K1, K2, K3, K4, K5, Axx, Axy, Ayy, scale}; return c; }
++};
++#endif
++
+ // ----------------------------------------------------------------------------
+ // -------------------- getFourierTransformsAndCtfs ---------------------------
+ // ----------------------------------------------------------------------------
+@@ -257,6 +268,25 @@ void getFourierTransformsAndCtfs(long int part_id,
+     }
+     sp.current_img = fn_img;
+ 
++#ifdef _TT_ENABLED
++    // TT: tt_case is the case src/acc/tt/tt_prep.h covers. When its image was preread into RAM (tt_img), the
++    // fast path reads the stored single-precision image itself: the double-precision copy RELION makes here,
++    // one allocation of the whole box per particle, would only be converted straight back.
++    bool tt_case = false;
++    const MultidimArray<float> *tt_img = NULL;
++#ifndef ACC_DOUBLE_PRECISION
++    tt_case = TTPrep::enabled() && !accMLO->dataIs3D && !op.is_tomo && baseMLO->do_zero_mask
++        && !baseMLO->do_helical_refine && !(baseMLO->mymodel.ref_dim == 2 && baseMLO->helical_tube_outer_diameter > 0.)
++        && !(baseMLO->has_converged && baseMLO->do_use_reconstruct_images);
++    if (tt_case && baseMLO->do_parallel_disc_io && baseMLO->do_preread_images)
++    {
++        const MultidimArray<float> &stored = baseMLO->mydata.particles[part_id].img;
++        if (NSIZE(stored) == 1 && ZSIZE(stored) == 1 && XSIZE(stored) == YSIZE(stored) && XSIZE(stored) % 2 == 0
++            && XSIZE(stored) == baseMLO->image_full_size[optics_group])
++            tt_img = &stored;
++    }
++#endif
++#endif
+     CTIC(accMLO->timer,"readData");
+     // Get the image and recimg data
+     if (baseMLO->do_parallel_disc_io)
+@@ -266,6 +296,10 @@ void getFourierTransformsAndCtfs(long int part_id,
+         if (baseMLO->do_preread_images)
+         {
+ 
++#ifdef _TT_ENABLED
++            if (!tt_img)
++            {
++#endif
+             img().reshape(baseMLO->mydata.particles[part_id].img);
+             CTIC(accMLO->timer,"ParaReadPrereadImages");
+             FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->mydata.particles[part_id].img)
+@@ -273,6 +307,9 @@ void getFourierTransformsAndCtfs(long int part_id,
+                 DIRECT_MULTIDIM_ELEM(img(), n) = (RFLOAT)DIRECT_MULTIDIM_ELEM(baseMLO->mydata.particles[part_id].img, n);
+             }
+             CTOC(accMLO->timer,"ParaReadPrereadImages");
++#ifdef _TT_ENABLED
++            }
++#endif
+         }
+         else
+         {
+@@ -355,10 +392,65 @@ void getFourierTransformsAndCtfs(long int part_id,
+ 		size_t current_size_x = baseMLO->image_current_size[optics_group] / 2 + 1;
+ 		size_t current_size_y = baseMLO->image_current_size[optics_group];
+ 		size_t current_size_z = (accMLO->dataIs3D) ? baseMLO->image_current_size[optics_group] : 1;
++#ifdef _TT_ENABLED
++		if (!tt_img)   // the fast path has its own plans
++#endif
+ 		accMLO->transformer1.setSize(img().xdim,img().ydim,img().zdim);
+ 		Fimg.initZeros(current_size_z, current_size_y, current_size_x);
+ 
+ 		// ------------------------------------------------------------------------------------------
++        // For multibodies: have the mask radius equal to maximum radius within body mask plus the translational offset search range
++        RFLOAT my_mask_radius = (baseMLO->mymodel.nr_bodies > 1 ) ?
++            (baseMLO->mymodel.max_radius_mask_bodies[ibody] + baseMLO->sampling.offset_range) / my_pixel_size :
++            baseMLO->particle_diameter / (2. * my_pixel_size);
++
++#if defined _TT_ENABLED && !defined ACC_DOUBLE_PRECISION
++        // TT: the common case (2D, even square box, zero mask) with the per-particle setup taken out, see
++        // src/acc/tt/tt_prep.h. Same shift, mask, FFTs, window and power sums; everything else runs RELION's code below.
++        const bool tt_prep = tt_img || (tt_case && ZSIZE(img()) == 1 && XSIZE(img()) == YSIZE(img())
++            && XSIZE(img()) % 2 == 0 && XSIZE(img()) == baseMLO->image_full_size[optics_group]);
++        if (tt_prep)
++        {
++            CTIC(accMLO->timer,"ttPrep");
++            const int n = tt_img ? XSIZE(*tt_img) : XSIZE(img()), cur = baseMLO->image_current_size[optics_group];
++            XFLOAT radius = (XFLOAT) my_mask_radius;
++            if (radius < 0)
++                radius = ((RFLOAT)n)/2.;
++            const TTPrep::Tables &tables = TTPrep::tables(n, radius, (XFLOAT) baseMLO->width_mask_edge);
++            const XFLOAT normcorr_val = baseMLO->do_norm_correction ? (XFLOAT)(baseMLO->mymodel.avg_norm_correction / normcorr) : 1;
++            const XFLOAT scale = (XFLOAT)1/((XFLOAT)(n * n));
++            TTPrep::Work &work = TTPrep::work(n);
++            float *shifted = work.shifted;
++            const float *fouriers = work.freq;
++            if (tt_img)
++                TTPrep::shift(tt_img->data, n, normcorr_val, (int) XX(my_old_offset), (int) YY(my_old_offset), shifted);
++            else
++                TTPrep::shift(img().data, n, normcorr_val, (int) XX(my_old_offset), (int) YY(my_old_offset), shifted);
++
++            // The unmasked transform, for the reconstruction
++            TTPrep::center(shifted, n, work.real);
++            TTPrep::forward(tables, work.real, work.freq, cur/2 + 1);
++            MultidimArray<Complex> &Fnomask = op.Fimg_nomask.at(img_id);
++            Fnomask.resize(current_size_z, current_size_y, current_size_x);
++            TTPrep::window(fouriers, n, cur, scale, Fnomask.data);
++            baseMLO->mydata.obsModel.demodulatePhase(optics_group, Fnomask);
++            baseMLO->mydata.obsModel.divideByMtf(optics_group, Fnomask);
++
++            // The masked transform, for alignment and classification, and its power per shell
++            TTPrep::mask_center(tables, shifted, work.real);
++            TTPrep::forward(tables, work.real, work.freq, n/2 + 1);
++            TTPrep::window(fouriers, n, cur, scale, Fimg.data);
++            op.highres_Xi2_img.at(img_id) = 0.;
++            if (cur < n)
++            {
++                op.power_img.at(img_id).resize(n/2 + 1);
++                op.highres_Xi2_img.at(img_id) = TTPrep::power(tables, fouriers, scale, cur/2 + 1, op.power_img.at(img_id).data);
++            }
++            CTOC(accMLO->timer,"ttPrep");
++        }
++        else
++        {
++#endif
+ #ifdef _HIP_ENABLED
+         CTIC(hipMLO->timer,"makeNoiseMask");
+ #else
+@@ -554,11 +646,6 @@ void getFourierTransformsAndCtfs(long int part_id,
+         MultidimArray<RFLOAT> Mnoise;
+         bool is_helical_segment = (baseMLO->do_helical_refine) || ((baseMLO->mymodel.ref_dim == 2) && (baseMLO->helical_tube_outer_diameter > 0.));
+ 
+-        // For multibodies: have the mask radius equal to maximum radius within body mask plus the translational offset search range
+-        RFLOAT my_mask_radius = (baseMLO->mymodel.nr_bodies > 1 ) ?
+-            (baseMLO->mymodel.max_radius_mask_bodies[ibody] + baseMLO->sampling.offset_range) / my_pixel_size :
+-            baseMLO->particle_diameter / (2. * my_pixel_size);
+-
+         // ------------------------------------------------------------------------------------------
+         
+         // We are now done with the unmasked image used for reconstruction.
+@@ -777,6 +864,9 @@ void getFourierTransformsAndCtfs(long int part_id,
+ 			op.highres_Xi2_img.at(img_id) = 0.;
+ 		}
+ 		CTOC(accMLO->timer,"powerClass");
++#if defined _TT_ENABLED && !defined ACC_DOUBLE_PRECISION
++        } // not tt_prep
++#endif
+ 
+ 		Fctf.resize(Fimg);
+ 		// Now calculate the actual CTF
+@@ -819,7 +909,11 @@ void getFourierTransformsAndCtfs(long int part_id,
+ 			else
+ 			{
+ 				CTIC(accMLO->timer,"CTFRead2D");
++#ifdef _TT_ENABLED
++				TTPrepCtf ctf;
++#else
+ 				CTF ctf;
++#endif
+ 
+                 if (op.is_tomo)
+                     ctf.setValuesByGroup(
+@@ -842,6 +936,14 @@ void getFourierTransformsAndCtfs(long int part_id,
+                         DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_PHASE_SHIFT),
+                         -1.);
+ 
++#ifdef _TT_ENABLED
++				// TT: the same image, a row at a time (src/acc/tt/tt_prep.h)
++				if (TTPrep::enabled() && sizeof(RFLOAT) == sizeof(double) && !baseMLO->do_ctf_padding && ctf.plain() && ZSIZE(Fctf) == 1)
++					TTPrep::ctf(ctf.coefficients(), (RFLOAT)baseMLO->image_full_size[optics_group] * my_pixel_size,
++					            (RFLOAT)baseMLO->image_full_size[optics_group] * my_pixel_size, baseMLO->ctf_phase_flipped,
++					            baseMLO->only_flip_phases, baseMLO->intact_ctf_first_peak, true, YSIZE(Fctf), XSIZE(Fctf), (double*) Fctf.data);
++				else
++#endif
+ 				ctf.getFftwImage(Fctf, baseMLO->image_full_size[optics_group], baseMLO->image_full_size[optics_group], my_pixel_size,
+                                                  baseMLO->ctf_phase_flipped, baseMLO->only_flip_phases, baseMLO->intact_ctf_first_peak, true, baseMLO->do_ctf_padding);
+ 
+@@ -872,6 +974,59 @@ void getFourierTransformsAndCtfs(long int part_id,
+ 		op.Fimg.at(img_id) = Fimg;
+ 		op.Fctf.at(img_id) = Fctf;
+ 
++#ifdef _TT_ENABLED
++		// TT_RELION_RECORD_PREP only: this particle's inputs and the five outputs, whichever path made them.
++		{
++			TTPrep::Record rec(part_id);
++			if (rec && !accMLO->dataIs3D && !op.is_tomo)
++			{
++				const char *R = sizeof(RFLOAT) == 8 ? "f8" : "f4", *C = sizeof(RFLOAT) == 8 ? "c16" : "c8";
++				rec.put("norm", baseMLO->do_norm_correction ? (XFLOAT)(baseMLO->mymodel.avg_norm_correction / normcorr) : 1);
++				rec.put("dx", (int) XX(my_old_offset));
++				rec.put("dy", (int) YY(my_old_offset));
++				rec.put("radius", my_mask_radius);
++				rec.put("edge", baseMLO->width_mask_edge);
++				rec.put("zero_mask", baseMLO->do_zero_mask);
++				rec.put("current_size", baseMLO->image_current_size[optics_group]);
++				rec.put("angpix", my_pixel_size);
++				rec.put("ctf_correction", baseMLO->do_ctf_correction);
++				rec.put("ctf_premultiplied", ctf_premultiplied);
++				rec.put("ctf_phase_flipped", baseMLO->ctf_phase_flipped);
++				rec.put("ctf_only_flip_phases", baseMLO->only_flip_phases);
++				rec.put("ctf_intact_first_peak", baseMLO->intact_ctf_first_peak);
++				rec.put("ctf_padding", baseMLO->do_ctf_padding);
++				CTF ctf;
++				ctf.setValuesByGroup(
++					&(baseMLO->mydata).obsModel, optics_group,
++					DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_DEFOCUS_U),
++					DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_DEFOCUS_V),
++					DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_DEFOCUS_ANGLE),
++					DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_BFACTOR),
++					DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_KFACTOR),
++					DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_PHASE_SHIFT),
++					-1.);
++				rec.put("ctf_kV", ctf.kV);
++				rec.put("ctf_Cs", ctf.Cs);
++				rec.put("ctf_Q0", ctf.Q0);
++				rec.put("ctf_defU", ctf.DeltafU);
++				rec.put("ctf_defV", ctf.DeltafV);
++				rec.put("ctf_angle", ctf.azimuthal_angle);
++				rec.put("ctf_Bfac", ctf.Bfac);
++				rec.put("ctf_scale", ctf.scale);
++				rec.put("ctf_phase_shift", ctf.phase_shift);
++				if (tt_img)
++					rec.put("img", "f4", tt_img->data, sizeof(float), YSIZE(*tt_img), XSIZE(*tt_img));
++				else
++					rec.put("img", R, img().data, sizeof(RFLOAT), YSIZE(img()), XSIZE(img()));
++				rec.put("Fimg", C, op.Fimg.at(img_id).data, sizeof(Complex), YSIZE(Fimg), XSIZE(Fimg));
++				rec.put("Fimg_nomask", C, op.Fimg_nomask.at(img_id).data, sizeof(Complex), YSIZE(Fimg), XSIZE(Fimg));
++				rec.put("Fctf", R, op.Fctf.at(img_id).data, sizeof(RFLOAT), YSIZE(Fctf), XSIZE(Fctf));
++				rec.put("power", R, op.power_img.at(img_id).data, sizeof(RFLOAT), 1, XSIZE(op.power_img.at(img_id)));
++				rec.put("highres_Xi2", op.highres_Xi2_img.at(img_id));
++			}
++		}
++#endif
++
+ 		// Correct images and CTFs by Multiplicity, if required, and store it
+ 		if ( NZYXSIZE(FstMulti) > 0 )
+ 		{

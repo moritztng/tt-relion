@@ -22,7 +22,12 @@ p=$!
 full() { [ "$(awk -v n=$n '$2=="oneParticle" && $5>=n' $o/prof.* 2>/dev/null | wc -l)" -ge $((ranks - 1)) ]; }
 while kill -0 $p 2>/dev/null; do
   sleep 5
-  if full || [ -e $o/run_it$(printf %03d $it)_data.star ]; then kill -INT -- -$p 2>/dev/null; break; fi
+  if full || [ -e $o/run_it$(printf %03d $it)_data.star ]; then break; fi
 done
+# Stop: mpirun aborts on INT and forces it on a second one within 5 s; whatever is left after 20 s is killed by its
+# output prefix (one arm ran two more iterations after a single INT).
+kill -INT -- -$p 2>/dev/null; sleep 2; kill -INT -- -$p 2>/dev/null
+for i in $(seq 20); do kill -0 $p 2>/dev/null || break; sleep 1; done
+kill -0 $p 2>/dev/null && pkill -TERM -f -- "--o $o/run"
 wait $p
 echo "done rc=$? $(date -u +%FT%TZ) load1 $(cut -d' ' -f1 /proc/loadavg) tables: $(ls $o/prof.* 2>/dev/null | wc -l)" >> $o/status

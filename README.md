@@ -49,6 +49,9 @@ Details and the measurement scripts: [`perf/fft2d/`](perf/fft2d/).
   handle, or any error, falls back to RELION's own CPU code.
 - `relion5-coarse-blocking.patch` and `relion5-nonzeroprob.patch` are the two CPU fixes. Apply them
   to any RELION 5 build.
+- `relion5-prep.patch` cuts the CPU cost of preparing a particle (shift, mask, two Fourier transforms,
+  CTF) from 5 to 6 ms to about 1 ms on a 360 pixel box, with the same outputs. See
+  [`docs/particle-prep.md`](docs/particle-prep.md).
 
 Build and run instructions are in that directory's README.
 
