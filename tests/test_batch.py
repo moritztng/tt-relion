@@ -492,3 +492,34 @@ def test_an_orientation_set_seen_before_is_not_copied_and_hashed_again():
     assert relion._orient(memoryview(big.tobytes()), 500, lo2)[2] != first[2]
     import hashlib
     assert first[2] == hashlib.sha256(big.tobytes() + lo.tobytes()).digest()             # the digest it had before
+
+
+def test_threads_stand_back_while_a_leader_sends_its_batch(monkeypatch):
+    import threading
+    from tt_relion import relion
+    monkeypatch.setattr(relion, "_YIELD", 2.0)
+    relion._staging[0] = 0
+    t0 = time.time()
+    relion._stand_back()                                # nobody stages: no wait
+    assert time.time() - t0 < 0.05
+    relion._tl.staging = True
+    relion._stage(1)
+    out = []
+    th = [threading.Thread(target=lambda: (relion._stand_back(), out.append(time.time()))) for _ in range(8)]
+    for t in th:
+        t.start()
+    time.sleep(0.15)
+    assert not out                                      # they wait for the leader
+    t1 = time.time()
+    relion._staged()                                    # the batch is sent
+    for t in th:
+        t.join(1.0)
+    assert len(out) == 8 and max(out) - t1 < 0.5 and relion._staging[0] == 0
+    relion._staged()                                    # a second call (the net) changes nothing
+    assert relion._staging[0] == 0
+    monkeypatch.setattr(relion, "_YIELD", 0.1)          # a leader that never sends holds nobody for long
+    relion._stage(1)
+    t2 = time.time()
+    relion._stand_back()
+    assert 0.08 < time.time() - t2 < 0.5
+    relion._stage(-1)

@@ -263,6 +263,7 @@ class _Server:
                 req["own"], req["own_out"] = [int(v) for v in own], nout
             self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             self.p.stdin.flush()
+            _staged()
             ans = self.p.stdout.readline().split()
             if ans[:1] != ["ok"]:
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
@@ -848,6 +849,36 @@ _OWN_FORM = os.environ.get("TT_RELION_OWN_FORM", "") not in ("", "0")
 # when they ask: the chip waits on the server's host work, RELION's threads lose only the slices the server takes.
 # 0 (the default): off.
 _NICE = int(os.environ.get("TT_RELION_NICE", "0"))
+_YIELD = float(os.environ.get("TT_RELION_YIELD_MS", "0")) / 1e3
+_staging = [0]                      # leaders between a chip reserved and their batch sent to it
+_calm = threading.Condition(threading.Lock())
+
+
+def _stage(d):
+    with _calm:
+        _staging[0] += d
+        if d < 0:
+            _calm.notify_all()
+
+
+def _staged():
+    """This leader's batch is with the server, or failed: the threads that stood back go on."""
+    if _tl.__dict__.pop("staging", None):
+        _stage(-1)
+
+
+def _stand_back():
+    """A thread whose Python work can wait (its result is in, or it brings a new particle) lets a leader that has a
+    chip reserved send its batch first, for at most TT_RELION_YIELD_MS. The chip idles until that batch is out, and
+    the leader needs the interpreter lock ~30 times for it: behind the ~57 threads of the batch that just came back
+    it took ~150 ms for 15 ms of work (arm ch5)."""
+    if _YIELD > 0 and _staging[0]:
+        end = time.time() + _YIELD
+        with _calm:
+            while _staging[0] > 0 and time.time() < end:
+                _calm.wait(end - time.time())
+
+
 _SWITCH_MS = float(os.environ.get("TT_RELION_SWITCH_MS", "0"))
 if _SWITCH_MS > 0:          # how long a thread may keep the interpreter lock while another asks (CPython: 5 ms)
     sys.setswitchinterval(_SWITCH_MS / 1e3)
@@ -934,6 +965,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
 
     prior = (lo [O], lt [T], window): the candidate form. The particle then gets (orientation int32, translation
     int32, delta float32, best) for its samples within window of its best instead of its [T, O] rows."""
+    _stand_back()
     eul, lo, eh = _orient(eul_mv, orientation_num, None if prior is None else prior[0])
     key = (_model_key(mdl_mv), geom, None if prior is None else float(prior[2]))
     lt = None if prior is None else np.array(prior[1], np.float32)
@@ -961,6 +993,9 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     _gcv.release()
                     try:
                         _tl.reserved = _server()
+                        if _YIELD > 0 and _RESIDENT:
+                            _tl.staging = True
+                            _stage(1)
                     finally:
                         _gcv.acquire()
                 n = _take(g["q"])[0]
@@ -1031,6 +1066,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     for b in batch:
                         b["err"] = exc
                 finally:
+                    _staged()                       # a net: the batch failed before it was sent
                     s = _tl.__dict__.pop("reserved", None)
                     if s is not None:               # the batch failed before it reached the chip
                         _free.put(s)
@@ -1043,6 +1079,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                         del _groups[key]
             else:
                 item["cv"].wait(1.0)                # woken for its result or to lead; the timeout is a net only
+    _stand_back()
     _be_nice()
     if item["err"] is not None:
         raise item["err"]
