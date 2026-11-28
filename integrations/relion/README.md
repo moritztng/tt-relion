@@ -31,6 +31,15 @@ cmake .. -DALTCPU=ON -DTT=ON -DCUDA=OFF -DGUI=OFF -DMKLFFT=OFF -DFETCH_WEIGHTS=O
 make -j
 ```
 
+`relion5-tt-candidates.patch` (optional, apply after `relion5-tt.patch`) hands the coarse pass over in
+candidate form: RELION passes the log priors of its orientations and translations with the particle, and
+gets back only the samples whose `diff2 - log(pdf_orientation) - log(pdf_offset)` lies within
+`TT_RELION_CAND_WINDOW` of the particle's best (40 is the tested value; unset or 0 keeps the dense block).
+RELION's own significance rule (exponent, sort, cumulative sum, `adaptive_fraction` threshold) then runs
+on that list instead of on the dense orientation x translation block. It applies to a single-image
+particle with a fine pass to follow (`--oversampling` above 0) and no first-iteration cross-correlation;
+every other case, and any call the bridge declines, takes the dense path unchanged.
+
 `TT=ON` requires `ALTCPU=ON`: the kernels that are not offloaded yet compile from `src/acc/cpu`, and
 `ALTCPU` is also what defines `PROJECTOR_NO_TEXTURES`, which makes the padded Fourier reference a plain
 array instead of a texture object. `TT=ON` without `ALTCPU=ON` is a configure-time error.
