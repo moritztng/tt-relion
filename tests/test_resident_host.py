@@ -79,3 +79,23 @@ def test_corner_table_matches_the_direct_form():
                 o, c = dx + dy * X + dz * X * Y, 4 * dz + 2 * dy + dx
                 ref[:, 2 * c:2 * c + 2] = mp[o:o + nvox]
     assert np.array_equal(_corner_table(mdl, X, Y), ref)
+
+
+def test_table_turns_are_host_wide_and_counted(monkeypatch, tmp_path):
+    import threading
+
+    from tt_relion import resident
+    monkeypatch.setattr(resident, "TURNS", 2)
+    monkeypatch.setattr(resident.tempfile, "gettempdir", lambda: str(tmp_path))
+    got = threading.Event()
+
+    def third():
+        with resident._turn():
+            got.set()
+    with resident._turn():
+        with resident._turn():
+            t = threading.Thread(target=third)
+            t.start()
+            assert not got.wait(0.5)        # both places taken
+        assert got.wait(5)                  # one given back
+    t.join()

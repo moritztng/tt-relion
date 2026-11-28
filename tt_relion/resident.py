@@ -11,6 +11,10 @@ sends images, weights, translations and Euler matrices and reads back d2.
 One instance per chip, used by tt_relion.device_server. The steps are the ones perf/rlx/resident/global_pass.py
 measured against float64 on real particles; that script stays the precision reference.
 """
+import contextlib
+import fcntl
+import os
+import tempfile
 import time
 
 import numpy as np
@@ -27,6 +31,7 @@ OCH = 4096      # orientations per product
 RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a new row count on every call, and
                 # each new shape costs seconds of program builds
 TBLK = 1 << 14  # voxels per block of the table build (1 MB of table)
+TURNS = int(os.environ.get("TT_RELION_TABLE_TURNS", "4"))   # chips of a host that upload a large table at once
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 
 
@@ -68,6 +73,30 @@ def _corner_table(mdl, X, Y):
     return tb.reshape(nvox, 16)
 
 
+@contextlib.contextmanager
+def _turn():
+    """One of TURNS places on this host, waited for. The table of a full-size model is 12 GB and passes through host
+    memory twice on its way to the chip; every chip of the host wants it in the same second of the last iteration."""
+    d = os.path.join(tempfile.gettempdir(), "tt-relion-turn")
+    os.makedirs(d, exist_ok=True)
+    fd = None
+    while fd is None:
+        for i in range(TURNS):
+            f = os.open(os.path.join(d, str(i)), os.O_CREAT | os.O_RDWR, 0o666)
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fd = f
+                break
+            except BlockingIOError:
+                os.close(f)
+        else:
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
 class Resident:
     def __init__(self, dev, digits=13):
         self.dev, self.n = dev, digits
@@ -107,7 +136,9 @@ class Resident:
         self.pixsets = {}
         if self.tab is not None:
             ttnn.deallocate(self.tab)
-        self.tab = self._put(_corner_table(mdl, X, Y), ttnn.ROW_MAJOR_LAYOUT)
+        with _turn() if len(mdl) * 64 > 1 << 30 else contextlib.nullcontext():
+            self.tab = self._put(_corner_table(mdl, X, Y), ttnn.ROW_MAJOR_LAYOUT)
+            ttnn.synchronize_device(self.dev)
         v = ttnn.get_memory_view(self.dev, ttnn.BufferType.DRAM)
         self.free = v.num_banks * v.total_bytes_free_per_bank       # what the table leaves of the chip's memory
         self.geom = dict(X=X, Y=Y, Z=Z, initY=initY, initZ=initZ, maxR2=maxR2)

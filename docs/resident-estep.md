@@ -158,3 +158,16 @@ up to the seed pair's own resolution is more than 0.02 under the pair.
 `TT_RELION_MIN_ORI=<n>` declines a coarse call that brings fewer than n orientations, and the fine call that follows
 it on the same thread, so RELION's own kernel does that particle. A local search brings a few hundred orientations
 per particle and cannot fill a chip tile. Off by default (0).
+
+### The last iteration
+
+An auto-refinement ends with one iteration at the full image size. For a 360-pixel box that is 65,160 pixels per
+image, and the model's table on the chip is 12 GB of its 34 GB. Two things follow.
+
+A reference set that would not fit beside the table is scored a piece at a time, about 1,000 orientations a piece at
+this size, each piece with its own balance. The products stay exact. Sets that fit run as before.
+
+The table passes through host memory on its way to the chip, about 26 GB per chip while it does, and every chip
+wants it at the start of that iteration. `TT_RELION_TABLE_TURNS=<n>` (default 4) is how many chips of a host upload at
+once; the others wait their turn. `--preread_images` also counts here: RELION keeps the whole particle set in every
+MPI rank, so with one rank per chip the host holds as many copies as it has chips.
