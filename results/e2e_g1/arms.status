@@ -1,0 +1,38 @@
+2026-11-28T10:43:21Z g1 start (src-q, relion-t), room 1479 s; psm 3 load1 92.15
+2026-11-28T10:43:47Z p1g s50 rc=0 {"size": 50, "O": 4608, "N": 8, "T": 21, "P": 1300, "digits": 13, "once": {"err_near": 0.00015994104842320667, "rel_all": 1.5142910243608382e-07, "argmin": 8, "d2_at_min": 1749.2451172980475}, "once_s": 0.15200422890484333, "once_phases": {"host_s": 0.0036, "dev_s": 0.1484, "proj_s": 0.0196, "refdig_s": 0.0302, "imgdig_s": 0.0062, "prod_s": 0.0824, "read_s": 0.0098, "px_oz_s": 0.0, "px_comb_s": 0.0, "pn_oz_s": 0.0, "pn_comb_s": 0.0, "p_asm_s": 0.0}, "vary_s": [2.7265, 0.1202, 4.22, 0.1305], "held_first": {"err_near": 0.00015994104842320667, "rel_all": 1.5142910243608382e-07, "argmin": 8, "d2_at_min": 1749.2451172980475}, "aiclk_min_med": [1350, 1350], "held_phases": {"host_s": 0.0058, "dev_s": 0.1068, "proj_s": 0.0, "refdig_s": 0.0, "imgdig_s": 0.0089, "prod_s": 0.0824, "read_s": 0.0155, "px_oz_s": 0.0, "px_comb_s": 0.0, "pn_oz_s": 0.0, "pn_comb_s": 0.0, "p_asm_s": 0.0}, "load1": 90.24, "held_again": {"err_near": 0.00015994104842320667, "rel_all": 1.5142910243608382e-07, "argmin": 8, "d2_at_min": 1749.2451172980475}, "held_same": true, "batch_s": [0.10771633312106133, 0.11270303511992097, 0.1177698380779475], "cand": {"window": 40.0, "n": 81, "per_particle": 10.125, "missed": 0, "same_sig": "8/8", "err_delta": 0.00016952597866293218, "err_best": 0.00012464912333598477, "batch_s": [2.542522562900558, 0.10223442199639976, 0.10167250293307006], "phases": {"host_s": 0.0042, "dev_s": 0.9113, "proj_s": 0.0, "refdig_s": 0.0, "imgdig_s": 0.0063, "prod_s": 0.0842, "read_s": 0.8207, "p  load1 89.50
+2026-11-28T10:46:32Z p1g s360 rc=0 {"size": 360, "O": 2304, "N": 12, "T": 9, "P": 65160, "digits": 13, "once": {"err_near": 0.014341796850203536, "rel_all": 3.0802245944519676e-07, "argmin": 12, "d2_at_min": 100355.148643889}, "once_s": 3.3866836479865015, "once_phases": {"host_s": 0.1123, "dev_s": 3.2512, "proj_s": 0.419, "refdig_s": 0.7672, "imgdig_s": 0.8883, "prod_s": 1.1717, "read_s": 0.0049, "px_oz_s": 0.0, "px_comb_s": 0.0, "pn_oz_s": 0.0, "pn_comb_s": 0.0, "p_asm_s": 0.0}, "vary_s": [3.3572, 2.3179, 2.8543, 2.3729], "held_first": {"err_near": 0.014341796850203536, "rel_all": 3.0802245944519676e-07, "argmin": 12, "d2_at_min": 100355.148643889}, "aiclk_min_med": [1350, 1350], "held_phases": {"host_s": 0.1107, "dev_s": 3.1518, "proj_s": 0.4264, "refdig_s": 0.6577, "imgdig_s": 0.8877, "prod_s": 1.1745, "read_s": 0.0054, "px_oz_s": 0.0, "px_comb_s": 0.0, "pn_oz_s": 0.0, "pn_comb_s": 0.0, "p_asm_s": 0.0}, "load1": 55.5, "held_again": {"err_near": 0.014341796850203536, "rel_all": 3.0802245944519676e-07, "argmin": 12, "d2_at_min": 100355.148643889}, "held_same": true, "batch_s": [3.3017931438516825, 3.3257638020440936, 3.2429188662208617], "cand": {"window": 40.0, "n": 12, "per_particle": 1.0, "missed": 0, "same_sig": "12/12", "err_delta": 0.0, "err_best": 0.018716236038017087, "batch_s": [5.318014656193554, 3.278034518007189, 3.3254870739765465], "phases": {"host_s": 0.1201, "dev_s": 3.8272, "proj_s": 0.4252, "refdig_s": 0.6239, "imgdig_s": 0.9014, "prod_s": 1.1724, "read_s": 0.7042, "px_oz_s": 0.0, "px_comb_  load1 54.05
+2026-11-28T10:46:32Z dc15g it016 chips 16,17,18,19, 5 ranks --j 40 src-q relion-t digits 13 dense batch 32 profile hugetlb, until 11:08:00Z load1 54.05
+2026-11-28T10:53:18Z dc15g: T rc=1 2026-11-28T10:53:18Z load1 82.80 wall 5:45.07 it016=yes load1 82.80
+rows 13156 vs 13156
+_rlnAngleRot differ 0 max 0
+_rlnAngleTilt differ 0 max 0
+_rlnAnglePsi differ 0 max 0
+_rlnOriginXAngst differ 2 max 1.31755
+_rlnOriginYAngst differ 1 max 1.31755
+_rlnMaxValueProbDistribution differ 9786 max 0.002184
+_rlnLogLikeliContribution differ 12358 max 0.007709
+_rlnNrOfSignificantSamples differ 0 max 0
+dc15g_T                                  res 14.188235  dOri 3.432365 dOff 1.217678  corr h1 1.000000 (1-c 1.04e-10)  h2 1.000000 (1-c 1.15e-10)
+2026-11-28T10:53:22Z dc15g lldiff: dc15g_T LL diff: median 0.000977 p90 0.002927 p99 0.004813 max 0.007709; mean signed -9.817e-06; >0.1: 0; >1: 0; rot rows 0   half 1 n 6635 LL>0.1: 0 rot: 0   half 2 n 6521 LL>0.1: 0 rot: 0   by file order eighths, LL>0.1: [0, 0, 0, 0, 0, 0, 0, 0]  rot: [0, 0, 0, 0, 0, 0, 0, 0] ; psm 11 load1 82.80
+2026-11-28T10:53:22Z g1 done load1 82.80
+2026-11-28T10:53:23Z dc17g it016 chips 16,17,18,19 x2 per rank, 3 ranks --j 80 src-q relion-t digits 13 dense batch 32 profile hugetlb, until 11:08:00Z, MemAvailable 259 GB load1 81.30
+2026-11-28T10:59:08Z dc17g: T rc=1 2026-11-28T10:59:08Z load1 94.68 wall 4:45.03 it016=yes load1 94.68
+rows 13156 vs 13156
+_rlnAngleRot differ 0 max 0
+_rlnAngleTilt differ 0 max 0
+_rlnAnglePsi differ 0 max 0
+_rlnOriginXAngst differ 2 max 1.31755
+_rlnOriginYAngst differ 1 max 1.31755
+_rlnMaxValueProbDistribution differ 9785 max 0.002425
+_rlnLogLikeliContribution differ 12354 max 0.007698
+_rlnNrOfSignificantSamples differ 0 max 0
+P 1300 coarse: batches 842 particles/batch 23.6 rows/batch 871 tile_fill 0.73 O 19829 s/batch 0.662 total_s 557.4 particles/s/chip-busy 35.6
+P 12640 fine: batches 919 particles/batch 21.9 rows/batch 195 tile_fill 0.38 O 211 s/batch 0.229 total_s 210.4 particles/s/chip-busy 95.5
+span_s 265.5 chips 4 busy_s 767.7 busy_share 0.723
+dc17g_T                                  res 14.188235  dOri 3.432365 dOff 1.217678  corr h1 1.000000 (1-c 1.03e-10)  h2 1.000000 (1-c 1.14e-10)
+2026-11-28T10:59:12Z dc17g lldiff: dc17g_T LL diff: median 0.000977 p90 0.002927 p99 0.004828 max 0.007698; mean signed -1.028e-05; >0.1: 0; >1: 0; rot rows 0   half 1 n 6635 LL>0.1: 0 rot: 0   half 2 n 6521 LL>0.1: 0 rot: 0   by file order eighths, LL>0.1: [0, 0, 0, 0, 0, 0, 0, 0]  rot: [0, 0, 0, 0, 0, 0, 0, 0] ; psm 10 load1 98.55
+2026-11-28T10:59:12Z g2 done load1 98.55
+# read after the runs (not printed by the chain):
+# dc15g E-step bar 3.28 min, first to last batch 189.6 s; AICLK of the four chips 1,044 samples, none under 1200, min 1343
+#   coarse 20.0 particles/batch 739 rows 0.651 s/batch; fine 19.9 particles/batch 0.269 s/batch; chips 79.7 % busy
+# dc17g E-step bar 2.75 min, first to last batch 166.4 s; AICLK of the four chips 968 samples, none under 1200, min 1343

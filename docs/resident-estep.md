@@ -175,5 +175,12 @@ wants it at the start of that iteration. `TT_RELION_TABLE_TURNS=<n>` (default 4)
 once; the others wait their turn. `--preread_images` also counts here: RELION keeps the whole particle set in every
 MPI rank, so with one rank per chip the host holds as many copies as it has chips.
 
+A rank can drive more than one chip. `RLX_CHIPS_PER_RANK=<k>` (read by `perf/rlx/rank.sh`) gives every follower rank
+k chips and its `--j` threads feed all of them, so the host holds fewer copies of RELION for the same chips. On the
+global finer iteration of the dev cell, four chips as two ranks with two chips and `--j 80` each gave the poses of
+the CPU arm (0 of 13,156 differ, half maps 1.0e-10 and 1.1e-10) and finished the E-step in 2.75 min; one rank per
+chip with `--j 40` took 3.28 min on the same chips with the same grade (AICLK 1343 MHz or more in every sample of
+both runs, host load 54 to 95). Split half-sets need two follower ranks, so k is at most half the chips.
+
 `TT_RELION_NORM_DIGITS=<n>` gives the norm product alone more digits than the cross product. Off by default: with
 the balance fix the norm term needs none.
