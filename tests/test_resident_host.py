@@ -63,3 +63,19 @@ def test_layout_spreads_the_particle_norm_over_its_rows():
         direct = (w[pn][:, None].astype(np.float64) * np.abs((pr + 1j * pi)[None] - sx[:, None]) ** 2).sum(-1)
         err = np.abs(d2 - direct).max() / np.abs(direct).max()
         assert err < 1e-6, (counts[:3], err)
+
+
+def test_corner_table_matches_the_direct_form():
+    from tt_relion.resident import TBLK, _corner_table
+    X, Y, Z = 20, 37, 37
+    nvox = X * Y * Z
+    assert nvox > TBLK and nvox % TBLK
+    mdl = np.random.default_rng(3).standard_normal((nvox, 2)).astype(np.float32)
+    mp = np.concatenate([mdl, np.zeros((X * Y + X + 2, 2), np.float32)])
+    ref = np.empty((nvox, 16), np.float32)
+    for dz in (0, 1):
+        for dy in (0, 1):
+            for dx in (0, 1):
+                o, c = dx + dy * X + dz * X * Y, 4 * dz + 2 * dy + dx
+                ref[:, 2 * c:2 * c + 2] = mp[o:o + nvox]
+    assert np.array_equal(_corner_table(mdl, X, Y), ref)

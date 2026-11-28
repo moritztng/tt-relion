@@ -26,6 +26,7 @@ OBLK = 256      # oz_fused column block
 OCH = 4096      # orientations per product
 RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a new row count on every call, and
                 # each new shape costs seconds of program builds
+TBLK = 1 << 14  # voxels per block of the table build (1 MB of table)
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 
 
@@ -50,6 +51,21 @@ def _rep(x, k):
         ttnn.deallocate(y16)
     ttnn.deallocate(x)
     return y
+
+
+def _corner_table(mdl, X, Y):
+    """mdl float32 [nvox, 2] -> [nvox, 16]: the 8 trilinear corners of every base voxel on one row, corner
+    4 dz + 2 dy + dx in columns 2c and 2c + 1, zero past the last voxel. Built a block at a time: at full image
+    size the table is 12 GB, and a corner per pass over all of it is eight times the memory traffic."""
+    nvox = len(mdl)
+    tb = np.empty((nvox, 8, 2), np.float32)
+    offs = [dx + dy * X + dz * X * Y for dz in (0, 1) for dy in (0, 1) for dx in (0, 1)]
+    for a in range(0, nvox, TBLK):
+        for c, o in enumerate(offs):
+            src = mdl[a + o:a + o + TBLK]
+            tb[a:a + len(src), c] = src
+            tb[a + len(src):a + TBLK, c] = 0
+    return tb.reshape(nvox, 16)
 
 
 class Resident:
@@ -91,16 +107,9 @@ class Resident:
         self.pixsets = {}
         if self.tab is not None:
             ttnn.deallocate(self.tab)
-        nvox = mdl.shape[0]
-        mp = np.concatenate([mdl, np.zeros((X * Y + X + 2, 2), np.float32)])
-        tb = np.empty((nvox, 16), np.float32)          # the 8 trilinear corners of every base voxel, one row
-        for dz in (0, 1):
-            for dy in (0, 1):
-                for dx in (0, 1):
-                    o = dx + dy * X + dz * X * Y
-                    c = 4 * dz + 2 * dy + dx
-                    tb[:, 2 * c:2 * c + 2] = mp[o:o + nvox]
-        self.tab = self._put(tb, ttnn.ROW_MAJOR_LAYOUT)
+        self.tab = self._put(_corner_table(mdl, X, Y), ttnn.ROW_MAJOR_LAYOUT)
+        v = ttnn.get_memory_view(self.dev, ttnn.BufferType.DRAM)
+        self.free = v.num_banks * v.total_bytes_free_per_bank       # what the table leaves of the chip's memory
         self.geom = dict(X=X, Y=Y, Z=Z, initY=initY, initZ=initZ, maxR2=maxR2)
         self.pf, self.model_key = pf, key
 
@@ -254,62 +263,73 @@ class Resident:
         t0 = time.time()
         dr, sel, nb, rows = self._layout(pn, len(xr))
         up = min(-(-(int(dr.max()) + 1) // RUP) * RUP, rows)
-        A, A2, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, dr, sel, up)
-        t0 = t1 = self._mark("host_s", t0)
-
-        held = ref_key is not None and ref_key == self.ref_key
-        if held:
-            refs, (s, s2) = self.refs, self.bal
-        else:
-            refs = self._project(np.asarray(eul, np.float32).reshape(-1, 9))
-            t0 = self._mark("proj_s", t0)
-            s, s2 = self._balance(refs, _amax(A, 0), _amax(A2, 0))
-            t0 = self._mark("refdig_s", t0)
-            if ref_key is not None:
-                self._drop_refs()
-                self.refs, self.bal, self.ref_key = refs, (s, s2), ref_key
-        A, A2 = np.multiply(A, s, out=A), A2 * s2               # powers of two: exact in fp32
-        ea, ea2 = _exp(_amax(A, 1)), _exp(_amax(A2, 1))
-        tA, tA2 = self._put(A), self._put(np.pad(A2, ((0, min(-len(A2) % RUP, nb - len(A2))), (0, 0))))
-        Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb)
+        A0, A20, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, dr, sel, up)
         nxh = (nx / 2).astype(np.float32)
         nxl = (nx / 2 - nxh).astype(np.float32)
         pad = lambda v: np.pad(v, (0, nb - len(v)))[:, None]    # noqa: E731
+        eul = np.asarray(eul, np.float32).reshape(-1, 9)
+        out = np.empty((R, len(eul)), np.float32) if out is None else out
+        t0 = t1 = self._mark("host_s", t0)
         t_nxh, t_nxl = self._put(pad(nxh)), self._put(pad(nxl))
-        t0 = self._mark("imgdig_s", t0)
 
         def tsum(a, b):     # TwoSum in true-fp32 eltwise ops: a + b = s + err exactly
             s_ = ttnn.add(a, b)
             bp = ttnn.subtract(s_, a)
             return s_, ttnn.add(ttnn.subtract(a, ttnn.subtract(s_, bp)), ttnn.subtract(b, bp))
 
-        out = np.empty((R, len(eul)), np.float32) if out is None else out
-        o0 = 0
-        for r in refs:
-            Ch, Cl = self._product(Ad, ea, rows, r, "B")
-            Nh, Nl = self._product(A2d, ea2, nb, r, "B2")
-            # d2 / 2 = (sum w|X|^2 + sum w|P|^2) / 2 - cross, rounded once at the end. The first term is the
-            # particle's alone: summed on the norm rows, then copied over the particle's translation slots.
-            sh, se = tsum(ttnn.multiply(Nh, 0.5), ttnn.add(ttnn.multiply(Nh, 0.0), t_nxh))
-            lo = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), t_nxl)
-            for t in (Nh, Nl):
-                ttnn.deallocate(t)
-            sh, lo = _rep(sh, rows // nb), _rep(lo, rows // nb)
-            dh, de = tsum(sh, ttnn.neg(Ch))
-            D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
-            t0 = self._mark("prod_s", t0)
-            np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, o0:o0 + r["O"]])     # the chip holds d2 / 2
-            t0 = self._mark("read_s", t0)
-            o0 += r["O"]
-            for t in (Ch, Cl, sh, lo, D):
-                ttnn.deallocate(t)
-        for t in (tA, tA2, Ad, A2d, t_nxh, t_nxl):
-            ttnn.deallocate(t)
-        if not held and ref_key is None:
+        # The digit planes of a reference set (two products, n bf16 planes each) get a third of the memory the
+        # model's table left. At full image size that is about 1,000 orientations and a call brings more: it is
+        # then projected, scored and dropped a piece at a time, each piece with its own balance, and never held.
+        omax = max(OBLK, self.free // 3 // (4 * self.n * self.Kp) // OBLK * OBLK)
+        if len(eul) > omax:
+            ref_key = None
+        held = ref_key is not None and ref_key == self.ref_key
+        ma, ma2 = (None, None) if held else (_amax(A0, 0), _amax(A20, 0))
+        for o0 in range(0, len(eul), omax):
+            if held:
+                refs, (s, s2) = self.refs, self.bal
+            else:
+                refs = self._project(eul[o0:o0 + omax])
+                t0 = self._mark("proj_s", t0)
+                s, s2 = self._balance(refs, ma, ma2)
+                t0 = self._mark("refdig_s", t0)
+                if ref_key is not None:
+                    self._drop_refs()
+                    self.refs, self.bal, self.ref_key = refs, (s, s2), ref_key
+            last = o0 + omax >= len(eul)
+            A, A2 = np.multiply(A0, s, out=A0 if last else None), A20 * s2      # powers of two: exact in fp32
+            ea, ea2 = _exp(_amax(A, 1)), _exp(_amax(A2, 1))
+            tA, tA2 = self._put(A), self._put(np.pad(A2, ((0, min(-len(A2) % RUP, nb - len(A2))), (0, 0))))
+            Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb)
+            t0 = self._mark("imgdig_s", t0)
+            oo = o0
             for r in refs:
-                for v in r.values():
-                    if isinstance(v, ttnn.Tensor):
-                        ttnn.deallocate(v)
+                Ch, Cl = self._product(Ad, ea, rows, r, "B")
+                Nh, Nl = self._product(A2d, ea2, nb, r, "B2")
+                # d2 / 2 = (sum w|X|^2 + sum w|P|^2) / 2 - cross, rounded once at the end. The first term is the
+                # particle's alone: summed on the norm rows, then copied over the particle's translation slots.
+                sh, se = tsum(ttnn.multiply(Nh, 0.5), ttnn.add(ttnn.multiply(Nh, 0.0), t_nxh))
+                lo = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), t_nxl)
+                for t in (Nh, Nl):
+                    ttnn.deallocate(t)
+                sh, lo = _rep(sh, rows // nb), _rep(lo, rows // nb)
+                dh, de = tsum(sh, ttnn.neg(Ch))
+                D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
+                t0 = self._mark("prod_s", t0)
+                np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, oo:oo + r["O"]])     # the chip holds d2 / 2
+                t0 = self._mark("read_s", t0)
+                oo += r["O"]
+                for t in (Ch, Cl, sh, lo, D):
+                    ttnn.deallocate(t)
+            for t in (tA, tA2, Ad, A2d):
+                ttnn.deallocate(t)
+            if ref_key is None:
+                for r in refs:
+                    for v in r.values():
+                        if isinstance(v, ttnn.Tensor):
+                            ttnn.deallocate(v)
+        for t in (t_nxh, t_nxl):
+            ttnn.deallocate(t)
         c = self.c
         c["dev_s"] += time.time() - t1
         c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
