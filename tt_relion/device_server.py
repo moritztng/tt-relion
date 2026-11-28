@@ -43,7 +43,7 @@ def main():
     cfg = ttnn.WormholeComputeKernelConfig(math_fidelity=getattr(ttnn.MathFidelity, sys.argv[1]),
                                           math_approx_mode=False, fp32_dest_acc_en=True,
                                           packer_l1_acc=True)
-    shm = None
+    shm, segs = None, {}                # the client's shared segments by name
     held_key, held = None, None
     res = None                          # the resident diff2 state of this chip, made on first use
     batchlog = os.environ.get("TT_RELION_BATCHLOG", "") not in ("", "0")
@@ -56,11 +56,19 @@ def main():
         t0 = time.time()
         if cpu0 is None:
             cpu0 = time.process_time()
-        if shm is None or shm.name != req["shm"].lstrip("/"):
-            if shm is not None:
-                shm.close()
-            shm = shared_memory.SharedMemory(name=req["shm"])
-            shm.unlink()        # both sides have it mapped: the memory now goes with the two processes, however they end
+        name = req["shm"].lstrip("/")
+        if name not in segs:
+            if not req.get("staged"):   # a client with one segment at a time: it is done with the one before
+                for s_ in segs.values():
+                    s_.close()
+                segs.clear()
+            segs[name] = shared_memory.SharedMemory(name=req["shm"])
+            segs[name].unlink() # both sides have it mapped: the memory now goes with the two processes, however they end
+        for d in req.get("drop", ()):   # a staged client alternates two segments and names the ones it replaced
+            s_ = segs.pop(d.lstrip("/"), None)
+            if s_ is not None:
+                s_.close()
+        shm = segs[name]
         if req.get("op") == "d2":
             if res is None:
                 from tt_relion.resident import Resident
@@ -166,8 +174,8 @@ def main():
         client = req.get("client", client)
         calls += 1
         reply.write("ok\n")
-    if shm is not None:
-        shm.close()
+    for s_ in segs.values():
+        s_.close()
     ttnn.close_device(dev)
     # The WALLMAP reads this (perf/rlx/wallmap.py). busy_s = up + mm + down; mm_s is the matmul alone,
     # synchronised; the client fields are the bridge's (round trip incl. the server, shm copies, bytes).

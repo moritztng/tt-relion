@@ -172,17 +172,30 @@ class _Server:
         self.lhs_key = None                 # key of the lhs this server's chip holds
         self.model_key = None               # key of the model volume it holds (resident diff2)
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
+        # staged hand-over (TT_RELION_STAGE): two requests may be with the server at once, each in a segment of its own
+        self.segs, self.busy, self.drop = {}, [False, False], []
+        self.sent = self.got = 0            # staged requests written / replies read: replies come in that order
+        self.turn = threading.Condition(threading.Lock())
+        self.inflight = 0                   # batches reserved on, sent to or running on this chip (under _glock)
 
-    def _segment(self, need):
-        """float32 view of this server's shared segment, at least need bytes. A segment has a name only until the
-        server attaches (it unlinks it), so a rank that is stopped or killed leaves nothing in /dev/shm."""
+    def _segment(self, need, k=None):
+        """float32 view of this server's shared segment, at least need bytes (k: of its staged slot k). A segment
+        has a name only until the server attaches (it unlinks it), so a rank that is stopped or killed leaves nothing
+        in /dev/shm."""
         from multiprocessing import resource_tracker, shared_memory
-        if self.shm is None or self.shm.size < need:
-            if self.shm is not None:
-                self.shm.close()
-            self.shm = shared_memory.SharedMemory(create=True, size=need)
-            resource_tracker.unregister(self.shm._name, "shared_memory")
-        return np.ndarray((need // 4,), np.float32, self.shm.buf)
+        shm = self.shm if k is None else self.segs.get(k)
+        if shm is None or shm.size < need:
+            if shm is not None:
+                if k is not None:
+                    self.drop.append(shm.name)      # the server holds every staged segment until told
+                shm.close()
+            shm = shared_memory.SharedMemory(create=True, size=need)
+            resource_tracker.unregister(shm._name, "shared_memory")
+            if k is None:
+                self.shm = shm
+            else:
+                self.segs[k] = shm
+        return np.ndarray((need // 4,), np.float32, shm.buf)
 
     def matmul(self, lhs, rhs, lhs_key=None, sum0=False):
         """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip.
@@ -194,6 +207,9 @@ class _Server:
         n = rhs.shape[2]
         need = 4 * (lhs.size + rhs.size + nc * m * n)
         with self.lock:
+            with self.turn:                 # never between a staged request and its reply
+                while self.got != self.sent:
+                    self.turn.wait()
             t0 = time.time()
             buf = self._segment(need)
             if lhs_key is None or lhs_key != self.lhs_key:
@@ -236,7 +252,15 @@ class _Server:
         list of their float32 [T_i, on_i] blocks: each particle is scored on its own set only."""
         N, R = xr.shape[0], tx.size
         O, P = eul.shape[0], x.shape[0]
-        with self.lock:
+        # Staged: the request is written while the chip may still run the batch before it, into the slot's own
+        # segment; the server reads it the moment it has answered that one. The lock covers the writing only, and
+        # the replies are read in the order the requests were written.
+        k, held = None, True
+        self.lock.acquire()
+        try:
+            if _STAGE:
+                k = self.busy.index(False)
+                self.busy[k] = True
             send = model[0] != self.model_key
             parts = ([np.frombuffer(mdl_mv, dtype=np.float32)] if send else []) + [eul, x, y, xr, xi, w, tx, ty, pn]
             if prior is not None:
@@ -247,13 +271,14 @@ class _Server:
                 nout = int((nt * np.asarray(own)).sum())
             need = 4 * (sum(a.size for a in parts) + ((R * O if own is None else nout) if prior is None else 3 * cap + 2 * N))
             t0 = time.time()
-            buf = self._segment(need)
+            buf = self._segment(need, k)
             o = 0
             for a in parts:
                 buf[o:o + a.size] = a.reshape(-1)
                 o += a.size
             t1 = time.time()
-            req = {"op": "d2", "shm": self.shm.name, "dims": [N, R, O, P], "model": model, "model_sent": send,
+            req = {"op": "d2", "shm": (self.shm if k is None else self.segs[k]).name, "dims": [N, R, O, P],
+                   "model": model, "model_sent": send,
                    "client": self.c}
             if ref_key is not None:
                 req["ref_key"] = ref_key
@@ -261,14 +286,29 @@ class _Server:
                 req["prior"] = [float(prior[2]), cap]
             if own is not None:
                 req["own"], req["own_out"] = [int(v) for v in own], nout
+            if k is not None:
+                req["staged"] = 1
+                if self.drop:
+                    req["drop"], self.drop = self.drop, []
             self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             self.p.stdin.flush()
+            self.model_key = model[0]
             _staged()
+            if k is not None:
+                my, self.sent = self.sent, self.sent + 1
+                self.lock.release()
+                held = False
+                with self.turn:
+                    while self.got != my:
+                        self.turn.wait()
             ans = self.p.stdout.readline().split()
+            if k is not None:
+                with self.turn:
+                    self.got += 1
+                    self.turn.notify_all()
             if ans[:1] != ["ok"]:
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
             t2 = time.time()
-            self.model_key = model[0]
             if own is not None:
                 cut = np.cumsum(nt * np.asarray(own))[:-1]
                 out = [b.reshape(t_, -1) for b, t_ in zip(np.split(buf[o:o + nout].copy(), cut), nt)]
@@ -281,11 +321,17 @@ class _Server:
                 out = (buf[o:o + n].view(np.int32).copy(), buf[o + cap:o + cap + n].view(np.int32).copy(),
                        buf[o + 2 * cap:o + 2 * cap + n].copy(), buf[o + 3 * cap:o + 3 * cap + 2 * N].view(np.float64).copy())
             del buf
-            c = self.c
-            c["calls"] += 1
-            c["bytes"] += need
-            c["rt_s"] = round(c["rt_s"] + t2 - t1, 4)
-            c["copy_s"] = round(c["copy_s"] + t1 - t0 + time.time() - t2, 4)
+            with self.turn:                 # rt_s of a staged request counts its wait behind the batch before it
+                c = self.c
+                c["calls"] += 1
+                c["bytes"] += need
+                c["rt_s"] = round(c["rt_s"] + t2 - t1, 4)
+                c["copy_s"] = round(c["copy_s"] + t1 - t0 + time.time() - t2, 4)
+        finally:
+            if held:
+                self.lock.release()
+            if k is not None:
+                self.busy[k] = False
         return out
 
 
@@ -302,9 +348,35 @@ def _server():
                 for s in _srv:
                     q.put(s)
                 _free = q
-    s = _tl.__dict__.pop("reserved", None) or _free.get()
+    s = _tl.__dict__.pop("reserved", None)
+    if s is None and _STAGE:
+        with _gcv:
+            s = _idle()
+            while s is None:
+                _gcv.wait(0.05)
+                s = _idle()
+            s.inflight += 1
+    elif s is None:
+        s = _free.get()
     _tl.srv = s
     return s
+
+
+def _idle(full=False):
+    """Staged hand-over, under _glock: a chip with nothing on it, or, for a full batch, one that runs a batch and has
+    none waiting behind it (that batch is then with the server before the chip is free)."""
+    s = min(_srv, key=lambda v: v.inflight)
+    return s if s.inflight == 0 or (full and s.inflight == 1) else None
+
+
+def _done(s):
+    """The chip is given back: its batch is home (or never left)."""
+    if _STAGE:
+        with _gcv:
+            s.inflight -= 1
+            _gcv.notify_all()
+    else:
+        _free.put(s)
 
 
 def _matmul(lhs, rhs, lhs_key=None, sum0=False):
@@ -313,7 +385,7 @@ def _matmul(lhs, rhs, lhs_key=None, sum0=False):
     try:
         return s.matmul(lhs, rhs, lhs_key, sum0)
     finally:
-        _free.put(s)
+        _done(s)
 
 
 def _book(key, dt):
@@ -444,7 +516,7 @@ def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared
                                         hashlib.sha256(x.tobytes() + y.tobytes()).hexdigest()[:16], geom[5]) if shared else None,
                     None if prior is None else (f32(prior[0]), f32(prior[1]), float(prior[2]), _CAND_CAP), own)
     finally:
-        _free.put(s)
+        _done(s)
 
 
 def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
@@ -850,6 +922,11 @@ _OWN_FORM = os.environ.get("TT_RELION_OWN_FORM", "") not in ("", "0")
 # 0 (the default): off.
 _NICE = int(os.environ.get("TT_RELION_NICE", "0"))
 _YIELD = float(os.environ.get("TT_RELION_YIELD_MS", "250")) / 1e3       # 0 = off
+# TT_RELION_STAGE=1: staged hand-over. A full batch does not wait for an idle chip: its leader writes it to a chip
+# that still runs the batch before it (a second shared segment, the request in the server's pipe), so the server
+# starts it the moment it has answered that one and no thread has to be woken in between. A batch that is not
+# full still waits for an idle chip, so batches are no smaller than without it. Off by default.
+_STAGE = os.environ.get("TT_RELION_STAGE", "") not in ("", "0")
 _staging = [0]                      # leaders between a chip reserved and their batch sent to it
 _calm = threading.Condition(threading.Lock())
 
@@ -989,7 +1066,23 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                 deadline = time.time() + _BATCH_WAIT
                 while not _take(g["q"])[1] and time.time() < deadline:
                     _gcv.wait(deadline - time.time())
-                if _BACKEND == "ttnn":              # keep collecting until one of the rank's chips is idle
+                if _BACKEND == "ttnn" and _STAGE:   # until a chip is idle, or the batch is full and a chip can queue it
+                    if _free is None:
+                        _gcv.release()
+                        try:
+                            _done(_server())        # starts the rank's servers
+                        finally:
+                            _gcv.acquire()
+                    s = _idle(_take(g["q"])[1])
+                    while s is None:
+                        _gcv.wait(0.05)
+                        s = _idle(_take(g["q"])[1])
+                    s.inflight += 1
+                    _tl.reserved = s
+                    if _YIELD > 0:
+                        _tl.staging = True
+                        _stage(1)
+                elif _BACKEND == "ttnn":            # keep collecting until one of the rank's chips is idle
                     _gcv.release()
                     try:
                         _tl.reserved = _server()
@@ -1069,7 +1162,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     _staged()                       # a net: the batch failed before it was sent
                     s = _tl.__dict__.pop("reserved", None)
                     if s is not None:               # the batch failed before it reached the chip
-                        _free.put(s)
+                        _done(s)
                     _gcv.acquire()
                     item["leads"] = False
                     for b in batch:
