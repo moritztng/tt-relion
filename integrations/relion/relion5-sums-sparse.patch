@@ -1,0 +1,93 @@
+RELION 5 (7f45a711): the two weighted-sum CPU kernels (wavg_ref3D, backprojectRef3D) skip what adds nothing. Only
+samples at or above significant_weight enter the sums, yet both kernels project or walk every fine orientation and
+build sin/cos tables for every translation. An orientation without such a sample is skipped whole and a translation
+without one gets no table. Every sum is the same to the bit (perf/rlx/wsum/same_sums.py on two records).
+
+diff --git a/src/acc/cpu/cpu_kernels/BP.h b/src/acc/cpu/cpu_kernels/BP.h
+index 3227763..0e8f614 100644
+--- a/src/acc/cpu/cpu_kernels/BP.h
++++ b/src/acc/cpu/cpu_kernels/BP.h
+@@ -535,9 +535,13 @@ void backprojectRef3D(
+ 	XFLOAT sin_x[trans_num][img_x], cos_x[trans_num][img_x];
+ 	XFLOAT sin_y[trans_num][img_y], cos_y[trans_num][img_y];
+ 
+-	CpuKernels::computeSincosLookupTable2D(trans_num, g_trans_x, g_trans_y, img_x, img_y,
+-							   &sin_x[0][0], &cos_x[0][0],
+-							   &sin_y[0][0], &cos_y[0][0]);
++	std::vector<char> live_image, live_trans;
++	CpuKernels::markSignificant(g_weights, imageCount, trans_num, significant_weight, live_image, live_trans);
++	for (unsigned long i = 0; i < trans_num; i++)
++		if (live_trans[i])
++			CpuKernels::computeSincosLookupTable2D(1, g_trans_x + i, g_trans_y + i, img_x, img_y,
++							   &sin_x[i][0], &cos_x[i][0],
++							   &sin_y[i][0], &cos_y[i][0]);
+ 	
+ 	// Set up some other variables
+ 	alignas(MEM_ALIGN) XFLOAT s_eulers[9];
+@@ -549,6 +553,8 @@ void backprojectRef3D(
+ 
+ 		
+ 	for (unsigned long img=0; img<imageCount; img++) {
++		if (!live_image[img])
++			continue;
+ 
+ 		for(int i = 0; i < 9; i++)
+ 			s_eulers[i] = g_eulers[img*9+i];
+diff --git a/src/acc/cpu/cpu_kernels/helper.h b/src/acc/cpu/cpu_kernels/helper.h
+index 3d00d61..ef8e0a8 100644
+--- a/src/acc/cpu/cpu_kernels/helper.h
++++ b/src/acc/cpu/cpu_kernels/helper.h
+@@ -619,6 +619,23 @@ inline void translatePixel(
+ // translation index. Since sin(a+B) = sin(A) * cos(B) + cos(A) * sin(B), and 
+ // cos(A+B) = cos(A) * cos(B) - sin(A) * sin(B), we can use lookup table to 
+ // compute sin(x*tx + y*ty) and cos(x*tx + y*ty). 
++// Which orientations and which translations have a sample at or above significant_weight. The weighted-sum
++// kernels add nothing for the rest, so they skip those orientations and build no phase table for those translations.
++inline void  markSignificant(const XFLOAT  *weights,
++                             unsigned long  orientation_num,
++                             unsigned long  trans_num,
++                             XFLOAT         significant_weight,
++                             std::vector<char> &orientation,
++                             std::vector<char> &translation)
++{
++	orientation.assign(orientation_num, 0);
++	translation.assign(trans_num, 0);
++	for (unsigned long o = 0; o < orientation_num; o++)
++		for (unsigned long t = 0; t < trans_num; t++)
++			if (weights[o * trans_num + t] >= significant_weight)
++				orientation[o] = translation[t] = 1;
++}
++
+ inline void  computeSincosLookupTable2D(unsigned long  trans_num,
+                                         XFLOAT  *trans_x,
+ 										XFLOAT  *trans_y,										
+diff --git a/src/acc/cpu/cpu_kernels/wavg.h b/src/acc/cpu/cpu_kernels/wavg.h
+index 2bc0d55..398126e 100644
+--- a/src/acc/cpu/cpu_kernels/wavg.h
++++ b/src/acc/cpu/cpu_kernels/wavg.h
+@@ -46,9 +46,13 @@ void wavg_ref3D(
+ 	XFLOAT sin_x[trans_num][xSize], cos_x[trans_num][xSize];
+ 	XFLOAT sin_y[trans_num][ySize], cos_y[trans_num][ySize];
+ 
+-	computeSincosLookupTable2D(trans_num, g_trans_x, g_trans_y, xSize, ySize,
+-							  &sin_x[0][0], &cos_x[0][0],
+-							  &sin_y[0][0], &cos_y[0][0]);
++	std::vector<char> live_orientation, live_trans;
++	markSignificant(g_weights, orientation_num, trans_num, significant_weight, live_orientation, live_trans);
++	for (unsigned long i = 0; i < trans_num; i++)
++		if (live_trans[i])
++			computeSincosLookupTable2D(1, g_trans_x + i, g_trans_y + i, xSize, ySize,
++							  &sin_x[i][0], &cos_x[i][0],
++							  &sin_y[i][0], &cos_y[i][0]);
+ 	
+ 	// Set up other arrays
+ 	alignas(MEM_ALIGN) XFLOAT ref_real[xSize], ref_imag[xSize];
+@@ -59,6 +63,8 @@ void wavg_ref3D(
+ 	alignas(MEM_ALIGN) XFLOAT wdiff2s_AA   [xSize];
+ 	
+ 	for(unsigned long bid=0; bid<orientation_num; bid++) {
++		if (!live_orientation[bid])
++			continue;
+ 
+ 		// Copy the rotation matrix to local variables
+ 		int offset = bid * 9;
