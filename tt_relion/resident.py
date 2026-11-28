@@ -488,7 +488,7 @@ class Resident:
         # particles per program: the digit planes of both products get a third of what the table left (as in d2),
         # and a projection call takes OCH orientations. A power of two, so a rank compiles few shapes.
         qmax = max(1, min(self.free // 3 // (2 * (self.n + self.n2) * self.Kp), OCH) // On)
-        qmax = 1 << (qmax.bit_length() - 1)
+        qmax = min(32, 1 << (qmax.bit_length() - 1))            # 32: the norm rows of a program share one row block
         eul = np.asarray(eul, np.float32).reshape(-1, 9)
         A0, A20, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, sel=np.arange(N))     # [R, K], [N, K], [N]
         t0 = t1 = self._mark("host_s", t0)
@@ -509,11 +509,18 @@ class Resident:
             t0 = self._mark("proj_s", t0)
             mb = self._colmax(B)                # the K-diagonal balance of d2, per program
             res = []
-            for X, mbx, a0, lens, rr, n in ((B, mb, A0, nt, R1, self.n), (B2, mb * mb, A20, None, 32, self.n2)):
-                A = np.zeros((q, rr, self.K), np.float32)
+            # the cross term: a block of R1 rows per particle against its own columns, q blocks to one program.
+            # The norm term has one row per particle: all q rows share one 32-row block against every column of the
+            # program (the product d2 runs), and a particle reads its row at its own columns.
+            for X, mbx, norm, n in ((B, mb, False, self.n), (B2, mb * mb, True, self.n2)):
+                rr, nq = (32, 1) if norm else (R1, q)
+                A = np.zeros((nq, rr, self.K), np.float32)
                 for j, i in enumerate(idx):     # a particle's rows lead its block
-                    A[j, :1 if lens is None else lens[i]] = a0[i:i + 1] if lens is None else a0[r0[i]:r0[i + 1]]
-                A = A.reshape(q * rr, self.K)
+                    if norm:
+                        A[0, j] = A20[i]
+                    else:
+                        A[j, :nt[i]] = A0[r0[i]:r0[i + 1]]
+                A = A.reshape(nq * rr, self.K)
                 ma = _amax(A, 0)
                 ok = (ma > 0) & (mbx > 0)
                 e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mbx, 1)) - np.log2(np.where(ok, ma, 1)))), 0).astype(int)
@@ -524,32 +531,39 @@ class Resident:
                 ts = self._put(np.ldexp(1.0, -e).reshape(1, -1))
                 Xb = ttnn.multiply(X, ts)
                 eb = _exp(self._rowmax(Xb))
-                Bd = ttnn.reshape(self._digits(Xb, eb, q * On, n), (n * q, On, self.Kp))
+                Bd = self._digits(Xb, eb, q * On, n)                # [n, q On, Kp]
                 for t in (ts, Xb, X):
                     ttnn.deallocate(t)
                 t0 = self._mark("refdig_s", t0)
                 tA = self._put(A)
-                Ad = ttnn.reshape(self._digits(tA, ea, q * rr, n), (n * q, rr, self.Kp))
+                Ad = self._digits(tA, ea, nq * rr, n)               # [n, nq rr, Kp]
                 ttnn.deallocate(tA)
                 t0 = self._mark("imgdig_s", t0)
                 assert int(ea.min()) + int(eb.min()) - 2 * n > -126 and int(ea.max()) + int(eb.max()) < 127
-                S = oz_fused(Ad, Bd, n, rb=rr // 32, nb=min(On, OBLK) // 32, bt=True, q=q, adm=True, bdm=True)
-                hi, lo = oz_combine(S, self._ti(ea, q * rr), self._ti(eb, q * On), n, q=q)
+                t_ea, t_eb = self._ti(ea, nq * rr), self._ti(eb, q * On)
+                if norm:
+                    S = oz_fused(Ad, Bd, n, rb=1, nb=OBLK // 32 if q * On % OBLK == 0 else On // 32, bt=True)
+                    hi, lo = oz_combine(S, t_ea, t_eb, n)
+                else:
+                    S = oz_fused(ttnn.reshape(Ad, (n * q, rr, self.Kp)), ttnn.reshape(Bd, (n * q, On, self.Kp)), n,
+                                 rb=rr // 32, nb=min(On, OBLK) // 32, bt=True, q=q, adm=True, bdm=True)
+                    hi, lo = oz_combine(S, t_ea, t_eb, n, q=q)
                 for t in (S, Ad, Bd):
-                    ttnn.deallocate(t)
+                    if t.is_allocated():
+                        ttnn.deallocate(t)
                 t0 = self._mark("prod_s", t0)
-                keep = 1 if lens is None else int(nt[idx].max())    # only the rows in use come back
+                keep = q if norm else int(nt[idx].max())            # only the rows in use come back
                 got = 0.0
                 for v in (hi, lo):
-                    v3 = ttnn.reshape(v, (q, rr, On))
-                    v_ = ttnn.to_layout(ttnn.slice(v3, [0, 0, 0], [q, keep, On]), ttnn.ROW_MAJOR_LAYOUT)
-                    got = got + ttnn.to_torch(v_).double().numpy().reshape(q, keep, On)
+                    v3 = ttnn.reshape(v, (nq, rr, q * On if norm else On))
+                    v_ = ttnn.to_layout(ttnn.slice(v3, [0, 0, 0], [nq, keep, int(v3.shape[2])]), ttnn.ROW_MAJOR_LAYOUT)
+                    got = got + ttnn.to_torch(v_).double().numpy().reshape(nq, keep, -1)
                     for t in (v_, v3, v):
                         if t.is_allocated():
                             ttnn.deallocate(t)
                 res.append(got)
                 t0 = self._mark("read_s", t0)
-            C, Nn = res
+            C, Nn = res[0], np.stack([res[1][0, j, j * On:(j + 1) * On] for j in range(q)])[:, None]
             for j in range(m):
                 i = p0 + j
                 out.append((nx[i] + Nn[j, :1, :on[i]] - 2.0 * C[j, :nt[i], :on[i]]).astype(np.float32))

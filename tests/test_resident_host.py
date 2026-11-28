@@ -186,8 +186,9 @@ def test_own_form_scores_each_particle_on_its_own_set():
                                                   np.zeros((n - 1,) + X.a.shape)]))
     seen = []
 
-    def oz_fused(Ad, Bd, n, rb, nb, bt, q, adm, bdm):
-        assert bt and adm and bdm and Ad.shape[1] == 32 * rb and Bd.shape[1] % (32 * nb) == 0
+    def oz_fused(Ad, Bd, n, rb, nb, bt, q=1, adm=False, bdm=False):
+        assert bt and adm == bdm and Ad.shape[1] == 32 * rb and Bd.shape[1] % (32 * nb) == 0
+        assert Ad.shape[0] == Bd.shape[0] == q * n
         seen.append(q)
         S = np.zeros((q * n, Ad.shape[1], Bd.shape[1]))
         for j in range(q):                      # digit-major operands: plane i of batch j is i * q + j
@@ -195,7 +196,7 @@ def test_own_form_scores_each_particle_on_its_own_set():
         return T(S)
     rs.oz_fused = oz_fused
 
-    def oz_combine(S, ea, eb, n, q):
+    def oz_combine(S, ea, eb, n, q=1):
         R, O = S.shape[1], S.shape[2]
         hi = S.a.reshape(q, n, R, O)[:, 0] * np.ldexp(1.0, ea.a.reshape(q, R, 1) + eb.a.reshape(q, 1, O))
         return T(hi.reshape(q * R, O)), T(np.zeros((q * R, O)))
@@ -217,7 +218,7 @@ def test_own_form_scores_each_particle_on_its_own_set():
         tx, ty = (rng.uniform(-0.2, 0.2, (2, len(pn)))).astype(np.float32)
         seen.clear()
         got = r.d2_own(eul, on, xr, xi, w, tx, ty, pn, x, y)
-        assert len(got) == N and (len(seen) > 2) == (free < 1 << 40 and N > 1)
+        assert len(got) == N and (len(seen) > 2) == (free < 1 << 40 and N > 1) and 1 in seen
         e0, r0 = np.concatenate([[0], np.cumsum(on)]), np.concatenate([[0], np.cumsum(nt)])
         for i in range(N):
             pr, pi = proj(eul[e0[i]:e0[i + 1]].astype(np.float64), np.arange(P))
