@@ -34,8 +34,16 @@ RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a n
 TBLK = 1 << 14  # voxels per block of the table build (1 MB of table)
 TURNS = int(os.environ.get("TT_RELION_TABLE_TURNS", "4"))   # chips of a host that upload a large table at once
 SUB = os.environ.get("TT_RELION_SUBPHASE", "") not in ("", "0")   # split prod_s (a device sync per step: a profile, not a rate)
+OPT = int(os.environ.get("TT_RELION_OP_THREADS", "4"))     # host threads that build a batch's image operand
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 FARP = 1e30     # -log prior / 2 of an excluded orientation and of a pad column: never inside a window
+
+
+def _pool(p=[]):
+    if not p:
+        from concurrent.futures import ThreadPoolExecutor
+        p.append(ThreadPoolExecutor(OPT))
+    return p[0]
 
 
 def _amax(a, axis):
@@ -324,13 +332,20 @@ class Resident:
         w = w.astype(np.float64)
         xw = (xr + 1j * xi) * w                                                              # [N, P] complex128
         (xu, xj), (yu, yj) = np.unique(x, return_inverse=True), np.unique(y, return_inverse=True)
-        ex = np.exp(1j * tx[:, None].astype(np.float64) * xu)                                # [R, distinct x]
-        ey = np.exp(1j * ty[:, None].astype(np.float64) * yu)
         A = np.zeros((n, self.NC, 2, 1024), np.float32)
-        for c in range(self.NC):
-            p = slice(c * 1024, min(c * 1024 + 1024, self.P))
-            z = ex[:, xj[p]] * ey[:, yj[p]] * xw[pn, p]
-            A[dr, c, 0, :p.stop - p.start], A[dr, c, 1, :p.stop - p.start] = z.real, z.imag
+
+        def rows(a, b):                         # rows a .. b: their own rows of A, so the parts run side by side
+            ex = np.exp(1j * tx[a:b, None].astype(np.float64) * xu)                          # [rows, distinct x]
+            ey = np.exp(1j * ty[a:b, None].astype(np.float64) * yu)
+            for c in range(self.NC):
+                p = slice(c * 1024, min(c * 1024 + 1024, self.P))
+                z = ex[:, xj[p]] * ey[:, yj[p]] * xw[pn[a:b], p]
+                A[dr[a:b], c, 0, :p.stop - p.start], A[dr[a:b], c, 1, :p.stop - p.start] = z.real, z.imag
+        # The server is one thread and the chip waits while it builds this. Runs of 128 rows keep a run's complex
+        # temporaries (2 MB each) in cache, and OPT threads take the runs side by side.
+        R = len(pn)
+        cuts = list(range(0, R, 128)) + [R]
+        list(_pool().map(rows, cuts[:-1], cuts[1:])) if OPT > 1 and len(cuts) > 2 else [rows(a, b) for a, b in zip(cuts[:-1], cuts[1:])]
         nx = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)
         return A.reshape(n, self.K), self._kchip(w, w)[sel], nx[sel]
 
