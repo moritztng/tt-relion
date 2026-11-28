@@ -1,0 +1,540 @@
+diff --git a/src/acc/acc_backprojector.h b/src/acc/acc_backprojector.h
+index 5946cb85..f96a5273 100644
+--- a/src/acc/acc_backprojector.h
++++ b/src/acc/acc_backprojector.h
+@@ -17,6 +17,18 @@ using deviceStream_t = float;
+ #include "src/acc/settings.h"
+ #include "src/acc/acc_ptr.h"
+ 
++// Volumes that are gathered from or scattered into at random (the reference, the backprojected sums) sit on
++// 2 MB pages: with 4 kB pages nearly every access is a TLB miss on top of its cache miss. NULL = out of memory.
++#include <sys/mman.h>
++static inline void *allocHugePages(size_t bytes)
++{
++	const size_t huge = (size_t)2 << 20;
++	void *p = NULL;
++	if (posix_memalign(&p, bytes < huge ? MEM_ALIGN : huge, bytes)) return NULL;
++	if (bytes >= huge) madvise(p, bytes, MADV_HUGEPAGE);
++	return p;
++}
++
+ #ifdef ALTCPU
+ #  include <tbb/spin_mutex.h>
+ #endif
+@@ -38,6 +50,8 @@ public:
+ 	size_t allocaton_size;
+ 	size_t voxelCount;
+ 
++	// On the CPU one block, a voxel's (real, imag, weight) side by side: element n of each is p[3 * n].
++	// A splat then touches 4 cache lines per pixel instead of 12.
+ 	XFLOAT *d_mdlReal, *d_mdlImag, *d_mdlWeight;
+ 
+ 	deviceStream_t stream;
+diff --git a/src/acc/acc_backprojector_impl.h b/src/acc/acc_backprojector_impl.h
+index 18a49560..67e78850 100644
+--- a/src/acc/acc_backprojector_impl.h
++++ b/src/acc/acc_backprojector_impl.h
+@@ -54,9 +54,9 @@ size_t AccBackprojector::setMdlDim(
+ 		d_mdlImag   = (XFLOAT*)(stream->syclMalloc(mdlXYZ * sizeof(XFLOAT), syclMallocType::device, "d_mdlImag"));
+ 		d_mdlWeight = (XFLOAT*)(stream->syclMalloc(mdlXYZ * sizeof(XFLOAT), syclMallocType::device, "d_mdlWeight"));
+ #else
+-		if (posix_memalign((void **)&d_mdlReal,   MEM_ALIGN, mdlXYZ * sizeof(XFLOAT))) CRITICAL(RAMERR);
+-		if (posix_memalign((void **)&d_mdlImag,   MEM_ALIGN, mdlXYZ * sizeof(XFLOAT))) CRITICAL(RAMERR);
+-		if (posix_memalign((void **)&d_mdlWeight, MEM_ALIGN, mdlXYZ * sizeof(XFLOAT))) CRITICAL(RAMERR);
++		if (!(d_mdlReal = (XFLOAT *)allocHugePages(3 * mdlXYZ * sizeof(XFLOAT)))) CRITICAL(RAMERR);
++		d_mdlImag   = d_mdlReal + 1;
++		d_mdlWeight = d_mdlReal + 2;
+ 
+         mutexes = new tbb::spin_mutex[mdlZ*mdlY];
+ #endif
+@@ -97,9 +97,7 @@ void AccBackprojector::initMdl()
+ 	stream->syclMemset(d_mdlWeight, 0, mdlXYZ * sizeof(XFLOAT));
+ 	stream->waitAll();
+ #else
+-	memset(d_mdlReal,     0, mdlXYZ * sizeof(XFLOAT));
+-	memset(d_mdlImag,     0, mdlXYZ * sizeof(XFLOAT));
+-	memset(d_mdlWeight,   0, mdlXYZ * sizeof(XFLOAT));
++	memset(d_mdlReal, 0, 3 * mdlXYZ * sizeof(XFLOAT));
+ #endif
+ 
+     voxelCount = mdlXYZ;
+@@ -131,9 +129,12 @@ void AccBackprojector::getMdlData(XFLOAT *r, XFLOAT *i, XFLOAT * w)
+ 	stream->syclMemcpy(w, d_mdlWeight, mdlXYZ * sizeof(XFLOAT));
+ 	stream->waitAll();
+ #else
+-	memcpy(r, d_mdlReal,   mdlXYZ * sizeof(XFLOAT));
+-	memcpy(i, d_mdlImag,   mdlXYZ * sizeof(XFLOAT));
+-	memcpy(w, d_mdlWeight, mdlXYZ * sizeof(XFLOAT));
++	for (size_t n = 0; n < mdlXYZ; n++)
++	{
++		r[n] = d_mdlReal[3 * n];
++		i[n] = d_mdlImag[3 * n];
++		w[n] = d_mdlWeight[3 * n];
++	}
+ #endif
+ }
+ 
+@@ -176,8 +177,6 @@ void AccBackprojector::clear()
+ 		stream->syclFree(d_mdlWeight);
+ #else
+ 		free(d_mdlReal);
+-		free(d_mdlImag);
+-		free(d_mdlWeight);
+ 		delete [] mutexes;
+ #endif
+ 
+diff --git a/src/acc/acc_helper_functions_impl.h b/src/acc/acc_helper_functions_impl.h
+index 7752d928..f26bc6b9 100644
+--- a/src/acc/acc_helper_functions_impl.h
++++ b/src/acc/acc_helper_functions_impl.h
+@@ -1112,12 +1112,12 @@ void runBackProjectKernel(
+ 	// what this particle alone adds (the shared volume is written by every thread).
+ 	if (BP.mdlZ != 1 && !do_grad && !data_is_3D && TTSumsRecord::active())
+ 	{
+-		std::vector<XFLOAT> sr(BP.mdlXYZ, 0), si(BP.mdlXYZ, 0), sw(BP.mdlXYZ, 0);
++		std::vector<XFLOAT> s(3 * BP.mdlXYZ, 0);
+ 		if (ctf_premultiplied)
+ 			CpuKernels::backprojectRef3D<true>(imageCount,
+ 				d_img_real, d_img_imag, trans_x, trans_y, d_weights, d_Minvsigma2s, d_ctfs,
+ 				translation_num, significant_weight, weight_norm, d_eulers,
+-				sr.data(), si.data(), sw.data(),
++				&s[0], &s[1], &s[2],
+ 				BP.maxR, BP.maxR2, (XFLOAT)BP.padding_factor,
+ 				(unsigned)imgX, (unsigned)imgY, (unsigned)imgZ, (size_t)imgX*(size_t)imgY*(size_t)imgZ,
+ 				(unsigned)BP.mdlX, (unsigned)BP.mdlY, BP.mdlInitY, BP.mdlInitZ, BP.mutexes);
+@@ -1125,7 +1125,7 @@ void runBackProjectKernel(
+ 			CpuKernels::backprojectRef3D<false>(imageCount,
+ 				d_img_real, d_img_imag, trans_x, trans_y, d_weights, d_Minvsigma2s, d_ctfs,
+ 				translation_num, significant_weight, weight_norm, d_eulers,
+-				sr.data(), si.data(), sw.data(),
++				&s[0], &s[1], &s[2],
+ 				BP.maxR, BP.maxR2, (XFLOAT)BP.padding_factor,
+ 				(unsigned)imgX, (unsigned)imgY, (unsigned)imgZ, (size_t)imgX*(size_t)imgY*(size_t)imgZ,
+ 				(unsigned)BP.mdlX, (unsigned)BP.mdlY, BP.mdlInitY, BP.mdlInitZ, BP.mutexes);
+@@ -1133,7 +1133,7 @@ void runBackProjectKernel(
+ 				d_img_real, d_img_imag, d_Minvsigma2s, (long)imgX * imgY * imgZ,
+ 				BP.maxR, BP.maxR2, (float)BP.padding_factor,
+ 				BP.mdlX, BP.mdlY, BP.mdlZ, BP.mdlInitY, BP.mdlInitZ,
+-				sr.data(), si.data(), sw.data());
++				&s[0], &s[1], &s[2], 3);
+ 	}
+ #endif
+ }
+diff --git a/src/acc/cpu/cpu_kernels/BP.h b/src/acc/cpu/cpu_kernels/BP.h
+index 0e8f6149..0dfd39e1 100644
+--- a/src/acc/cpu/cpu_kernels/BP.h
++++ b/src/acc/cpu/cpu_kernels/BP.h
+@@ -186,29 +186,29 @@ void backproject2D(
+ 					idx_tmp = (size_t)y0 * (size_t)mdl_x + (size_t)x0;
+ 
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[y0]);
+-					g_model_real  [idx_tmp] += dd00 * real[x];
+-					g_model_imag  [idx_tmp] += dd00 * imag[x];
+-					g_model_weight[idx_tmp] += dd00 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd00 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd00 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd00 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1;  // x1 = x0 + 1
+ 
+-					g_model_real  [idx_tmp] += dd01 * real[x];
+-					g_model_imag  [idx_tmp] += dd01 * imag[x];
+-					g_model_weight[idx_tmp] += dd01 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd01 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd01 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd01 * Fweight[x];
+ 				}  // scoping for first lock
+ 
+ 				{
+ 					idx_tmp = (size_t)y1 * (size_t)mdl_x + (size_t)x0;
+ 
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[y1]);
+-					g_model_real  [idx_tmp] += dd10 * real[x];
+-					g_model_imag  [idx_tmp] += dd10 * imag[x];
+-					g_model_weight[idx_tmp] += dd10 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd10 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd10 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd10 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1;  // x1 = x0 + 1
+-					g_model_real  [idx_tmp] += dd11 * real[x];
+-					g_model_imag  [idx_tmp] += dd11 * imag[x];
+-					g_model_weight[idx_tmp] += dd11 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd11 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd11 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd11 * Fweight[x];
+ 				}  // scoping for second lock
+ 			}  // for x
+ 			
+@@ -427,13 +427,13 @@ void backproject3D(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z0 * mdl_y + y0]);
+ 
+-						g_model_real  [z0MdlxMdly + y0 * mdl_x + x0]+=dd000 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y0 * mdl_x + x0]+=dd000 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y0 * mdl_x + x0]+=dd000 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y0 * mdl_x + x0)]+=dd000 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y0 * mdl_x + x0)]+=dd000 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y0 * mdl_x + x0)]+=dd000 * Fweight[tid];
+ 
+-						g_model_real  [z0MdlxMdly + y0 * mdl_x + x1]+=dd001 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y0 * mdl_x + x1]+=dd001 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y0 * mdl_x + x1]+=dd001 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y0 * mdl_x + x1)]+=dd001 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y0 * mdl_x + x1)]+=dd001 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y0 * mdl_x + x1)]+=dd001 * Fweight[tid];
+ 					}
+ 
+ 					XFLOAT dd010 = mfz *  fy * mfx;
+@@ -442,13 +442,13 @@ void backproject3D(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z0 * mdl_y + y1]);
+ 
+-						g_model_real  [z0MdlxMdly + y1 * mdl_x + x0]+=dd010 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y1 * mdl_x + x0]+=dd010 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y1 * mdl_x + x0]+=dd010 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y1 * mdl_x + x0)]+=dd010 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y1 * mdl_x + x0)]+=dd010 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y1 * mdl_x + x0)]+=dd010 * Fweight[tid];
+ 
+-						g_model_real  [z0MdlxMdly + y1 * mdl_x + x1]+=dd011 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y1 * mdl_x + x1]+=dd011 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y1 * mdl_x + x1]+=dd011 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y1 * mdl_x + x1)]+=dd011 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y1 * mdl_x + x1)]+=dd011 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y1 * mdl_x + x1)]+=dd011 * Fweight[tid];
+ 					}
+ 
+ 					XFLOAT dd100 =  fz * mfy * mfx;
+@@ -459,13 +459,13 @@ void backproject3D(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z1 * mdl_y + y0]);
+ 
+-						g_model_real  [z1MdlxMdly + y0 * mdl_x + x0]+=dd100 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y0 * mdl_x + x0]+=dd100 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y0 * mdl_x + x0]+=dd100 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y0 * mdl_x + x0)]+=dd100 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y0 * mdl_x + x0)]+=dd100 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y0 * mdl_x + x0)]+=dd100 * Fweight[tid];
+ 
+-						g_model_real  [z1MdlxMdly + y0 * mdl_x + x1]+=dd101 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y0 * mdl_x + x1]+=dd101 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y0 * mdl_x + x1]+=dd101 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y0 * mdl_x + x1)]+=dd101 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y0 * mdl_x + x1)]+=dd101 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y0 * mdl_x + x1)]+=dd101 * Fweight[tid];
+ 					}
+ 
+ 					XFLOAT dd110 =  fz *  fy * mfx;
+@@ -474,13 +474,13 @@ void backproject3D(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z1 * mdl_y + y1]);
+ 
+-						g_model_real  [z1MdlxMdly + y1 * mdl_x + x0]+=dd110 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y1 * mdl_x + x0]+=dd110 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y1 * mdl_x + x0]+=dd110 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y1 * mdl_x + x0)]+=dd110 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y1 * mdl_x + x0)]+=dd110 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y1 * mdl_x + x0)]+=dd110 * Fweight[tid];
+ 
+-						g_model_real  [z1MdlxMdly + y1 * mdl_x + x1]+=dd111 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y1 * mdl_x + x1]+=dd111 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y1 * mdl_x + x1]+=dd111 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y1 * mdl_x + x1)]+=dd111 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y1 * mdl_x + x1)]+=dd111 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y1 * mdl_x + x1)]+=dd111 * Fweight[tid];
+ 					}
+ 				}  // Fweight[tid] > (RFLOAT) 0.0
+ 			}  // for tid
+@@ -690,14 +690,14 @@ void backprojectRef3D(
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[z0 * mdl_y + y0]);
+ 
+ 					idx_tmp = z0_mdl_x_mdl_y + y0_mdl_x + (size_t)x0; // z0 * mdl_x * mdl_y + y0 * mdl_x + x0;
+-					g_model_real  [idx_tmp]+=dd000 * real[x];
+-					g_model_imag  [idx_tmp]+=dd000 * imag[x];
+-					g_model_weight[idx_tmp]+=dd000 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd000 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd000 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd000 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1; // z0 * mdl_x * mdl_y + y0 * mdl_x + x1;
+-					g_model_real  [idx_tmp]+=dd001 * real[x];
+-					g_model_imag  [idx_tmp]+=dd001 * imag[x];
+-					g_model_weight[idx_tmp]+=dd001 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd001 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd001 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd001 * Fweight[x];
+ 				}
+ 
+ 				XFLOAT dd010 = (mfz - mfz_mfy) * mfx; // mfz *  fy *  mfx
+@@ -707,14 +707,14 @@ void backprojectRef3D(
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[z0 * mdl_y + y0 + 1]);
+ 
+ 					idx_tmp = z0_mdl_x_mdl_y + y0_mdl_x + (size_t)mdl_x + (size_t)x0; // z0 * mdl_x * mdl_y + y1 * mdl_x + x0;
+-					g_model_real  [idx_tmp]+=dd010 * real[x];
+-					g_model_imag  [idx_tmp]+=dd010 * imag[x];
+-					g_model_weight[idx_tmp]+=dd010 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd010 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd010 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd010 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1; // z0 * mdl_x * mdl_y + y1 * mdl_x + x1;
+-					g_model_real  [idx_tmp]+=dd011 * real[x];
+-					g_model_imag  [idx_tmp]+=dd011 * imag[x];
+-					g_model_weight[idx_tmp]+=dd011 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd011 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd011 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd011 * Fweight[x];
+ 				}
+ 
+ 				XFLOAT dd100 = (mfy - mfz_mfy) * mfx; // fz *  mfy *  mfx
+@@ -725,14 +725,14 @@ void backprojectRef3D(
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[z1 * mdl_y + y0]);
+ 
+ 					idx_tmp = z0_mdl_x_mdl_y + mdl_x_mdl_y + y0_mdl_x + (size_t)x0; // z1 * mdl_x * mdl_y + y0 * mdl_x + x0;
+-					g_model_real  [idx_tmp]+=dd100 * real[x];
+-					g_model_imag  [idx_tmp]+=dd100 * imag[x];
+-					g_model_weight[idx_tmp]+=dd100 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd100 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd100 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd100 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1; // z1 * mdl_x * mdl_y + y0 * mdl_x + x1;
+-					g_model_real  [idx_tmp]+=dd101 * real[x];
+-					g_model_imag  [idx_tmp]+=dd101 * imag[x];
+-					g_model_weight[idx_tmp]+=dd101 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd101 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd101 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd101 * Fweight[x];
+ 
+ 				}
+ 
+@@ -742,14 +742,14 @@ void backprojectRef3D(
+ 				{
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[z1 * mdl_y + y0 + 1]);
+ 					idx_tmp = z0_mdl_x_mdl_y + mdl_x_mdl_y + y0_mdl_x + (size_t)mdl_x + (size_t)x0; // z1 * mdl_x * mdl_y + y1 * mdl_x + x0;
+-					g_model_real  [idx_tmp]+=dd110 * real[x];
+-					g_model_imag  [idx_tmp]+=dd110 * imag[x];
+-					g_model_weight[idx_tmp]+=dd110 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd110 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd110 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd110 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1; // z1 * mdl_x * mdl_y + y1 * mdl_x + x1;
+-					g_model_real  [idx_tmp]+=dd111 * real[x];
+-					g_model_imag  [idx_tmp]+=dd111 * imag[x];
+-					g_model_weight[idx_tmp]+=dd111 * Fweight[x];
++					g_model_real  [3UL * idx_tmp]+=dd111 * real[x];
++					g_model_imag  [3UL * idx_tmp]+=dd111 * imag[x];
++					g_model_weight[3UL * idx_tmp]+=dd111 * Fweight[x];
+ 				}
+ 			}  // for x direction
+ 
+@@ -987,13 +987,13 @@ void backproject3D_SGD(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z0 * mdl_y + y0]);
+ 
+-						g_model_real  [z0MdlxMdly + y0 * mdl_x + x0] += dd000 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y0 * mdl_x + x0] += dd000 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y0 * mdl_x + x0] += dd000 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y0 * mdl_x + x0)] += dd000 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y0 * mdl_x + x0)] += dd000 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y0 * mdl_x + x0)] += dd000 * Fweight[tid];
+ 
+-						g_model_real  [z0MdlxMdly + y0 * mdl_x + x1] += dd001 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y0 * mdl_x + x1] += dd001 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y0 * mdl_x + x1] += dd001 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y0 * mdl_x + x1)] += dd001 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y0 * mdl_x + x1)] += dd001 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y0 * mdl_x + x1)] += dd001 * Fweight[tid];
+ 					}
+ 
+ 					XFLOAT dd010 = mfz *  fy * mfx;
+@@ -1002,13 +1002,13 @@ void backproject3D_SGD(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z0 * mdl_y + y1]);
+ 
+-						g_model_real  [z0MdlxMdly + y1 * mdl_x + x0] += dd010 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y1 * mdl_x + x0] += dd010 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y1 * mdl_x + x0] += dd010 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y1 * mdl_x + x0)] += dd010 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y1 * mdl_x + x0)] += dd010 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y1 * mdl_x + x0)] += dd010 * Fweight[tid];
+ 
+-						g_model_real  [z0MdlxMdly + y1 * mdl_x + x1] += dd011 * real[tid];
+-						g_model_imag  [z0MdlxMdly + y1 * mdl_x + x1] += dd011 * imag[tid];
+-						g_model_weight[z0MdlxMdly + y1 * mdl_x + x1] += dd011 * Fweight[tid];
++						g_model_real  [3UL * (z0MdlxMdly + y1 * mdl_x + x1)] += dd011 * real[tid];
++						g_model_imag  [3UL * (z0MdlxMdly + y1 * mdl_x + x1)] += dd011 * imag[tid];
++						g_model_weight[3UL * (z0MdlxMdly + y1 * mdl_x + x1)] += dd011 * Fweight[tid];
+ 					}
+ 
+ 					XFLOAT dd100 =  fz * mfy * mfx;
+@@ -1019,13 +1019,13 @@ void backproject3D_SGD(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z1 * mdl_y + y0]);
+ 
+-						g_model_real  [z1MdlxMdly + y0 * mdl_x + x0] += dd100 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y0 * mdl_x + x0] += dd100 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y0 * mdl_x + x0] += dd100 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y0 * mdl_x + x0)] += dd100 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y0 * mdl_x + x0)] += dd100 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y0 * mdl_x + x0)] += dd100 * Fweight[tid];
+ 
+-						g_model_real  [z1MdlxMdly + y0 * mdl_x + x1] += dd101 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y0 * mdl_x + x1] += dd101 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y0 * mdl_x + x1] += dd101 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y0 * mdl_x + x1)] += dd101 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y0 * mdl_x + x1)] += dd101 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y0 * mdl_x + x1)] += dd101 * Fweight[tid];
+ 
+ 					}
+ 
+@@ -1035,13 +1035,13 @@ void backproject3D_SGD(
+ 					{
+ 						tbb::spin_mutex::scoped_lock lock(mutexes[z1 * mdl_y + y1]);
+ 
+-						g_model_real  [z1MdlxMdly + y1 * mdl_x + x0] += dd110 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y1 * mdl_x + x0] += dd110 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y1 * mdl_x + x0] += dd110 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y1 * mdl_x + x0)] += dd110 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y1 * mdl_x + x0)] += dd110 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y1 * mdl_x + x0)] += dd110 * Fweight[tid];
+ 
+-						g_model_real  [z1MdlxMdly + y1 * mdl_x + x1] += dd111 * real[tid];
+-						g_model_imag  [z1MdlxMdly + y1 * mdl_x + x1] += dd111 * imag[tid];
+-						g_model_weight[z1MdlxMdly + y1 * mdl_x + x1] += dd111 * Fweight[tid];
++						g_model_real  [3UL * (z1MdlxMdly + y1 * mdl_x + x1)] += dd111 * real[tid];
++						g_model_imag  [3UL * (z1MdlxMdly + y1 * mdl_x + x1)] += dd111 * imag[tid];
++						g_model_weight[3UL * (z1MdlxMdly + y1 * mdl_x + x1)] += dd111 * Fweight[tid];
+ 					}
+ 
+ 				} // Fweight[tid] > (RFLOAT) 0.0
+@@ -1240,29 +1240,29 @@ void backproject2D_SGD(
+ 					idx_tmp = (size_t)y0 * (size_t)mdl_x + (size_t)x0;
+ 
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[y0]);
+-					g_model_real  [idx_tmp] += dd00 * real[x];
+-					g_model_imag  [idx_tmp] += dd00 * imag[x];
+-					g_model_weight[idx_tmp] += dd00 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd00 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd00 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd00 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1;  // x1 = x0 + 1
+ 
+-					g_model_real  [idx_tmp] += dd01 * real[x];
+-					g_model_imag  [idx_tmp] += dd01 * imag[x];
+-					g_model_weight[idx_tmp] += dd01 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd01 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd01 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd01 * Fweight[x];
+ 				}  // scoping for first lock
+ 
+ 				{
+ 					idx_tmp = (size_t)y1 * (size_t)mdl_x + (size_t)x0;
+ 
+ 					tbb::spin_mutex::scoped_lock lock(mutexes[y1]);
+-					g_model_real  [idx_tmp] += dd10 * real[x];
+-					g_model_imag  [idx_tmp] += dd10 * imag[x];
+-					g_model_weight[idx_tmp] += dd10 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd10 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd10 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd10 * Fweight[x];
+ 
+ 					idx_tmp = idx_tmp + 1;  // x1 = x0 + 1
+-					g_model_real  [idx_tmp] += dd11 * real[x];
+-					g_model_imag  [idx_tmp] += dd11 * imag[x];
+-					g_model_weight[idx_tmp] += dd11 * Fweight[x];
++					g_model_real  [3UL * idx_tmp] += dd11 * real[x];
++					g_model_imag  [3UL * idx_tmp] += dd11 * imag[x];
++					g_model_weight[3UL * idx_tmp] += dd11 * Fweight[x];
+ 				}  // scoping for second lock
+ 			}  // for x
+ 
+diff --git a/src/ml_optimiser.cpp b/src/ml_optimiser.cpp
+index fb33d84f..9002c9f5 100644
+--- a/src/ml_optimiser.cpp
++++ b/src/ml_optimiser.cpp
+@@ -3675,14 +3675,9 @@ void MlOptimiser::expectation()
+             else
+                 mdlXYZ = (size_t)mdlX*(size_t)mdlY*(size_t)mdlZ;
+ 
+-            try
+-            {
+-                mdlClassComplex[iclass] = new std::complex<XFLOAT>[mdlXYZ];
+-            }
+-            catch (std::bad_alloc& ba)
+-            {
++            mdlClassComplex[iclass] = (std::complex<XFLOAT> *)allocHugePages(mdlXYZ * sizeof(std::complex<XFLOAT>));
++            if (!mdlClassComplex[iclass])
+                 CRITICAL(RAMERR);
+-            }
+ 
+             std::complex<XFLOAT> *pData = mdlClassComplex[iclass];
+ 
+@@ -3935,9 +3930,9 @@ void MlOptimiser::expectation()
+ 
+             for (unsigned long n = 0; n < s; n++)
+             {
+-                wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[n];
+-                wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[n];
+-                wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[n];
++                wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[3 * n];
++                wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[3 * n];
++                wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[3 * n];
+             }
+ 
+             b->backprojectors[j].clear();
+@@ -3956,7 +3951,7 @@ void MlOptimiser::expectation()
+         unsigned nr_classes = mymodel.nr_classes;
+         for (int iclass = 0; iclass < nr_classes; iclass++)
+         {
+-            delete [] mdlClassComplex[iclass];
++            free(mdlClassComplex[iclass]);
+         }
+         free(mdlClassComplex);
+ 
+diff --git a/src/ml_optimiser_mpi.cpp b/src/ml_optimiser_mpi.cpp
+index c1805424..d4142215 100644
+--- a/src/ml_optimiser_mpi.cpp
++++ b/src/ml_optimiser_mpi.cpp
+@@ -1308,14 +1308,9 @@ void MlOptimiserMpi::expectation()
+ 			else
+ 				mdlXYZ = (size_t)mdlX*(size_t)mdlY*(size_t)mdlZ;
+ 
+-			try
+-			{
+-				mdlClassComplex[iclass] = new std::complex<XFLOAT>[mdlXYZ];
+-			}
+-			catch (std::bad_alloc& ba)
+-			{
++			mdlClassComplex[iclass] = (std::complex<XFLOAT> *)allocHugePages(mdlXYZ * sizeof(std::complex<XFLOAT>));
++			if (!mdlClassComplex[iclass])
+ 				CRITICAL(RAMERR);
+-			}
+ 
+ 			std::complex<XFLOAT> *pData = mdlClassComplex[iclass];
+ 
+@@ -1847,9 +1842,9 @@ void MlOptimiserMpi::expectation()
+ 
+ 					for (unsigned long n = 0; n < s; n++)
+ 					{
+-						wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[n];
+-						wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[n];
+-						wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[n];
++						wsum_model.BPref[j].data.data[n].real += (RFLOAT) reals[3 * n];
++						wsum_model.BPref[j].data.data[n].imag += (RFLOAT) imags[3 * n];
++						wsum_model.BPref[j].weight.data[n] += (RFLOAT) weights[3 * n];
+ 					}
+ 
+ 					b->backprojectors[j].clear();
+@@ -1865,7 +1860,7 @@ void MlOptimiserMpi::expectation()
+ 				unsigned nr_classes = mymodel.nr_classes;
+ 				for (int iclass = 0; iclass < nr_classes; iclass++)
+ 				{
+-					delete [] mdlClassComplex[iclass];
++					free(mdlClassComplex[iclass]);
+ 				}
+ 				free(mdlClassComplex);
+ 

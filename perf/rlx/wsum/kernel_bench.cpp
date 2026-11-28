@@ -5,7 +5,8 @@
 //           backproject builds the phase tables again, walks every orientation's rows and splats under row locks
 //   sparse  one pass per orientation that has a significant pair: phase tables for the translations in use only,
 //           Z = sum_t w' S_t once per row and shared by the three per-pixel sums and the back-projected image
-//   splat   the splat alone (the part that stays on the host when the chip returns per-orientation sums)
+//   splat   the splat alone (the part that stays on the host when the chip returns per-orientation sums), into
+//           RELION's three arrays with and without row locks, and into one interleaved (re, im, weight) array
 //
 // Each variant's sums are compared with what RELION recorded (relative L2), so a variant that does other work
 // shows. Build: g++ -O3 -march=native -std=c++17 kernel_bench.cpp -o kernel_bench
@@ -19,6 +20,8 @@
 #include <map>
 #include <string>
 #include <vector>
+
+#include <sys/mman.h>
 
 typedef std::map<std::string, std::vector<char>> Rec;
 
@@ -61,6 +64,18 @@ static void evict()
 	for (size_t i = 0; i < junk.size(); i += 64) junk[i]++;
 }
 
+// Zeroed floats on a 2 MB boundary; HUGE=1 asks for 2 MB pages (the volumes are 65-200 MB and every pixel lands on
+// another 4 KB page). PREFETCH=1: the splat-alone loops fetch a row's voxels before adding into them.
+static const bool HUGE = std::getenv("HUGE"), PREFETCH = std::getenv("PREFETCH");
+static float *floats(size_t n)
+{
+	const size_t two = 2u << 20, bytes = (n * 4 + two - 1) / two * two;
+	void *p = std::aligned_alloc(two, bytes);
+	if (HUGE) madvise(p, bytes, MADV_HUGEPAGE);
+	std::memset(p, 0, bytes);
+	return (float *)p;
+}
+
 struct Model { const float *v; long X, Y, Z, initY, initZ, maxR2; float pf; };
 
 // AccProjectorKernel::project3Dmodel for 2D data, without textures
@@ -89,10 +104,19 @@ static inline void project(const Model &m, int x, int y, const float *e, float &
 struct Vol
 {
 	long X, Y, Z, initY, initZ;
-	std::vector<float> re, im, w;
+	size_t n;
+	float *re, *im, *w;
 	std::vector<std::atomic_flag> locks;
-	Vol(long x, long y, long z, long iy, long iz) : X(x), Y(y), Z(z), initY(iy), initZ(iz), re(x * y * z), im(x * y * z), w(x * y * z), locks(y * z) {}
-	void zero() { std::fill(re.begin(), re.end(), 0); std::fill(im.begin(), im.end(), 0); std::fill(w.begin(), w.end(), 0); }
+	Vol(long x, long y, long z, long iy, long iz) : X(x), Y(y), Z(z), initY(iy), initZ(iz), n(x * y * z), re(floats(n)), im(floats(n)), w(floats(n)), locks(y * z) {}
+	~Vol() { std::free(re); std::free(im); std::free(w); }
+	void zero() { std::memset(re, 0, n * 4); std::memset(im, 0, n * 4); std::memset(w, 0, n * 4); }
+	double weight() const { double s = 0; for (size_t i = 0; i < n; i++) s += w[i]; return s; }
+	inline void fetch(float xp, float yp, float zp) const
+	{
+		const long i = (((long)std::floor(zp) - initZ) * Y + (long)std::floor(yp) - initY) * X + (long)std::floor(xp);
+		for (const float *a : {re, im, w})
+			for (long d : {0L, X, X * Y, X * Y + X}) __builtin_prefetch(a + i + d, 1);
+	}
 	inline void add2(long row, long i, float g0, float g1, float r, float m, float f, bool lock)
 	{
 		if (lock) while (locks[row].test_and_set(std::memory_order_acquire)) {}
@@ -110,6 +134,38 @@ struct Vol
 		add2(z0 * Y + y0 + 1, i + X, mfz * fy * mfx, mfz * fy * fx, r, m, f, lock);
 		add2((z0 + 1) * Y + y0, i + X * Y, fz * mfy * mfx, fz * mfy * fx, r, m, f, lock);
 		add2((z0 + 1) * Y + y0 + 1, i + X * Y + X, fz * fy * mfx, fz * fy * fx, r, m, f, lock);
+	}
+};
+
+// The same splat into ONE array of (re, im, weight) per voxel: 4 cache lines per pixel instead of 12.
+struct Vol3
+{
+	long X, Y, Z, initY, initZ;
+	size_t n;
+	float *v;
+	Vol3(long x, long y, long z, long iy, long iz) : X(x), Y(y), Z(z), initY(iy), initZ(iz), n(x * y * z), v(floats(3 * n)) {}
+	~Vol3() { std::free(v); }
+	double weight() const { double s = 0; for (size_t i = 0; i < n; i++) s += v[3 * i + 2]; return s; }
+	inline void fetch(float xp, float yp, float zp) const
+	{
+		const long i = (((long)std::floor(zp) - initZ) * Y + (long)std::floor(yp) - initY) * X + (long)std::floor(xp);
+		for (long d : {0L, X, X * Y, X * Y + X}) { __builtin_prefetch(v + 3 * (i + d), 1); __builtin_prefetch(v + 3 * (i + d) + 5, 1); }
+	}
+	inline void add2(long i, float g0, float g1, float r, float m, float f)
+	{
+		float *q = &v[3 * i];
+		q[0] += g0 * r; q[1] += g0 * m; q[2] += g0 * f;
+		q[3] += g1 * r; q[4] += g1 * m; q[5] += g1 * f;
+	}
+	inline void splat(float xp, float yp, float zp, float r, float m, float f)
+	{
+		const int x0 = std::floor(xp), yy = std::floor(yp), zz = std::floor(zp);
+		const float fx = xp - x0, fy = yp - yy, fz = zp - zz, mfx = 1 - fx, mfy = 1 - fy, mfz = 1 - fz;
+		const long i = ((zz - initZ) * Y + yy - initY) * X + x0;
+		add2(i, mfz * mfy * mfx, mfz * mfy * fx, r, m, f);
+		add2(i + X, mfz * fy * mfx, mfz * fy * fx, r, m, f);
+		add2(i + X * Y, fz * mfy * mfx, fz * mfy * fx, r, m, f);
+		add2(i + X * Y + X, fz * fy * mfx, fz * fy * fx, r, m, f);
 	}
 };
 
@@ -149,8 +205,8 @@ static double rel(const std::vector<double> &a, const float *b, size_t n)
 int main(int argc, char **argv)
 {
 	std::printf("# particle O O_sig T T_sig pairs P | relion: tables project pairs bp(locks) bp(no locks) | sparse: all(locks) all(no locks) "
-	            "splat(locks) splat(no locks) | rel err vs record: relion parts XA AA, sparse parts XA AA, bp weight relion sparse\n");
-	double tot[9] = {0};
+	            "splat(locks) splat(no locks) splat(interleaved) | rel err vs record: relion parts XA AA, sparse parts XA AA, bp weight relion sparse interleaved\n");
+	double tot[10] = {0};
 	int count = 0;
 	for (int a = 1; a < argc; a++)
 	{
@@ -162,7 +218,10 @@ int main(int argc, char **argv)
 		const size_t slash = path.rfind('/'), d1 = path.find('.', slash == std::string::npos ? 0 : slash), d2 = path.find('.', d1 + 1);
 		p.mdl = load(path.substr(0, slash == std::string::npos ? 0 : slash + 1) + "model." + path.substr(d1 + 1, d2 - d1 - 1) + "." + std::to_string(I(r, "model")) + ".bin");
 		p.nx = I(r, "imgX"); p.ny = I(r, "imgY"); p.P = I(r, "image_size"); p.O = I(r, "orientation_num"); p.T = I(r, "translation_num"); p.maxR = I(r, "maxR");
-		p.m = Model{F(p.mdl, "mdlComplex"), I(r, "mdlX"), I(r, "mdlY"), I(r, "mdlZ"), I(r, "mdlInitY"), I(r, "mdlInitZ"), I(r, "maxR2_padded"), (float)D(r, "padding_factor")};
+		const size_t mdl_floats = p.mdl.at("mdlComplex").size() / 4;
+		float *mdl = floats(mdl_floats);
+		std::memcpy(mdl, F(p.mdl, "mdlComplex"), mdl_floats * 4);
+		p.m = Model{mdl, I(r, "mdlX"), I(r, "mdlY"), I(r, "mdlZ"), I(r, "mdlInitY"), I(r, "mdlInitZ"), I(r, "maxR2_padded"), (float)D(r, "padding_factor")};
 		p.e = F(r, "eulers"); p.xr = F(r, "Fimg_real"); p.xi = F(r, "Fimg_imag"); p.nr = F(r, "Fimg_nomask_real"); p.ni = F(r, "Fimg_nomask_imag");
 		p.tx = F(r, "trans_x"); p.ty = F(r, "trans_y"); p.w = F(r, "weights"); p.ctf = F(r, "ctfs"); p.minv = F(r, "Minvsigma2s");
 		p.sig = (float)D(r, "significant_weight"); p.wn_inv = 1.0f / (float)D(r, "weight_norm"); p.pf_bp = (float)D(r, "bp_padding_factor");
@@ -278,7 +337,7 @@ int main(int argc, char **argv)
 				}
 			}
 			b_ms[lock] = cpu_ms() - t0;
-			if (lock) for (float v : vol.w) wsum_relion += v;
+			if (lock) wsum_relion = vol.weight();
 		}
 
 		// ---- sparse: one pass per significant orientation; lock 1/0, then the splat alone from kept rows
@@ -350,7 +409,7 @@ int main(int argc, char **argv)
 			c_ms[lock] = cpu_ms() - t0;
 			if (lock)
 			{
-				for (float v : vol.w) wsum_sparse += v;
+				wsum_sparse = vol.weight();
 				eb[0] = rel(parts, F(r, "wdiff2s_parts"), P); eb[1] = rel(XA, F(r, "wdiff2s_XA"), P); eb[2] = rel(AA, F(r, "wdiff2s_AA"), P);
 			}
 			vol.zero();
@@ -365,6 +424,13 @@ int main(int argc, char **argv)
 					const int y = iy > half ? iy - ny : iy;
 					const int xmax = std::sqrt((float)(half * half - y * y));
 					const float *k = &keep[(ko * P + iy * nx) * 3];
+					if (PREFETCH)
+						for (int x = 0; x < xmax; x++)
+						{
+							if (k[3 * x + 2] <= 0) continue;
+							const float xp = (e[0] * x + e[1] * y) * p.pf_bp, yp = (e[3] * x + e[4] * y) * p.pf_bp, zp = (e[6] * x + e[7] * y) * p.pf_bp;
+							if (xp < 0) vol.fetch(-xp, -yp, -zp); else vol.fetch(xp, yp, zp);
+						}
 					for (int x = 0; x < xmax; x++)
 					{
 						if (k[3 * x + 2] <= 0) continue;
@@ -378,20 +444,58 @@ int main(int argc, char **argv)
 			}
 			s_ms[lock] = cpu_ms() - t0;
 		}
+		// ---- the splat alone into the interleaved volume
+		double s3_ms, wsum3 = 0;
+		{
+			Vol3 v3(vol.X, vol.Y, vol.Z, vol.initY, vol.initZ);
+			evict();
+			const double t3 = cpu_ms();
+			size_t ko = 0;
+			for (long o : sig_o)
+			{
+				const float *e = p.e + 9 * o;
+				for (int iy = 0; iy < ny; iy++)
+				{
+					const int y = iy > half ? iy - ny : iy;
+					const int xmax = std::sqrt((float)(half * half - y * y));
+					const float *k = &keep[(ko * P + iy * nx) * 3];
+					if (PREFETCH)
+						for (int x = 0; x < xmax; x++)
+						{
+							if (k[3 * x + 2] <= 0) continue;
+							const float xp = (e[0] * x + e[1] * y) * p.pf_bp, yp = (e[3] * x + e[4] * y) * p.pf_bp, zp = (e[6] * x + e[7] * y) * p.pf_bp;
+							if (xp < 0) v3.fetch(-xp, -yp, -zp); else v3.fetch(xp, yp, zp);
+						}
+					for (int x = 0; x < xmax; x++)
+					{
+						if (k[3 * x + 2] <= 0) continue;
+						float xp = (e[0] * x + e[1] * y) * p.pf_bp, yp = (e[3] * x + e[4] * y) * p.pf_bp, zp = (e[6] * x + e[7] * y) * p.pf_bp;
+						float bi = k[3 * x + 1];
+						if (xp < 0) { xp = -xp; yp = -yp; zp = -zp; bi = -bi; }
+						v3.splat(xp, yp, zp, k[3 * x], bi, k[3 * x + 2]);
+					}
+				}
+				ko++;
+			}
+			s3_ms = cpu_ms() - t3;
+			wsum3 = v3.weight();
+		}
+		std::free(mdl);
 		double wsum_rec = 0;
 		const float *bw = F(r, "bp_weight");
 		for (size_t i = 0; i < r.at("bp_weight").size() / 4; i++) wsum_rec += bw[i];
-		std::printf("%ld %ld %zu %ld %zu %ld %ld | %.2f %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.1e %.1e %.1e, %.1e %.1e %.1e, %.1e %.1e\n",
+		std::printf("%ld %ld %zu %ld %zu %ld %ld | %.2f %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f %.2f | %.1e %.1e %.1e, %.1e %.1e %.1e, %.1e %.1e %.1e\n",
 		            I(r, "part_id"), O, sig_o.size(), T, sig_t.size(), pairs, P,
-		            a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0],
-		            ea[0], ea[1], ea[2], eb[0], eb[1], eb[2], std::fabs(wsum_relion / wsum_rec - 1), std::fabs(wsum_sparse / wsum_rec - 1));
-		const double v[9] = {a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0]};
-		for (int i = 0; i < 9; i++) tot[i] += v[i];
+		            a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0], s3_ms,
+		            ea[0], ea[1], ea[2], eb[0], eb[1], eb[2], std::fabs(wsum_relion / wsum_rec - 1), std::fabs(wsum_sparse / wsum_rec - 1),
+		            std::fabs(wsum3 / wsum_rec - 1));
+		const double v[10] = {a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0], s3_ms};
+		for (int i = 0; i < 10; i++) tot[i] += v[i];
 		count++;
 	}
 	if (count)
-		std::printf("mean of %d: relion tables %.2f project %.2f pairs %.2f bp %.2f (no locks %.2f) = %.2f | sparse %.2f (no locks %.2f) | splat alone %.2f (no locks %.2f)\n",
-		            count, tot[0] / count, tot[1] / count, tot[2] / count, tot[3] / count, tot[4] / count, (tot[0] + tot[1] + tot[2] + tot[3]) / count,
-		            tot[5] / count, tot[6] / count, tot[7] / count, tot[8] / count);
+		std::printf("%s%smean of %d: relion tables %.2f project %.2f pairs %.2f bp %.2f (no locks %.2f) = %.2f | sparse %.2f (no locks %.2f) | splat alone %.2f (no locks %.2f, one interleaved volume %.2f)\n",
+		            HUGE ? "HUGE " : "", PREFETCH ? "PREFETCH " : "", count, tot[0] / count, tot[1] / count, tot[2] / count, tot[3] / count, tot[4] / count, (tot[0] + tot[1] + tot[2] + tot[3]) / count,
+		            tot[5] / count, tot[6] / count, tot[7] / count, tot[8] / count, tot[9] / count);
 	return 0;
 }

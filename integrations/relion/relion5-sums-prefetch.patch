@@ -1,0 +1,56 @@
+diff --git a/src/acc/acc_projectorkernel_impl.h b/src/acc/acc_projectorkernel_impl.h
+index 5d0ce8db..89a1b958 100644
+--- a/src/acc/acc_projectorkernel_impl.h
++++ b/src/acc/acc_projectorkernel_impl.h
+@@ -69,6 +69,37 @@ public:
+ 		{};
+ #endif
+ 
++	// The cache lines one image row of a slice reads from the reference (2 voxels on each of 4 rows of the volume
++	// per pixel), asked for before the row is projected. The reference is far larger than the caches and nothing
++	// else on the host reads it when the chip scores the orientations, so every pixel meets it cold; the projection
++	// loop then waits on memory with a few misses in flight, while this loop keeps as many in flight as the core
++	// allows. The projection itself is untouched.
++	void prefetch3Dmodel(int xstart, int xend, int y, XFLOAT e0, XFLOAT e1, XFLOAT e3, XFLOAT e4, XFLOAT e6, XFLOAT e7) const
++	{
++#if defined(PROJECTOR_NO_TEXTURES) && !defined(_CUDA_ENABLED) && !defined(_HIP_ENABLED) && !defined(_SYCL_ENABLED)
++		for (int x = xstart; x < xend; x++)
++		{
++			XFLOAT xp = (e0 * x + e1 * y ) * padding_factor;
++			XFLOAT yp = (e3 * x + e4 * y ) * padding_factor;
++			XFLOAT zp = (e6 * x + e7 * y ) * padding_factor;
++			int r2 = xp*xp + yp*yp + zp*zp;
++			if (r2 > maxR2_padded)
++				continue;
++			if (xp < 0)
++			{
++				xp = -xp;
++				yp = -yp;
++				zp = -zp;
++			}
++			const std::complex<XFLOAT> *q = mdlComplex + ((size_t)((int)floorf(zp)-mdlInitZ)*(size_t)mdlXY+(size_t)((int)floorf(yp)-mdlInitY)*(size_t)mdlX+(size_t)(int)floorf(xp));
++			__builtin_prefetch(q);
++			__builtin_prefetch(q + mdlX);
++			__builtin_prefetch(q + mdlXY);
++			__builtin_prefetch(q + mdlXY + mdlX);
++		}
++#endif
++	}
++
+ #if defined _CUDA_ENABLED || defined _HIP_ENABLED
+ 	__device__ __forceinline__
+ #else
+diff --git a/src/acc/cpu/cpu_kernels/wavg.h b/src/acc/cpu/cpu_kernels/wavg.h
+index 398126ea..d833c568 100644
+--- a/src/acc/cpu/cpu_kernels/wavg.h
++++ b/src/acc/cpu/cpu_kernels/wavg.h
+@@ -112,6 +112,9 @@ void wavg_ref3D(
+ 				wdiff2s_AA[x] = g_wdiff2s_AA[pixel + x];
+ 			}
+ 
++			if (REF3D)
++				projector.prefetch3Dmodel(xstart, xend, y, e0, e1, e3, e4, e6, e7);
++
+ #if _OPENMP >= 201307	// For OpenMP 4.0 and later
+ 			#pragma omp simd simdlen(SIMD_LEN)
+ #endif

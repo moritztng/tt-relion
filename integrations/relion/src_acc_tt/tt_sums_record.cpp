@@ -146,7 +146,7 @@ void backproject(
 		const float *Fimg_nomask_real, const float *Fimg_nomask_imag, const float *Minvsigma2s, long image_size,
 		int bpMaxR, int bpMaxR2, float bp_padding_factor,
 		int bpMdlX, int bpMdlY, int bpMdlZ, int bpMdlInitY, int bpMdlInitZ,
-		const float *model_real, const float *model_imag, const float *model_weight)
+		const float *model_real, const float *model_imag, const float *model_weight, long stride)
 {
 	std::FILE *f = t_file;
 	if (!f)
@@ -165,13 +165,13 @@ void backproject(
 	const size_t n = (size_t)bpMdlX * bpMdlY * bpMdlZ;
 	std::vector<size_t> idx;
 	std::vector<float> re, im, w;
-	for (size_t i = 0; i < n; i++)
-		if (model_weight[i] != 0.f || model_real[i] != 0.f || model_imag[i] != 0.f)
+	for (size_t i = 0, k = 0; i < n; i++, k += stride)
+		if (model_weight[k] != 0.f || model_real[k] != 0.f || model_imag[k] != 0.f)
 		{
 			idx.push_back(i);
-			re.push_back(model_real[i]);
-			im.push_back(model_imag[i]);
-			w.push_back(model_weight[i]);
+			re.push_back(model_real[k]);
+			im.push_back(model_imag[k]);
+			w.push_back(model_weight[k]);
 		}
 	u64(f, "bp_index", idx.data(), idx.size());
 	f32(f, "bp_real", re.data(), re.size());
