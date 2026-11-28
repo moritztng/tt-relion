@@ -22,8 +22,8 @@ stop() { [ -e $HOME/fleet/HANDBACK ] && { say HANDBACK; exit 0; }; [ $(date +%s)
 busy() { [ -n "$(fuser /dev/tenstorrent/$1 2>/dev/null)" ]; }
 leases() { for c in ${CHIPS//,/ }; do f=${RLX_LEASE_DIR:-/tmp/tt-bio-device-leases}/$(hostname)-card$c.json; [ -e $f ] || continue; grep -q "FLOCK.*:$(stat -c %i $f) 0 EOF" /proc/locks && return 1; done; return 0; }   # read from /proc/locks, the lock is never taken to test it
 avail() { awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo; }
-room() { now=$(date +%s); r=86400       # seconds until 2 min before the next window of another row; 0 inside one
-  while read -r slug a b _; do case "$slug" in ""|\#*|rlx*) continue;; esac
+room() { now=$(date +%s); r=86400       # seconds until 2 min before the next window of another row (rlx-e2e's included); 0 inside one
+  while read -r slug a b _; do case "$slug" in ""|\#*|rlx-prep*) continue;; esac
     s=$(date -d "$a" +%s 2>/dev/null) || continue; e=$(date -d "$b" +%s 2>/dev/null) || continue
     [ $now -ge $e ] && continue
     d=$(( s - 120 - now )); [ $d -lt 0 ] && d=0; [ $d -lt $r ] && r=$d
