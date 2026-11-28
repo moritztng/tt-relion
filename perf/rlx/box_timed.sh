@@ -2,7 +2,7 @@
 # Timed RLX runs on a rented 8-GPU box. Runs as root in /work, detached; progress in /work/box.log, DONE/FAILED marker.
 # Inputs in /work: subset.py, stage.sh, check_stacks.py, refine_cmd.sh, tsline.py, phases.py, and either relion-builds.tgz or build.sh
 # plus the two patches (then it builds while the data stages).
-#   box_timed.sh <a100|b200> "<ranks j pool;...>|auto" <seeds> [stock]
+#   box_timed.sh <a100|b200> "<ranks j pool;...>|auto" "<seeds>" [stock]
 # auto = 1, 2, 3 ranks per GPU plus a leader, --j min(6, cores/ranks), --pool 100 (NVIDIA's run_relion.sh), and
 # 2 ranks per GPU at --pool 30. MPS is on when the daemon starts. A full run that fails with images in RAM is
 # repeated with --scratch_dir on local disk.
@@ -46,7 +46,8 @@ for c in "${CS[@]}"; do set -- $c; name=dev-n$1-j$2-p$3
   st "config $c dev wall ${t}s"; if [ -z "$bt" ] || python3 -c "import sys;sys.exit(0 if $t < $bt else 1)"; then best=$c bt=$t; fi
 done
 [ -n "$best" ] || fail "no config ran"; st "BEST $best (${bt}s on the dev cell)"; set -- $best
-bash stage.sh data full.txt || fail stage
+# No seeds and no stock run = dev cell only: the full set is not staged.
+[ -z "$SEEDS$STOCK" ] || bash stage.sh data full.txt || fail stage
 X=
 full(){ run $1 $2 full.star $3 $4 $5 $6 "$X" && return; [ -n "$X" ] && return 1
   X="--scratch_dir $W/scratch"; mkdir -p $W/scratch; st "$1 failed with images in RAM, repeating with $X"; run $1 $2 full.star $3 $4 $5 $6 "$X"; }

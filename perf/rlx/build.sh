@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build pinned RELION 5.0.x into /opt/relion-<name> on a rented NVIDIA box and tar them to /work/relion-builds.tgz.
 # fair = our CPU fixes (tt-relion integrations/relion/*.patch), stock = upstream at the same commit. The fair build
-# carries relion5-host-threads.patch when it is in /work; that one needs RELION's own FFTW (built with threads).
+# carries relion5-host-threads.patch when it is in /work; it threads the big transforms itself and
+# needs no threaded FFTW. That build uses RELION's own FFTW 3.3.8 so the library does not vary with the box image.
 # CUDA_ARCH takes one arch, so each card generation gets its own build.
 #   build.sh <name:arch[:stock]> ...      e.g. build.sh fair:80 stock:80:stock fair100:100
 # Inputs in /work: relion5-coarse-blocking.patch relion5-nonzeroprob.patch
@@ -16,7 +17,7 @@ for spec in "$@"; do IFS=: read -r name arch stock <<< "$spec"; rm -rf b-$name; 
   cmake .. -DCUDA=ON -DCUDA_ARCH=$arch -DGUI=OFF -DFETCH_WEIGHTS=OFF -DCMAKE_BUILD_TYPE=Release $own \
     -DCMAKE_INSTALL_PREFIX=/opt/relion-$name > $W/cmake-$name.log 2>&1 && make -j"$(nproc)" install > $W/make-$name.log 2>&1 ||
     { tail -30 $W/make-$name.log; exit 1; }
-  cd $W; [ -z "$own" ] || ldd /opt/relion-$name/bin/relion_refine_mpi | grep -q fftw3_threads || { echo "$name: no threaded FFTW linked"; exit 1; }
+  cd $W
   echo "built $name sm_$arch $(cuobjdump --list-elf /opt/relion-$name/bin/relion_refine_mpi 2>/dev/null | grep -o 'sm_[0-9]*' | sort -u | tr '\n' ' ')"
 done
 tar -C /opt -czf relion-builds.tgz $(cd /opt; ls -d relion-*)

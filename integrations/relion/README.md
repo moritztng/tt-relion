@@ -81,6 +81,47 @@ cd relion && git apply /path/to/relion5-coarse-blocking.patch /path/to/relion5-n
 `relion5-estep-profile.patch` adds the timers used to measure the expectation step and is not needed
 to run.
 
+## Huge pages for the reconstruction
+
+Outside the expectation step, every iteration RELION allocates and fills several 720^3 double
+grids (the padded reference transform on each follower, the back-projection on the two half-set
+ranks). On a 32-core EPYC host most of that time is page faults, not arithmetic. Letting glibc back
+those allocations with transparent huge pages takes no code change:
+
+```sh
+mpirun -n 3 -x GLIBC_TUNABLES=glibc.malloc.hugetlb=1 ... relion_refine_mpi ...
+```
+
+On the dev cell this cuts the host time per refinement iteration from 20.2 s to 11.4 s, and the
+final iteration from 85 s to 42 s. It only changes where memory comes from, so the maps are the same
+within RELION's own run-to-run variation. The kernel needs THP set to `madvise` or `always`.
+
+## Threads for the host side of each iteration
+
+Between expectation steps RELION works on whole 720^3 grids with one thread: the padded reference
+transform, the reconstruction, and the accuracy estimate before each expectation step.
+`relion5-host-threads.patch` gives that work the `--j` threads:
+
+- 3D transforms of at least 2^22 elements run as OpenMP slabs (2D transforms per slice, then 1D
+  along the third axis). The output is bit-identical to FFTW's own single-threaded 3D plan, and it
+  needs no threaded FFTW build.
+- The element-wise loops over those grids (padding, centring, gridding correction, weighting, soft
+  mask) run in parallel. Their results do not depend on the thread count.
+- The orientation accuracy estimate runs over particles in parallel and prints the same values.
+- Zeroing a big grid is split over the threads, so the page faults of its first touch are too.
+
+Per-particle 2D transforms are untouched. Apply it on top of the other patches and run with huge
+pages as above:
+
+```sh
+cd relion && git apply /path/to/relion5-host-threads.patch
+```
+
+On the dev cell (3 MPI ranks, `--j 24`) the host time per refinement iteration drops from 11.4 s
+with huge pages alone to 2.6 s, and the final iteration from 42 s to 18 s. The final map matches
+the unpatched run to a correlation of 0.99999, well inside RELION's own run-to-run variation. The
+patch only touches RELION's CPU code, so CPU and GPU builds both pick it up.
+
 ## License
 
 Everything in this directory modifies or links into RELION and is GPL-2.0, like RELION itself. See
