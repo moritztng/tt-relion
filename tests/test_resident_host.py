@@ -56,8 +56,8 @@ def test_layout_spreads_the_particle_norm_over_its_rows():
         assert nb in (32, 64, 128, 256) or nb % 512 == 0
         A, A2, nx = r._operands(xr, xi, w, tx, ty, pn, x, y, dr, sel)
         norm = np.zeros((nb, O))
-        norm[:len(A2)] = A2 @ (B * B).T
-        d2 = (nx[:, None] + np.tile(norm, (rows // nb, 1))[:len(A)] - 2 * A @ B.T)[dr]
+        norm[:len(A2)] = nx[:, None] + A2 @ (B * B).T
+        d2 = (np.tile(norm, (rows // nb, 1))[:len(A)] - 2 * A @ B.T)[dr]
         ph = tx[:, None].astype(np.float64) * x + ty[:, None].astype(np.float64) * y
         sx = (xr[pn] + 1j * xi[pn]) * np.exp(1j * ph)                               # [R, P]
         direct = (w[pn][:, None].astype(np.float64) * np.abs((pr + 1j * pi)[None] - sx[:, None]) ** 2).sum(-1)

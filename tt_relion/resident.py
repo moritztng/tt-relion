@@ -221,8 +221,8 @@ class Resident:
 
     def _operands(self, xr, xi, w, tx, ty, pn, x, y, dr=None, sel=None, n=None):
         """Particle side, fp32 in the chip's K order. Row r is particle pn[r] at translation (tx[r], ty[r]) and sits
-        on device row dr[r] of n: A [n, K] = w S_t X and nx [n] = sum w |X|^2 (float64). A2 = w on both parts, one
-        row per particle in sel. The products are float64 and rounded once; the phase is separable in x and y, so the
+        on device row dr[r] of n: A [n, K] = w S_t X. A2 = w on both parts and nx = sum w |X|^2 (float64), one row
+        per particle in sel. The products are float64 and rounded once; the phase is separable in x and y, so the
         sines are taken per distinct coordinate, and a 1024-pixel chunk at a time keeps the temporaries in cache."""
         dr, sel = np.arange(len(pn)) if dr is None else dr, pn if sel is None else sel
         n = int(dr.max()) + 1 if n is None else n
@@ -236,9 +236,8 @@ class Resident:
             p = slice(c * 1024, min(c * 1024 + 1024, self.P))
             z = ex[:, xj[p]] * ey[:, yj[p]] * xw[pn, p]
             A[dr, c, 0, :p.stop - p.start], A[dr, c, 1, :p.stop - p.start] = z.real, z.imag
-        nx = np.zeros(n)
-        nx[dr] = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)[pn]
-        return A.reshape(n, self.K), self._kchip(w, w)[sel], nx
+        nx = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)
+        return A.reshape(n, self.K), self._kchip(w, w)[sel], nx[sel]
 
     def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None, out=None):
         """float32 [R, O]. eul [O, 9]; xr, xi, w [N, P]; tx, ty, pn [R]: row r scores particle pn[r] at translation
@@ -272,7 +271,7 @@ class Resident:
         Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb)
         nxh = (nx / 2).astype(np.float32)
         nxl = (nx / 2 - nxh).astype(np.float32)
-        pad = lambda v: np.pad(v, (0, rows - len(v)))[:, None]  # noqa: E731
+        pad = lambda v: np.pad(v, (0, nb - len(v)))[:, None]    # noqa: E731
         t_nxh, t_nxl = self._put(pad(nxh)), self._put(pad(nxl))
         t0 = self._mark("imgdig_s", t0)
 
@@ -285,17 +284,21 @@ class Resident:
         o0 = 0
         for r in refs:
             Ch, Cl = self._product(Ad, ea, rows, r, "B")
-            Nh, Nl = (_rep(t, rows // nb) for t in self._product(A2d, ea2, nb, r, "B2"))
-            # d2 / 2 = (sum w|X|^2 + sum w|P|^2) / 2 - cross, rounded once at the end
+            Nh, Nl = self._product(A2d, ea2, nb, r, "B2")
+            # d2 / 2 = (sum w|X|^2 + sum w|P|^2) / 2 - cross, rounded once at the end. The first term is the
+            # particle's alone: summed on the norm rows, then copied over the particle's translation slots.
             sh, se = tsum(ttnn.multiply(Nh, 0.5), ttnn.add(ttnn.multiply(Nh, 0.0), t_nxh))
             lo = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), t_nxl)
+            for t in (Nh, Nl):
+                ttnn.deallocate(t)
+            sh, lo = _rep(sh, rows // nb), _rep(lo, rows // nb)
             dh, de = tsum(sh, ttnn.neg(Ch))
             D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
             t0 = self._mark("prod_s", t0)
             np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, o0:o0 + r["O"]])     # the chip holds d2 / 2
             t0 = self._mark("read_s", t0)
             o0 += r["O"]
-            for t in (Ch, Cl, Nh, Nl, D):
+            for t in (Ch, Cl, sh, lo, D):
                 ttnn.deallocate(t)
         for t in (tA, tA2, Ad, A2d, t_nxh, t_nxl):
             ttnn.deallocate(t)
