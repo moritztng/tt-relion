@@ -193,6 +193,18 @@ chips are busy 81 %, 86 % and 91 % of the E-step, with the same orientations in 
 E-step's wall moved with the host's load (the chip-busy time of a batch varied by 15 %), so the gain is read from the
 wait: 110 ms a batch on two chips is a tenth of that E-step.
 
+### Handing a batch to a chip that is still busy
+
+With the gate a chip still waits 30 to 50 ms between two batches: a thread is woken, cuts the next batch, stacks it
+and copies it into the server's shared memory. `TT_RELION_STAGE=1` takes that out of the chip's time for a full
+batch. Its leader does not wait for an idle chip; it takes a chip that runs one batch and has none queued, copies
+the batch into a second shared segment of that chip and writes the request into the server's pipe. The server reads
+it the moment it has answered the batch before, and the replies are read in the order the requests were written. A
+batch that is not full waits for an idle chip as before, so batches do not get smaller. With staging on, `rt_s` on
+the client's line includes a request's wait behind the batch before it; the chip's idle time is read from the
+server's batch lines (`perf/rlx/ttb.py`, `idle_ms_per_batch`). Off by default: tested against a stand-in server
+(`tests/test_stage.py`), not measured through RELION yet.
+
 ### Leaving small orientation sets to RELION
 
 `TT_RELION_MIN_ORI=<n>` declines a coarse call that brings fewer than n orientations, and the fine call that follows
