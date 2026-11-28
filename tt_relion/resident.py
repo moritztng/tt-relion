@@ -54,8 +54,11 @@ def _rep(x, k):
 
 
 class Resident:
-    def __init__(self, dev, digits=13):
-        self.dev, self.n = dev, digits
+    def __init__(self, dev, digits=13, norm_digits=None):
+        # norm_digits: digits of the sum w |P|^2 product alone. Its element products are all positive, so every one
+        # the digit pairs i + j < n cut off lowers the sum; it runs on one row per particle, so more digits there
+        # cost a few percent of the cross product.
+        self.dev, self.n, self.n2 = dev, digits, norm_digits or digits
         self.tab = None
         self.pixsets = {}       # key -> (pixel coordinates on the chip, P, NC)
         self.model_key = self.ref_key = None
@@ -164,10 +167,10 @@ class Resident:
             out.append(dict(O=len(e), B=B, B2=ttnn.multiply(B, B)))
         return out
 
-    def _digits(self, X, e, rows):
+    def _digits(self, X, e, rows, n=None):
         pr, pk = rows - int(X.shape[0]), self.Kp - int(X.shape[1])
         Xp = ttnn.pad(X, [(0, pr), (0, pk)], 0.0) if pr or pk else X
-        d = oz_cut(Xp, self._ti(e, rows), self.n)
+        d = oz_cut(Xp, self._ti(e, rows), n or self.n)
         if Xp is not X:
             ttnn.deallocate(Xp)
         return d
@@ -186,7 +189,7 @@ class Resident:
                 s = self._put(np.ldexp(1.0, -ee).reshape(1, -1))
                 Xb = ttnn.multiply(r[name], s)
                 eb = _exp(self._rowmax(Xb))
-                r[name + "d"], r[name + "e"] = self._digits(Xb, eb, Op), eb
+                r[name + "d"], r[name + "e"] = self._digits(Xb, eb, Op, self.n2 if name == "B2" else self.n), eb
                 for t in (s, Xb, r[name]):
                     ttnn.deallocate(t)
                 del r[name]
@@ -195,10 +198,11 @@ class Resident:
     # ---- one batch -----------------------------------------------------------------------------------------
     def _product(self, Ad, ea, rows, r, name):
         Op = -(-r["O"] // OBLK) * OBLK
-        S = oz_fused(Ad, r[name + "d"], self.n, rb=min(rows, RBLK) // 32, bt=True)
+        n = self.n2 if name == "B2" else self.n
+        S = oz_fused(Ad, r[name + "d"], n, rb=min(rows, RBLK) // 32, bt=True)
         eb = r[name + "e"]
-        assert int(ea.min()) + int(eb.min()) - 2 * self.n > -126 and int(ea.max()) + int(eb.max()) < 127
-        hi, lo = oz_combine(S, self._ti(ea, rows), self._ti(eb, Op), self.n)
+        assert int(ea.min()) + int(eb.min()) - 2 * n > -126 and int(ea.max()) + int(eb.max()) < 127
+        hi, lo = oz_combine(S, self._ti(ea, rows), self._ti(eb, Op), n)
         ttnn.deallocate(S)
         return hi, lo
 
@@ -312,7 +316,7 @@ class Resident:
         A, A2 = np.ldexp(A, e, out=A), np.ldexp(A2, e2)        # exact in fp32
         ea, ea2 = _exp(_amax(A, 1)), _exp(_amax(A2, 1))
         tA, tA2 = self._put(A), self._put(np.pad(A2, ((0, min(-len(A2) % RUP, nb - len(A2))), (0, 0))))
-        Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb)
+        Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb, self.n2)
         nxh = (nx / 2).astype(np.float32)
         nxl = (nx / 2 - nxh).astype(np.float32)
         pad = lambda v: np.pad(v, (0, nb - len(v)))[:, None]    # noqa: E731

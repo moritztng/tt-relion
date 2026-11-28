@@ -117,5 +117,19 @@ recorded global finer iteration (80 coarse and 80 fine calls):
 | 16 | 80 / 80 / 0.004 | 80 / 80 / 0.31 |
 
 The error is on a squared difference near 1,050 (coarse) and 9,800 (fine). The device server runs 16 digits
-(`TT_RELION_DIGITS`). Run the gate after every change to the op, the bridge or the batch form, then grade one
+(`TT_RELION_DIGITS`).
+
+That table is against the float32 host arm. Against float64 the 16 digit op reads low on every sample: the norm
+term sum w |P|^2 multiplies two positive operands, so the digit pairs the product drops all carry the same sign.
+The cross term's dropped pairs cancel. The norm product therefore takes its own digit count
+(`TT_RELION_NORM_DIGITS`, default 20); it is one row per particle, so the rate does not move. Measured on chip
+against float64 digests of 160 recorded calls each, 16 digits everywhere else:
+
+| norm digits | global it016, fine: bias / max error / sets | local it024, coarse: bias / max error / sets |
+|---|---|---|
+| 16 | -0.174 / 0.302 / 80 of 80 | -0.286 / 0.396 / 78 of 80 |
+| 20 | -0.0002 / 0.0019 / 80 of 80 | -0.0003 / 0.0029 / 80 of 80 |
+| 24 | 0.0000 / 0.0012 / 80 of 80 | 0.0000 / 0.0019 / 80 of 80 |
+
+Run the gate after every change to the op, the bridge or the batch form, then grade one
 iteration through RELION against the CPU arm continued from the same state (`perf/rlx/iter_ab.sh`, `star_cmp.py`).
