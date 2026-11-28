@@ -148,7 +148,7 @@ log = open(err).read()
 chips = []
 for m in re.finditer(r"^TTDEV chip=(\S+) calls=(\d+) busy_s=([0-9.]+) up_s=([0-9.]+) mm_s=([0-9.]+) "
                      r"down_s=([0-9.]+) life_s=([0-9.]+) client=(\{.*?\})$", log, re.M):
-    c = dict(chip=m.group(1), calls=int(m.group(2)), busy_s=float(m.group(3)), **json.loads(m.group(8)))
+    c = {**json.loads(m.group(8)), "chip": m.group(1), "calls": int(m.group(2)), "busy_s": float(m.group(3))}
     r = re.search(r"^TTRES chip=%s (\{.*\})$" % re.escape(c["chip"]), log, re.M)
     if r:                                           # resident op: the chip's own share, host operand build apart
         c.update(json.loads(r.group(1)))
@@ -192,6 +192,13 @@ if a.ref and os.path.exists(a.ref):
                same_argmin=int((arg_min == ref["arg_min"])[ok].sum()),
                same_set=int((h_sig == ref["h_sig"])[ok].sum()),
                max_dmin_err=float(np.abs(d_min - ref["d_min"])[ok].max()) if ok.any() else None)
+    kind = np.array([r["k"] for r in calls])
+    for k in "CF":                                  # the coarse and the fine pass apart
+        m = ok & (kind == k)
+        res["pass_" + k] = dict(compared=int(m.sum()), same_argmin=int((arg_min == ref["arg_min"])[m].sum()),
+                                same_set=int((h_sig == ref["h_sig"])[m].sum()),
+                                max_dmin_err=float(np.abs(d_min - ref["d_min"])[m].max()) if m.any() else None,
+                                dmin_ref_median=float(np.median(ref["d_min"][m])) if m.any() else None)
 with open(a.out, "a") as fh:
     fh.write(json.dumps(res) + "\n")
 print(json.dumps(res))
