@@ -168,6 +168,10 @@ iteration and local iteration alike. The largest error with the drop is 1.0e-3 (
 0.9e-3). Chip seconds for the 160 calls: 5.2
 with the drop against 11.0 without (global, iteration 16), 4.3 against 5.2 (local, iteration 24).
 
+Called from RELION on the global finer iteration of the dev cell (four chips as two ranks with two chips, `--j 80`,
+13 digits, `results/e2e_pix`): 0 of 13,156 poses differ from the CPU arm, and the E-step takes 2.55 min against
+2.75 min without the drop (AICLK 1337 MHz or more in every sample, host load 66 to 95).
+
 ### Waking the threads
 
 RELION runs one particle per `--j` thread, and the bridge parks each thread until its batch is back. A parked thread
@@ -175,6 +179,9 @@ is woken for its result or to collect the next batch, never because another part
 all, each arrival woke every parked thread (190 at `--j 192`), and the thread that stacks the batch for the chip
 waited behind them. On an idle 8-core host with 190 parked threads, stacking a 58-particle batch takes 1.2 ms alone
 and 42 ms while 64 particles arrive (`tests/test_batch.py` counts the wake-ups).
+Called from RELION the change keeps the poses (0 of 13,156 differ from the CPU arm on the dev cell's global finer
+iteration, `results/e2e_wake`) and has shown no gain yet: the E-step took 2.62 min at host load 100 to 127 against
+2.55 min at 66 to 95 before it, on the same four chips.
 
 ### Leaving small orientation sets to RELION
 
@@ -196,7 +203,10 @@ where float32 resolves 0.008. A batch takes 3.7 s, 0.31 s per particle.
 The table passes through host memory on its way to the chip, about 26 GB per chip while it does, and every chip
 wants it at the start of that iteration. `TT_RELION_TABLE_TURNS=<n>` (default 4) is how many chips of a host upload at
 once; the others wait their turn. `--preread_images` also counts here: RELION keeps the whole particle set in every
-MPI rank, so with one rank per chip the host holds as many copies as it has chips.
+MPI rank, so with one rank per chip the host holds as many copies as it has chips. Without it RELION reads each
+particle from its stack when it needs it, which costs nothing here if the stacks are in the page cache or on tmpfs:
+the same dev-cell iteration without `--preread_images` gave 0 of 13,156 differing poses and an E-step of 2.38 min
+(2.55 min with it; AICLK 1337 MHz or more, host load 103 to 123, `results/e2e_pre`).
 
 A rank can drive more than one chip. `RLX_CHIPS_PER_RANK=<k>` (read by `perf/rlx/rank.sh`) gives every follower rank
 k chips and its `--j` threads feed all of them, so the host holds fewer copies of RELION for the same chips. On the

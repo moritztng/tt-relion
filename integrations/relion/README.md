@@ -39,6 +39,9 @@ RELION's own significance rule (exponent, sort, cumulative sum, `adaptive_fracti
 on that list instead of on the dense orientation x translation block. It applies to a single-image
 particle with a fine pass to follow (`--oversampling` above 0) and no first-iteration cross-correlation;
 every other case, and any call the bridge declines, takes the dense path unchanged.
+On the global finer iteration of the dev cell (four chips, 13 digits) a window of 40 gave the poses of the
+CPU arm, 0 of 13,156 differ and every particle has the same number of significant samples, with the E-step
+at 2.07 min against 2.55 min dense (`results/e2e_cand`).
 
 `relion5-particle-arena.patch` (optional) lets `--j` exceed the number of cores. RELION's `--cpu` path
 runs its particle loop in TBB's default arena, which stops at the core count whatever `--j` says. With
