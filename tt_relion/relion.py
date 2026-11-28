@@ -858,6 +858,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                 _gcv.notify_all()
                 _gcv.release()
                 try:
+                    t_lead = time.time()
                     same = all(b["eh"] == batch[0]["eh"] for b in batch)
                     st = lambda k: np.stack([b[k] for b in batch])  # noqa: E731
                     cat = lambda k: np.concatenate([b[k] for b in batch])  # noqa: E731
@@ -866,6 +867,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                                              np.repeat(np.arange(len(batch)), [b["tx"].size for b in batch]),
                                              st("ir"), st("ii"), st("w"), *geom, shared=same,
                                              prior=(batch[0]["lo"], cat("lt"), prior[2]) if cand else None)
+                    t_back = time.time()
                     r0 = o = 0
                     for i, b in enumerate(batch):
                         n_t, n_o = b["tx"].size, len(b["eul"])
@@ -882,14 +884,22 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                         r0, o = r0 + n_t, o + n_o
                     _stats["batches"] = _stats.get("batches", 0) + 1
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
+                    _stats["lead_s"] = _stats.get("lead_s", 0.0) + t_back - t_lead
+                    _stats["share_s"] = _stats.get("share_s", 0.0) + time.time() - t_back
                     n = _stats["batches"]
                     if n % 50 == 0 or n & (n - 1) == 0:     # 1, 2, 4, ... then every 50
                         # rank_cpu_s is the whole rank process (RELION's own per-particle work + the bridge),
-                        # bridge_cpu_s the part spent in here; calls counts coarse and fine calls done so far
+                        # bridge_cpu_s the part spent in here; calls counts coarse and fine calls done so far.
+                        # A chip waits for its next batch through lead_s - rt_s (the leader stacking the batch and
+                        # copying it to the server, copy_s of it) and share_s (handing the results out); rt_s is
+                        # the server's own time.
                         print(f"tt_relion: batches={_stats['batches']} particles="
                               f"{_stats['batched']} mean={_stats['batched'] / _stats['batches']:.2f} "
                               f"calls={_stats['handled']}+{_stats['fine_handled']} "
-                              f"rank_cpu_s={time.process_time():.1f} bridge_cpu_s={_cpu['C']:.1f}+{_cpu['F']:.1f}",
+                              f"rank_cpu_s={time.process_time():.1f} bridge_cpu_s={_cpu['C']:.1f}+{_cpu['F']:.1f} "
+                              f"lead_s={_stats['lead_s']:.1f} share_s={_stats['share_s']:.1f} "
+                              f"copy_s={sum(s_.c.get('copy_s', 0) for s_ in _srv):.1f} "
+                              f"rt_s={sum(s_.c.get('rt_s', 0) for s_ in _srv):.1f}",
                               file=sys.stderr, flush=True)
                 except Exception as exc:            # every particle of the batch declines
                     for b in batch:
