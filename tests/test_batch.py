@@ -1,5 +1,6 @@
 """diff2_coarse_batch equals N per-particle diff2_coarse calls (torch backend, CPU)."""
 import os
+import time
 import numpy as np
 
 os.environ.setdefault("TT_RELION_BACKEND", "torch")
@@ -417,3 +418,52 @@ def test_unweighted_pixels_are_not_handed_over(monkeypatch):
     for mask in (np.ones(P, bool), np.zeros(P, bool)):
         batch(mask, True)
         assert seen[-1][0] == P
+
+
+def test_a_waiting_particle_is_woken_for_its_result_or_the_lead_only(monkeypatch):
+    """Many threads, several rounds, a slow batch: every particle gets its own rows, nobody is left without a leader
+    (the 1 s net in _collect is never needed: the run would take seconds), and an arrival wakes the leader only."""
+    import threading
+    geom = (8, 8, 5, 0, 0, 3, 9, 2, 5, 8)
+    n, rounds, P = 48, 3, 40
+    mdl = np.zeros(8 * 8 * 5 * 2, np.float32)
+    eul = np.zeros((6, 9), np.float32)
+    seen = []
+
+    def stub(mdl_, eul_, tx, ty, pn, img_r, img_i, corr, *g, shared=True, prior=None, own=None):
+        time.sleep(0.02)                        # the chip
+        seen.append(len(img_r))
+        return np.repeat(img_r[np.asarray(pn), :1], len(eul_), axis=1) + np.asarray(tx)[:, None]
+
+    monkeypatch.setattr(relion, "diff2_coarse_batch", stub)
+    monkeypatch.setattr(relion, "_BATCH", 8)
+    monkeypatch.setattr(relion, "_BATCH_WAIT", 0.05)
+    wakes = [0]
+    wait = threading.Condition.wait
+
+    def counted(self, timeout=None):
+        wakes[0] += 1
+        return wait(self, timeout)
+
+    monkeypatch.setattr(threading.Condition, "wait", counted)
+    bad = []
+
+    def run(p):
+        for r in range(rounds):
+            tx = np.arange(1 + p % 3, dtype=np.float32)
+            img = np.full(P, 100.0 * p + r, np.float32)
+            out = relion._collect(memoryview(mdl), memoryview(eul.ravel()), memoryview(tx), memoryview(tx.copy()),
+                                  memoryview(img), memoryview(img.copy()), memoryview(np.ones(P, np.float32)), geom, 6)
+            if out.shape != (tx.size, 6) or not np.array_equal(out, 100.0 * p + r + np.repeat(tx[:, None], 6, 1)):
+                bad.append((p, r))
+
+    t0 = time.time()
+    th = [threading.Thread(target=run, args=(p,)) for p in range(n)]
+    [t.start() for t in th]
+    [t.join() for t in th]
+    assert not bad
+    assert sum(seen) == n * rounds
+    assert time.time() - t0 < 0.9, "a particle waited for the net"
+    # a particle sleeps once for its result and at most once more before it leads; a leader once per arrival
+    assert wakes[0] <= 4 * n * rounds, wakes[0]
+    assert not relion._groups
