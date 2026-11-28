@@ -72,7 +72,11 @@ def main():
             # float32) and the particles' best values [N] float64; the reply is "ok <n>", n = -1 when cap is too small.
             pr = req.get("prior")
             sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, R, R, R]
-            sizes += [O, R, 3 * int(pr[1]) + 2 * N] if pr else [R * O]
+            # "own": [on_1 .. on_N]: every particle against its own orientations (Resident.d2_own). eul then holds the
+            # sets one after the other, O their sum, and the reply the particles' [T_i, on_i] blocks one after the other;
+            # "own_out" is the length of that.
+            own = req.get("own")
+            sizes += [O, R, 3 * int(pr[1]) + 2 * N] if pr else [int(req["own_out"]) if own else R * O]
             buf = np.ndarray((sum(sizes),), np.float32, shm.buf)
             mdl, eul, x, y, xr, xi, w, tx, ty, pn, *pri, out = np.split(buf, np.cumsum(sizes)[:-1])
             if req.get("model_sent"):
@@ -92,6 +96,9 @@ def main():
                     out[cap:cap + ncand].view(np.int32)[:] = oo
                     out[2 * cap:2 * cap + ncand] = dl
                     out[3 * cap:].view(np.float64)[:] = best
+            elif own:
+                out[:] = np.concatenate([b.ravel() for b in res.d2_own(
+                    eul.reshape(O, 9), own, xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty, pn.astype(np.int64), x, y)])
             else:
                 res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty,
                        pn.astype(np.int64), x, y, req.get("ref_key"), out.reshape(R, O))
