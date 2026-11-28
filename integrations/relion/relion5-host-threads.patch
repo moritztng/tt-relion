@@ -184,22 +184,13 @@ index 1a7ce75..5531ca6 100644
  	}
  }
 diff --git a/src/fftw.h b/src/fftw.h
-index b167742..88a92e1 100644
+index b167742..da28eac 100644
 --- a/src/fftw.h
 +++ b/src/fftw.h
-@@ -148,6 +148,22 @@
+@@ -148,6 +148,13 @@
   *	Vmag(k,i,j)=20*log10(abs(Vfft(k,i,j)));
   * @endcode
   */
-+// Threads for work on one array of at least 2^22 elements (3D maps and volumes), set once from --j.
-+// Per-particle 2D transforms and loops stay single-threaded.
-+void setBigArrayThreads(int nr_threads);
-+int bigArrayThreads();
-+
-+// Placed before a loop over a 3D array of n elements whose iterations are independent.
-+#define PARALLEL_IF_BIG_PRAGMA(x) _Pragma(#x)
-+#define PARALLEL_IF_BIG(n) PARALLEL_IF_BIG_PRAGMA(omp parallel for num_threads(bigArrayThreads()) if((size_t)(n) >= ((size_t)1 << 22)))
-+
 +// FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM with the z slices shared between the big-array threads.
 +#define FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_PARALLEL(V) \
 +	PARALLEL_IF_BIG(MULTIDIM_SIZE(V)) \
@@ -210,7 +201,7 @@ index b167742..88a92e1 100644
  class FourierTransformer
  {
  public:
-@@ -176,6 +192,15 @@ public:
+@@ -176,6 +183,15 @@ public:
  
  	bool plans_are_set;
  
@@ -226,7 +217,7 @@ index b167742..88a92e1 100644
  // Public methods
  public:
  	/** Default constructor */
-@@ -393,6 +418,7 @@ void CenterFFTbySign(MultidimArray <T> &v)
+@@ -393,6 +409,7 @@ void CenterFFTbySign(MultidimArray <T> &v)
      // Unfortunately, this cannot be checked within this function...
      // Forward and backward shifts are equivalent.
  
@@ -378,6 +369,63 @@ index fb33d84..8398ef4 100644
          mymodel.acc_rot[iclass]   = acc_rot_class / (RFLOAT)nr_particles;
          mymodel.acc_trans[iclass] = acc_trans_class / (RFLOAT)nr_particles;
  
+diff --git a/src/multidim_array.h b/src/multidim_array.h
+index a15b368..a7904be 100644
+--- a/src/multidim_array.h
++++ b/src/multidim_array.h
+@@ -161,6 +161,25 @@ extern std::string floatToString(float F, int _width, int _prec);
+  */
+ #define DIRECT_MULTIDIM_ELEM(v,n) ((v).data[(n)])
+ 
++// Threads for work on one array of at least 2^22 elements (3D maps and volumes), set once from --j.
++// Per-particle 2D transforms and loops stay single-threaded.
++void setBigArrayThreads(int nr_threads);
++int bigArrayThreads();
++
++// Placed before a loop over a 3D array of n elements whose iterations are independent.
++#define PARALLEL_IF_BIG_PRAGMA(x) _Pragma(#x)
++#define PARALLEL_IF_BIG(n) PARALLEL_IF_BIG_PRAGMA(omp parallel for num_threads(bigArrayThreads()) if((size_t)(n) >= ((size_t)1 << 22)))
++
++// Zero a block of memory. A big block is split over the big-array threads, and so are its first-touch page faults.
++inline void zeroFill(void *ptr, size_t bytes)
++{
++	const size_t chunk = (size_t)1 << 24;
++	const long int nr_chunks = (bytes + chunk - 1) / chunk;
++	PARALLEL_IF_BIG(bytes / sizeof(RFLOAT))
++	for (long int n = 0; n < nr_chunks; n++)
++		memset((char*)ptr + n * chunk, 0, XMIPP_MIN(chunk, bytes - n * chunk));
++}
++
+ /** For all direct elements in the array
+  *
+  * This macro is used to generate loops for the array in an easy manner. It
+@@ -3329,7 +3348,7 @@ public:
+     {
+         if (data == NULL || !sameShape(op))
+             reshape(op);
+-        memset(data,0,nzyxdim*sizeof(T));
++        zeroFill(data, nzyxdim*sizeof(T));
+     }
+ 
+     /** Initialize to zeros with current size.
+@@ -3343,7 +3362,7 @@ public:
+      */
+     inline void initZeros()
+     {
+-        memset(data,0,nzyxdim*sizeof(T));
++        zeroFill(data, nzyxdim*sizeof(T));
+     }
+ 
+     /** Initialize to zeros with a given size.
+@@ -3352,7 +3371,7 @@ public:
+     {
+         if (xdim!=Xdim || ydim!=Ydim || zdim!=Zdim || ndim!=Ndim)
+             reshape(Ndim, Zdim,Ydim,Xdim);
+-        memset(data,0,nzyxdim*sizeof(T));
++        zeroFill(data, nzyxdim*sizeof(T));
+     }
+ 
+     /** Initialize to zeros with a given size.
 diff --git a/src/projector.cpp b/src/projector.cpp
 index c35691a..8b9a25f 100644
 --- a/src/projector.cpp

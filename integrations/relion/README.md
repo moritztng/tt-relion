@@ -108,6 +108,7 @@ transform, the reconstruction, and the accuracy estimate before each expectation
 - The element-wise loops over those grids (padding, centring, gridding correction, weighting, soft
   mask) run in parallel. Their results do not depend on the thread count.
 - The orientation accuracy estimate runs over particles in parallel and prints the same values.
+- Zeroing a big grid is split over the threads, so the page faults of its first touch are too.
 
 Per-particle 2D transforms are untouched. Apply it on top of the other patches and run with huge
 pages as above:
@@ -117,7 +118,7 @@ cd relion && git apply /path/to/relion5-host-threads.patch
 ```
 
 On the dev cell (3 MPI ranks, `--j 24`) the host time per refinement iteration drops from 11.4 s
-with huge pages alone to 2.9 s, and the final iteration from 42 s to 19 s. The final map matches
+with huge pages alone to 2.6 s, and the final iteration from 42 s to 18 s. The final map matches
 the unpatched run to a correlation of 0.99999, well inside RELION's own run-to-run variation. The
 patch only touches RELION's CPU code, so CPU and GPU builds both pick it up.
 
