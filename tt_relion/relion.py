@@ -537,6 +537,53 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         return False
 
 
+# TT_RELION_CAND_WINDOW=<w>: the coarse pass hands RELION its candidates instead of the dense [O, T] block: the
+# samples whose diff2 - log(pdf_orientation) - log(pdf_offset) lies within w of the particle's best. A sample
+# outside the window weighs under exp(-w) of the best one, so with w = 40 it cannot reach RELION's significant
+# set or move its sums at fp32. 0 (the default) declines, and RELION asks for the dense block.
+_CAND_WINDOW = float(os.environ.get("TT_RELION_CAND_WINDOW", "0"))
+
+
+def diff2_coarse_cand(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, lo_mv, lt_mv, idx_mv, val_mv,
+                      mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
+                      padding_factor, imgX, imgY,
+                      orientation_num, translation_num, image_size):
+    """The coarse pass in candidate form. lo [orientation_num] and lt [translation_num] are float32 -log priors
+    (inf = excluded). Writes idx (uint64, orientation * translation_num + translation, ascending) and val (float32,
+    diff2 + lo + lt minus the particle's best) for the samples within the window and returns (n, best), with best
+    the float64 minimum of diff2 + lo + lt. Returns None when it declines (off, an unbatched backend, or more
+    candidates than idx holds); RELION then runs the dense pass."""
+    if _CAND_WINDOW <= 0 or _BATCH <= 1 or _BACKEND in ("nullbase", "null"):
+        return None
+    try:
+        t0, c0 = time.time(), time.thread_time()
+        geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
+        lo = np.frombuffer(lo_mv, dtype=np.float32)
+        lt = np.frombuffer(lt_mv, dtype=np.float32)
+        o, tr, dl, best = _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num,
+                                   prior=(lo, lt, _CAND_WINDOW))
+        _book("C_s", time.time() - t0)
+        idx = np.frombuffer(idx_mv, dtype=np.uint64)
+        if len(o) > len(idx) or not np.isfinite(best):
+            _book_cpu("C", c0)
+            _stats["cand_declined"] = _stats.get("cand_declined", 0) + 1
+            return None
+        flat = o.astype(np.uint64) * np.uint64(translation_num) + tr.astype(np.uint64)
+        k = np.argsort(flat, kind="stable")
+        idx[:len(k)] = flat[k]
+        np.frombuffer(val_mv, dtype=np.float32)[:len(k)] = dl[k]
+        _book_cpu("C", c0)
+        _stats["handled"] += 1
+        _stats["cand"] = _stats.get("cand", 0) + len(k)
+        return len(k), float(best)
+    except Exception as exc:                        # declining beats killing the refinement
+        import traceback
+        traceback.print_exc()
+        print("tt_relion.relion: diff2_coarse_cand declined: %r" % (exc,))
+        _stats["declined"] += 1
+        return None
+
+
 def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                rot_idx_mv, trans_idx_mv, out_mv,
                mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,

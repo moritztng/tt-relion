@@ -249,3 +249,51 @@ def test_threads_collect_the_candidate_form():
         r, o, dl, best = relion._window(d[p * T:(p + 1) * T], lo, lt[p], np.zeros(T, np.int64), 1, 25.0)
         assert np.array_equal(outs[p][0], o) and np.array_equal(outs[p][1], r)
         assert np.abs(outs[p][2] - dl).max() < 1e-4 and abs(outs[p][3] - best[0]) < 1e-6 * abs(best[0])
+
+
+def test_relion_entry_writes_the_candidates_as_flat_indices():
+    """diff2_coarse_cand, the entry RELION calls: idx = orientation * T + translation in ascending order, val the
+    distance to the particle's best, and a decline when the window is off or idx is too short. Particles with their
+    own orientation prior ride one batch and still get their own window."""
+    import threading
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case()
+    n, T, O = tx.shape[0], tx.shape[1], eul.shape[0]
+    rng = np.random.default_rng(11)
+    lo = rng.uniform(0, 4, (n, O)).astype(np.float32)
+    lo[:, 3] = np.inf                                   # an orientation the prior excludes
+    lo[: n // 2] = lo[0]                                # half share one prior, the rest carry their own
+    lt = rng.uniform(0, 6, (n, T)).astype(np.float32)
+    d = relion.diff2_coarse_batch(mdl, eul, tx.ravel(), ty.ravel(), np.repeat(np.arange(n), T), ir, ii, corr, **g)
+    geom = [g[k] for k in ("mdlX", "mdlY", "mdlZ", "mdlInitY", "mdlInitZ", "maxR", "maxR2_padded",
+                           "padding_factor", "imgX", "imgY")]
+    idx, val, ret = np.zeros((n, O * T), np.uint64), np.zeros((n, O * T), np.float32), [None] * n
+
+    def run(p, cap=O * T):
+        ret[p] = relion.diff2_coarse_cand(memoryview(mdl), memoryview(eul.ravel()), memoryview(tx[p].copy()),
+                                          memoryview(ty[p].copy()), memoryview(ir[p].copy()),
+                                          memoryview(ii[p].copy()), memoryview(corr[p].copy()),
+                                          memoryview(lo[p].copy()), memoryview(lt[p].copy()),
+                                          memoryview(idx[p])[:cap], memoryview(val[p])[:cap],
+                                          *geom, O, T, ir.shape[1])
+    assert relion._CAND_WINDOW == 0
+    relion._BATCH, relion._BATCH_WAIT = 4, 0.2
+    try:
+        run(0)
+        assert ret[0] is None                           # off: RELION runs the dense pass
+        relion._CAND_WINDOW = 25.0
+        th = [threading.Thread(target=run, args=(p,)) for p in range(n)]
+        [t.start() for t in th]
+        [t.join() for t in th]
+        for p in range(n):
+            e = d[p * T:(p + 1) * T].T.astype(np.float64) + lo[p].astype(np.float64)[:, None] + lt[p][None, :]
+            want = np.flatnonzero((e - e.min() < 25.0).ravel())             # [O, T] flat, RELION's block order
+            k, best = ret[p]
+            assert k == len(want) and np.array_equal(idx[p, :k], want)
+            assert np.abs(val[p, :k] - (e.ravel()[want] - e.min())).max() < 1e-4
+            assert abs(best - e.min()) < 1e-6 * abs(e.min())
+            assert not np.any(idx[p, :k] // T == 3)
+        k = ret[0][0]
+        run(0, cap=k - 1)
+        assert ret[0] is None                           # more candidates than idx holds
+    finally:
+        relion._BATCH, relion._CAND_WINDOW = 0, 0.0
