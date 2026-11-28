@@ -600,6 +600,11 @@ def diff2_coarse_cand(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, lo_mv
         _book_cpu("C", c0)
         _stats["handled"] += 1
         _stats["cand"] = _stats.get("cand", 0) + len(k)
+        _stats["cand_calls"] = c = _stats.get("cand_calls", 0) + 1
+        if c % 1024 == 0:           # a run stopped from outside never prints the exit report
+            print("tt_relion.relion: candidates pid %d calls %d declined %d mean %.1f of %d"
+                  % (os.getpid(), c, _stats.get("cand_declined", 0), _stats["cand"] / c,
+                     orientation_num * translation_num), flush=True)
         return len(k), float(best)
     except Exception as exc:                        # declining beats killing the refinement
         import traceback
