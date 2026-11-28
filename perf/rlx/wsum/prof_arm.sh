@@ -22,7 +22,9 @@ p=$!
 full() { [ "$(awk -v n=$n '$2=="oneParticle" && $5>=n' $o/prof.* 2>/dev/null | wc -l)" -ge $((ranks - 1)) ]; }
 while kill -0 $p 2>/dev/null; do
   sleep 5
-  if full || [ -e $o/run_it$(printf %03d $it)_data.star ]; then break; fi
+  full && break
+  # the iteration is over (N was more than it holds): give the ranks time to finish writing their half maps
+  [ -e $o/run_it$(printf %03d $it)_data.star ] && { sleep 30; break; }
 done
 # Stop: mpirun aborts on INT and forces it on a second one within 5 s; whatever is left after 20 s is killed by its
 # output prefix (one arm ran two more iterations after a single INT).
