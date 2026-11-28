@@ -176,6 +176,17 @@ all, each arrival woke every parked thread (190 at `--j 192`), and the thread th
 waited behind them. On an idle 8-core host with 190 parked threads, stacking a 58-particle batch takes 1.2 ms alone
 and 42 ms while 64 particles arrive (`tests/test_batch.py` counts the wake-ups).
 
+Through RELION that change alone did not shorten the time a chip waits for its next batch (one global iteration, two
+chips, `--j 192`: 135 ms a batch after it, 116 ms before it on a quieter host). The counter `lead_cpu_s` on the
+client's progress line shows why: over 300 batches the chip waited 141 ms a batch between the batch being cut and
+the request reaching the server, and the thread that does that work used 14 ms of CPU in that time. It waits for the
+interpreter lock: when a batch comes back, its ~57 threads all take their results at the moment the next batch is
+being stacked and sent. Two things follow from it. The orientation set every particle of a global pass brings (723 KB
+at 20,091 orientations) is compared bit for bit with the sets seen before and reused instead of being copied and
+hashed per particle (0.38 ms to 0.025 ms a particle on an idle host). And with `TT_RELION_YIELD_MS=<ms>` a thread
+whose result is in, or that brings a new particle, waits at most that long while a batch is on its way to a reserved
+chip. The knob is off by default until a RELION-called run has measured it.
+
 ### Leaving small orientation sets to RELION
 
 `TT_RELION_MIN_ORI=<n>` declines a coarse call that brings fewer than n orientations, and the fine call that follows
