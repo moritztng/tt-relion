@@ -33,7 +33,8 @@ def _case(seed=0, n=5, O=40, T=7, img=16, box=24):
 def test_batch_matches_per_particle():
     mdl, eul, tx, ty, ir, ii, corr, g, P = _case()
     n, T, O = tx.shape[0], tx.shape[1], eul.shape[0]
-    got = relion.diff2_coarse_batch(mdl, eul, tx, ty, ir, ii, corr, **g)
+    got = relion.diff2_coarse_batch(mdl, eul, tx.ravel(), ty.ravel(), np.repeat(np.arange(n), T), ir, ii, corr, **g)
+    got = got.reshape(n, T, O).transpose(0, 2, 1)
     for p in range(n):
         out = np.zeros(O * T, np.float32)
         assert relion.diff2_coarse(memoryview(mdl), memoryview(eul.ravel()), memoryview(tx[p]),
@@ -53,7 +54,8 @@ def test_threads_collect_into_batches():
     import threading
     mdl, eul, tx, ty, ir, ii, corr, g, P = _case(seed=1, n=11)
     n, T, O = tx.shape[0], tx.shape[1], eul.shape[0]
-    ref = relion.diff2_coarse_batch(mdl, eul, tx, ty, ir, ii, corr, **g)
+    ref = relion.diff2_coarse_batch(mdl, eul, tx.ravel(), ty.ravel(), np.repeat(np.arange(n), T), ir, ii, corr, **g)
+    ref = ref.reshape(n, T, O).transpose(0, 2, 1)
     relion._BATCH, relion._BATCH_WAIT = 4, 0.2
     outs = [np.zeros(O * T, np.float32) for _ in range(n)]
     ok = [False] * n
@@ -151,3 +153,37 @@ def test_fine_scores_only_the_asked_translations():
     relion._BATCH = 0
     for p in range(n):
         assert np.abs(outs[p] - ref[p]).max() / np.abs(ref[p]).max() < 1e-5
+
+
+def test_batch_is_cut_by_rows():
+    """TT_RELION_BATCH_ROWS cuts a batch by its (particle, translation) rows, whatever each particle brings, and
+    every particle still gets exactly its own block."""
+    import threading
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case(seed=3, n=10)
+    n, O = tx.shape[0], eul.shape[0]
+    nt = [2 + p % 6 for p in range(n)]                                  # 2..7 translations each, 41 rows in all
+    geo = (g["mdlX"], g["mdlY"], g["mdlZ"], g["mdlInitY"], g["mdlInitZ"], g["maxR"], g["maxR2_padded"],
+           g["padding_factor"], g["imgX"], g["imgY"])
+
+    def run(p, out):
+        return relion.diff2_coarse(memoryview(mdl), memoryview(eul.ravel()), memoryview(tx[p, :nt[p]].copy()),
+                                   memoryview(ty[p, :nt[p]].copy()), memoryview(ir[p]), memoryview(ii[p]),
+                                   memoryview(corr[p]), memoryview(out), *geo, O, nt[p], P)
+    refs = [np.zeros(O * nt[p], np.float32) for p in range(n)]
+    assert all(run(p, refs[p]) for p in range(n))
+    outs = [np.zeros(O * nt[p], np.float32) for p in range(n)]
+    rows = []
+    inner = relion.diff2_coarse_batch
+    relion.diff2_coarse_batch = lambda mdl_, eul_, tx_, *a, **k: (rows.append(len(tx_)), inner(mdl_, eul_, tx_, *a, **k))[1]
+    relion._BATCH, relion._BATCH_ROWS, relion._BATCH_WAIT = 64, 16, 0.5
+    try:
+        th = [threading.Thread(target=run, args=(p, outs[p])) for p in range(n)]
+        [x.start() for x in th]
+        [x.join(60) for x in th]
+    finally:
+        relion._BATCH, relion._BATCH_ROWS, relion.diff2_coarse_batch = 0, 0, inner
+    assert sum(rows) == sum(nt) and max(rows) <= 16 and len(rows) >= 3, rows
+    for p in range(n):
+        rel = np.abs(outs[p] - refs[p]).max() / np.abs(refs[p]).max()
+        assert rel < 1e-5, (p, rel)
+        assert outs[p].argmin() == refs[p].argmin()

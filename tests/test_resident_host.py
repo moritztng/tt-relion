@@ -22,7 +22,7 @@ def test_operands_match_direct_form():
     r = Resident(None)
     r.P, r.NC = P, -(-P // 1024)
     r.K = r.NC * 2048
-    A, A2, nx = r._operands(xr, xi, w, tx, ty, x, y)
+    A, A2, nx = r._operands(xr, xi, w, tx.ravel(), ty.ravel(), np.repeat(np.arange(N), T), x, y)
     B = r._kchip(pr, pi).astype(np.float64)
     d2 = (nx[:, None] + A2 @ (B * B).T - 2 * A @ B.T).reshape(N, T, O).transpose(0, 2, 1)
     ph = tx[:, :, None].astype(np.float64) * x + ty[:, :, None].astype(np.float64) * y

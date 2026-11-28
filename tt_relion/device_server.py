@@ -16,8 +16,9 @@ last one in its exit line, so the WALLMAP gets the client side without RELION ha
 The shared-memory segment holds lhs [nc, m, kc], rhs [nc, kc, n] and out [nc, m, n], float32, back to back.
 
 A request with "op": "d2" is the resident diff2 (tt_relion/resident.py): the chip projects the reference and
-returns d2 [N, O, T] for N particles. Its segment holds, float32 and back to back: the model [nvox, 2] (only when
-"model_sent"), eul [O, 9], x [P], y [P], xr [N, P], xi [N, P], w [N, P], tx [N, T], ty [N, T], then out.
+returns d2 [R, O] for R (particle, translation) rows of N particles, "dims" = [N, R, O, P]. Its segment holds,
+float32 and back to back: the model [nvox, 2] (only when "model_sent"), eul [O, 9], x [P], y [P], xr [N, P],
+xi [N, P], w [N, P], tx [R], ty [R], the particle of each row [R], then out.
 "model" = [key, X, Y, Z, initY, initZ, maxR2, pf, nvox]; "ref_key" marks an orientation set to keep on the chip.
 EOF on stdin closes the device and exits.
 """
@@ -60,23 +61,23 @@ def main():
             if res is None:
                 from tt_relion.resident import Resident
                 res = Resident(dev, int(os.environ.get("TT_RELION_DIGITS", "16")))   # base-4 digits; 13 loses the fine pass on real spectra
-            N, T, O, P = req["dims"]
+            N, R, O, P = req["dims"]
             key, X, Y, Z, initY, initZ, maxR2, pf, nvox = req["model"]
-            sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, N * T, N * T, N * O * T]
+            sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, R, R, R, R * O]
             buf = np.ndarray((sum(sizes),), np.float32, shm.buf)
-            mdl, eul, x, y, xr, xi, w, tx, ty, out = np.split(buf, np.cumsum(sizes)[:-1])
+            mdl, eul, x, y, xr, xi, w, tx, ty, pn, out = np.split(buf, np.cumsum(sizes)[:-1])
             if req.get("model_sent"):
                 res.set_model(key, mdl.reshape(nvox, 2), X, Y, Z, initY, initZ, maxR2, pf)
             res.set_radius(maxR2)       # the pass's, not the model's: coarse and fine cut one model at two radii
             res.set_pixels((P, x.tobytes()), x, y)
             t1 = time.time()
-            out[:] = res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx.reshape(N, T),
-                            ty.reshape(N, T), x, y, req.get("ref_key")).reshape(-1)
-            del mdl, eul, x, y, xr, xi, w, tx, ty, out, buf
+            out[:] = res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty,
+                            pn.astype(np.int64), x, y, req.get("ref_key")).reshape(-1)
+            del mdl, eul, x, y, xr, xi, w, tx, ty, pn, out, buf
             up, mm = up + t1 - t0, mm + time.time() - t1
-            if batchlog:                # one line per batch: start, wall, the op's host and chip seconds so far, shape
+            if batchlog:                # one line per batch: start, wall, the op's host and chip seconds so far, N R O P
                 print("TTB %.4f %.4f %.4f %.4f %d %d %d %d" % (t0, time.time() - t0, res.c["host_s"], res.c["dev_s"],
-                                                             N, T, O, P), file=sys.stderr, flush=True)
+                                                             N, R, O, P), file=sys.stderr, flush=True)
             client = req.get("client", client)
             calls += 1
             reply.write("ok\n")

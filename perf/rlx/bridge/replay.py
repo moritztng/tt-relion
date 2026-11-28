@@ -163,7 +163,7 @@ if len(tb) and (tb[:, 0] >= t0).any():
     base = tb[tb[:, 0] < t0]
     # with one chip the cumulative counters difference over the window is exact; with several it is their sum
     host0, dev0 = (base[-1, 2], base[-1, 3]) if len(base) and len(chips) == 1 else (None, None)
-    rows = w[:, 4] * w[:, 5]
+    rows = w[:, 5]
     steady = dict(batches=len(w), particles_per_batch=round(float(w[:, 4].mean()), 2), rows_per_batch=round(float(rows.mean()), 1),
                   fill=round(float(rows.sum() / (np.ceil(rows / 512) * 512).sum()), 3),
                   batch_wall_ms=[round(float(v) * 1e3, 1) for v in np.percentile(w[:, 1], [5, 50, 95])],
@@ -187,18 +187,19 @@ if a.digest:
     np.savez(a.digest, arg_min=arg_min, d_min=d_min, n_sig=n_sig, h_sig=h_sig, handled=handled)
 if a.ref and os.path.exists(a.ref):
     ref = np.load(a.ref)
-    ok = handled & ref["handled"]
+    m = min(n, len(ref["handled"]))                 # a reference may cover only the first calls of the record
+    ok = handled[:m] & ref["handled"][:m]
     res.update(ref=os.path.basename(a.ref), compared=int(ok.sum()),
-               same_argmin=int((arg_min == ref["arg_min"])[ok].sum()),
-               same_set=int((h_sig == ref["h_sig"])[ok].sum()),
-               max_dmin_err=float(np.abs(d_min - ref["d_min"])[ok].max()) if ok.any() else None)
-    kind = np.array([r["k"] for r in calls])
-    for k in "CF":                                  # the coarse and the fine pass apart
-        m = ok & (kind == k)
-        res["pass_" + k] = dict(compared=int(m.sum()), same_argmin=int((arg_min == ref["arg_min"])[m].sum()),
-                                same_set=int((h_sig == ref["h_sig"])[m].sum()),
-                                max_dmin_err=float(np.abs(d_min - ref["d_min"])[m].max()) if m.any() else None,
-                                dmin_ref_median=float(np.median(ref["d_min"][m])) if m.any() else None)
+               same_argmin=int((arg_min[:m] == ref["arg_min"][:m])[ok].sum()),
+               same_set=int((h_sig[:m] == ref["h_sig"][:m])[ok].sum()),
+               max_dmin_err=float(np.abs(d_min[:m] - ref["d_min"][:m])[ok].max()) if ok.any() else None)
+    kind = np.array([r["k"] for r in calls])[:m]
+    for k in "CF":                                  # the coarse and the fine pass apart: a mixed count hides a broken pass
+        mk = ok & (kind == k)
+        res["pass_" + k] = dict(compared=int(mk.sum()), same_argmin=int((arg_min[:m] == ref["arg_min"][:m])[mk].sum()),
+                                same_set=int((h_sig[:m] == ref["h_sig"][:m])[mk].sum()),
+                                max_dmin_err=float(np.abs(d_min[:m] - ref["d_min"][:m])[mk].max()) if mk.any() else None,
+                                dmin_ref_median=float(np.median(ref["d_min"][:m][mk])) if mk.any() else None)
 with open(a.out, "a") as fh:
     fh.write(json.dumps(res) + "\n")
 print(json.dumps(res))

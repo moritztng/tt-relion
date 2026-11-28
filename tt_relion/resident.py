@@ -183,31 +183,32 @@ class Resident:
         ttnn.deallocate(S)
         return hi, lo
 
-    def _operands(self, xr, xi, w, tx, ty, x, y):
-        """Particle side in float64: A [N T, K] = w S_t X (rows n T + t), A2 = w on both parts, nx = sum w |X|^2."""
-        T = tx.shape[1]
+    def _operands(self, xr, xi, w, tx, ty, pn, x, y):
+        """Particle side in float64, one row per (particle, translation): A [R, K] = w S_t X, A2 = w on both parts,
+        nx = sum w |X|^2. Row r is particle pn[r] at translation (tx[r], ty[r])."""
         w = w.astype(np.float64)
-        ph = tx[:, :, None].astype(np.float64) * x + ty[:, :, None].astype(np.float64) * y      # [N, T, P]
+        ph = tx[:, None].astype(np.float64) * x + ty[:, None].astype(np.float64) * y            # [R, P]
         c, s = np.cos(ph), np.sin(ph)
-        ar = (c * xr[:, None] - s * xi[:, None]) * w[:, None]
-        ai = (c * xi[:, None] + s * xr[:, None]) * w[:, None]
-        A = self._kchip(ar.reshape(-1, self.P), ai.reshape(-1, self.P)).astype(np.float64)
-        A2 = self._kchip(np.repeat(w, T, 0), np.repeat(w, T, 0)).astype(np.float64)
-        nx = np.repeat((w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1), T)
+        wr = w[pn]
+        ar = (c * xr[pn] - s * xi[pn]) * wr
+        ai = (c * xi[pn] + s * xr[pn]) * wr
+        A = self._kchip(ar, ai).astype(np.float64)
+        A2 = self._kchip(wr, wr).astype(np.float64)
+        nx = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)[pn]
         return A, A2, nx
 
-    def d2(self, eul, xr, xi, w, tx, ty, x, y, ref_key=None):
-        """float32 [N, O, T]. eul [O, 9]; xr, xi, w [N, P]; tx, ty [N, T] (phase = x tx + y ty, RELION's units).
+    def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None):
+        """float32 [R, O]. eul [O, 9]; xr, xi, w [N, P]; tx, ty, pn [R]: row r scores particle pn[r] at translation
+        (tx[r], ty[r]) (phase = x tx + y ty, RELION's units), so particles may bring different numbers of translations.
 
         ref_key names an orientation set shared by many batches (a global pass): its projections and digits stay on
         the chip until another key or model arrives, so the key must also identify the pixel set. Without it the set
         is used once.
         """
-        N, T = tx.shape
-        R = N * T
+        R = len(tx)
         rows = -(-R // RBLK) * RBLK
         t0 = time.time()
-        A, A2, nx = self._operands(xr, xi, w, tx, ty, x, y)
+        A, A2, nx = self._operands(xr, xi, w, tx, ty, pn, x, y)
         t0 = t1 = self._mark("host_s", t0)
 
         held = ref_key is not None and ref_key == self.ref_key
@@ -263,4 +264,4 @@ class Resident:
         c = self.c
         c["dev_s"] += time.time() - t1
         c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
-        return (2.0 * out).reshape(N, T, -1).transpose(0, 2, 1)
+        return 2.0 * out

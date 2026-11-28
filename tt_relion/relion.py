@@ -216,16 +216,17 @@ class _Server:
         return out
 
 
-    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, ref_key):
-        """Resident diff2 on this chip (device_server "d2"): float32 [N, O, T]. model = [key, X, Y, Z, initY,
-        initZ, maxR2, pf, nvox]; the volume is shipped only when this chip does not hold that key."""
+    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, ref_key):
+        """Resident diff2 on this chip (device_server "d2"): float32 [R, O], row r = particle pn[r] at translation
+        (tx[r], ty[r]). model = [key, X, Y, Z, initY, initZ, maxR2, pf, nvox]; the volume is shipped only when this
+        chip does not hold that key."""
         from multiprocessing import shared_memory
-        N, T = tx.shape
+        N, R = xr.shape[0], tx.size
         O, P = eul.shape[0], x.shape[0]
         with self.lock:
             send = model[0] != self.model_key
-            parts = ([np.frombuffer(mdl_mv, dtype=np.float32)] if send else []) + [eul, x, y, xr, xi, w, tx, ty]
-            need = 4 * (sum(a.size for a in parts) + N * O * T)
+            parts = ([np.frombuffer(mdl_mv, dtype=np.float32)] if send else []) + [eul, x, y, xr, xi, w, tx, ty, pn]
+            need = 4 * (sum(a.size for a in parts) + R * O)
             if self.shm is None or self.shm.size < need:
                 if self.shm is not None:
                     self.shm.close()
@@ -238,7 +239,7 @@ class _Server:
                 buf[o:o + a.size] = a.reshape(-1)
                 o += a.size
             t1 = time.time()
-            req = {"op": "d2", "shm": self.shm.name, "dims": [N, T, O, P], "model": model, "model_sent": send,
+            req = {"op": "d2", "shm": self.shm.name, "dims": [N, R, O, P], "model": model, "model_sent": send,
                    "client": self.c}
             if ref_key is not None:
                 req["ref_key"] = ref_key
@@ -248,7 +249,7 @@ class _Server:
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
             t2 = time.time()
             self.model_key = model[0]
-            out = buf[o:o + N * O * T].reshape(N, O, T).copy()
+            out = buf[o:o + R * O].reshape(R, O).copy()
             del buf
             c = self.c
             c["calls"] += 1
@@ -344,16 +345,17 @@ def _device_cross(t, ref, shw, ref_key=None):
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 
-def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, geom, shared):
-    """diff2 [N, O, T] from the resident chip op. shared: the orientation set is the iteration's (a global coarse
-    pass), so the chip keeps its projections; otherwise it is this call's own and is used once."""
+def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared):
+    """diff2 [R, O] from the resident chip op, row r = particle pn[r] at (tx[r], ty[r]). shared: the orientation set
+    is the iteration's (a global coarse pass), so the chip keeps its projections; otherwise it is this call's own and
+    is used once."""
     import hashlib
     mdlX, mdlY, mdlZ = geom[:3]
     model = [hashlib.sha256(repr(_model_key(mdl_mv)).encode()).hexdigest(), *geom, mdlX * mdlY * mdlZ]
     f32 = lambda a: np.asarray(a, np.float32)  # noqa: E731
     s = _server()
     try:
-        return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty),
+        return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty), f32(pn),
                     "%s.%s.%d.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size, geom[5]) if shared else None)
     finally:
         _free.put(s)
@@ -374,9 +376,10 @@ def _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         yi = pix // imgX
         return _resident_d2(mdl_mv, np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9),
                             (pix % imgX).astype(np.float32), np.where(yi > maxR, yi - imgY, yi).astype(np.float32),
-                            row(re_mv), row(im_mv), row(corr_mv), row(tx_mv), row(ty_mv),
+                            row(re_mv), row(im_mv), row(corr_mv), row(tx_mv)[0], row(ty_mv)[0],
+                            np.zeros(translation_num, np.int64),
                             (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor),
-                            shared=tag == "C").reshape(-1)
+                            shared=tag == "C").T.reshape(-1)
     mdl = t.from_numpy(np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy())
     eul = t.from_numpy(np.frombuffer(eul_mv, dtype=np.float32)
                        .reshape(orientation_num, 9).copy())
@@ -589,50 +592,50 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom, keep=True):
     return hit
 
 
-def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
+def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
                        mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                        padding_factor, imgX, imgY, shared=True):
-    """diff2 for N particles over one orientation set: float32 [N, O, T].
+    """diff2 for N particles over one orientation set: float32 [R, O], one row per (particle, translation).
 
     shared: the set is the iteration's (a global coarse pass), so its projections are kept for the next
     batch. A batch of particles with their own orientations passes the union of them and shared=False.
 
-    img_r/img_i/corr are [N, image_size], tx/ty are [N, T] (each particle's own offsets), eul is
-    [O, 9] and shared. The cross term is one product of [N*T, 2P] by [2P, O]; |ref|^2_w is one
-    product of [N, P] by [P, O]; |shift|^2_w is a row norm. Entry for entry this equals N calls of
-    diff2_coarse, which tests/test_batch.py checks.
+    img_r/img_i/corr are [N, image_size]; tx, ty and pn are [R]: row r is particle pn[r] at its own offset
+    (tx[r], ty[r]), so particles may bring different numbers of translations. eul is [O, 9]. The cross term is
+    one product of [R, 2P] by [2P, O]; |ref|^2_w is one product of [N, P] by [P, O]; |shift|^2_w is a row
+    norm. Entry for entry this equals N calls of diff2_coarse, which tests/test_batch.py checks.
     """
     t = _torch()
-    n, image_size = img_r.shape
-    T = tx.shape[1]
+    image_size = img_r.shape[1]
+    pn = np.asarray(pn, np.int64)
     eul = t.from_numpy(np.ascontiguousarray(eul, dtype=np.float32).reshape(-1, 9))
     pix = t.arange(image_size, dtype=t.int64)
     x = (pix % imgX).to(t.float32)
     yi = pix // imgX
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
     if _RESIDENT and _BACKEND == "ttnn":
-        return _resident_d2(mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty,
+        return _resident_d2(mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty, pn,
                             (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared=shared)
     ref_r, ref_i, ref_a2, ref_key = _shared_refs(t, mdl, eul, x, y,
                                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared)
+    pn = t.from_numpy(pn)
     w = t.from_numpy(np.asarray(corr, np.float32)) * 0.5                      # [N, P]
-    ir, ii = t.from_numpy(np.asarray(img_r, np.float32)), t.from_numpy(np.asarray(img_i, np.float32))
-    ph = (x[None, None] * t.from_numpy(np.asarray(tx, np.float32))[..., None]
-          + y[None, None] * t.from_numpy(np.asarray(ty, np.float32))[..., None])   # [N, T, P]
+    ir, ii = t.from_numpy(np.asarray(img_r, np.float32))[pn], t.from_numpy(np.asarray(img_i, np.float32))[pn]
+    ph = (x[None] * t.from_numpy(np.asarray(tx, np.float32))[:, None]
+          + y[None] * t.from_numpy(np.asarray(ty, np.float32))[:, None])              # [R, P]
     s, c = t.sin(ph), t.cos(ph)
-    sh_r = c * ir[:, None] - s * ii[:, None]
-    sh_i = c * ii[:, None] + s * ir[:, None]
+    sh_r = c * ir - s * ii
+    sh_i = c * ii + s * ir
     wd = w.double()
-    sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * wd[:, None]).sum(-1)          # [N, T]
-    ref2 = wd @ ref_a2                                                               # [N, O]
-    shw = t.cat([sh_r * w[:, None], sh_i * w[:, None]], -1).reshape(n * T, -1)       # [N*T, 2P]
-    refc = t.cat([ref_r, ref_i], 1)                                                  # [O, 2P]
+    sh2 = ((sh_r.double() ** 2 + sh_i.double() ** 2) * wd[pn]).sum(-1)                # [R]
+    ref2 = (wd @ ref_a2)[pn]                                                          # [R, O]
+    shw = t.cat([sh_r * w[pn], sh_i * w[pn]], -1)                                     # [R, 2P]
+    refc = t.cat([ref_r, ref_i], 1)                                                   # [O, 2P]
     if _BACKEND == "ttnn":
-        cross = _device_cross(t, refc, shw, ref_key).double()                                  # [O, N*T]
+        cross = _device_cross(t, refc, shw, ref_key).double()                         # [O, R]
     else:
         cross = (refc.double() @ shw.double().T)
-    cross = cross.reshape(-1, n, T).permute(1, 0, 2)                                  # [N, O, T]
-    return (ref2[:, :, None] + sh2[:, None, :] - 2.0 * cross).float().numpy()
+    return (ref2 + sh2[:, None] - 2.0 * cross.T).float().numpy()
 
 
 # TT_RELION_BATCH=<n>: coarse and fine calls from RELION's --j threads on the same model and image size are
@@ -645,6 +648,20 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
 _RESIDENT = os.environ.get("TT_RELION_RESIDENT", "") not in ("", "0")
 _BATCH = int(os.environ.get("TT_RELION_BATCH", "0"))
 _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
+# TT_RELION_BATCH_ROWS=<n>: also cut a batch once its particles bring n (particle, translation) rows. The chip
+# scores rows in tiles of 512, so 512 (or a multiple) fills the tile whatever each particle's translation count is.
+_BATCH_ROWS = int(os.environ.get("TT_RELION_BATCH_ROWS", "0"))
+
+
+def _take(q):
+    """How many particles from the head of the queue make the next batch, and whether that batch is full."""
+    n = rows = 0
+    for it in q[:_BATCH]:
+        rows += it["tx"].size
+        if n and _BATCH_ROWS and rows > _BATCH_ROWS:
+            return n, True
+        n += 1
+    return n, n >= _BATCH or bool(_BATCH_ROWS) and rows >= _BATCH_ROWS
 _groups = {}
 _gcv = threading.Condition()
 _cpu = {"C": 0.0, "F": 0.0}         # CPU seconds this rank's threads spent inside the bridge, by pass
@@ -678,7 +695,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
             if not g["led"] and not item["cut"]:
                 g["led"] = True
                 deadline = time.time() + _BATCH_WAIT
-                while len(g["q"]) < _BATCH and time.time() < deadline:
+                while not _take(g["q"])[1] and time.time() < deadline:
                     _gcv.wait(deadline - time.time())
                 if _BACKEND == "ttnn":              # keep collecting until one of the rank's chips is idle
                     _gcv.release()
@@ -686,8 +703,9 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                         _tl.reserved = _server()
                     finally:
                         _gcv.acquire()
-                batch = g["q"][:_BATCH]
-                del g["q"][:_BATCH]
+                n = _take(g["q"])[0]
+                batch = g["q"][:n]
+                del g["q"][:n]
                 for b in batch:
                     b["cut"] = True
                 g["led"] = False                    # the next batch collects while this one runs
@@ -695,16 +713,17 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                 _gcv.release()
                 try:
                     same = all(b["eh"] == batch[0]["eh"] for b in batch)
-                    T = max(b["tx"].size for b in batch)
                     st = lambda k: np.stack([b[k] for b in batch])  # noqa: E731
-                    sp = lambda k: np.stack([np.pad(b[k], (0, T - b[k].size)) for b in batch])  # noqa: E731
-                    res = diff2_coarse_batch(mdl_mv, batch[0]["eul"] if same else np.concatenate([b["eul"] for b in batch]),
-                                             sp("tx"), sp("ty"), st("ir"), st("ii"), st("w"), *geom, shared=same)
-                    o = 0
-                    for b, r in zip(batch, res):
-                        n_o = len(b["eul"])
-                        b["out"] = np.ascontiguousarray((r if same else r[o:o + n_o])[:, :b["tx"].size])
-                        o += n_o
+                    cat = lambda k: np.concatenate([b[k] for b in batch])  # noqa: E731
+                    res = diff2_coarse_batch(mdl_mv, batch[0]["eul"] if same else cat("eul"), cat("tx"), cat("ty"),
+                                             np.repeat(np.arange(len(batch)), [b["tx"].size for b in batch]),
+                                             st("ir"), st("ii"), st("w"), *geom, shared=same)        # [R, O]
+                    r0 = o = 0
+                    for b in batch:
+                        n_t, n_o = b["tx"].size, len(b["eul"])
+                        r = res[r0:r0 + n_t]
+                        b["out"] = np.ascontiguousarray((r if same else r[:, o:o + n_o]).T)        # [O, T]
+                        r0, o = r0 + n_t, o + n_o
                     _stats["batches"] = _stats.get("batches", 0) + 1
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
                     n = _stats["batches"]
