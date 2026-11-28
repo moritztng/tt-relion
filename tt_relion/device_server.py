@@ -60,9 +60,11 @@ def main():
         if req.get("op") == "d2":
             if res is None:
                 from tt_relion.resident import Resident
-                # base-4 digits; 13 loses the fine pass on real spectra. TT_RELION_NORM_DIGITS: the norm product's own
-                res = Resident(dev, int(os.environ.get("TT_RELION_DIGITS", "16")),
-                               int(os.environ.get("TT_RELION_NORM_DIGITS", "0")) or None)
+                # base-4 digits; 13 loses the fine pass on real spectra. The norm product sum w |P|^2 takes 20: both
+                # its factors are positive, so the digit pairs a 16 digit product drops all pull d2 the same way
+                # (0.17 to 0.33 low against float64 on real spectra); the cross product's dropped pairs cancel.
+                n = int(os.environ.get("TT_RELION_DIGITS", "16"))
+                res = Resident(dev, n, max(n, int(os.environ.get("TT_RELION_NORM_DIGITS", "20"))))
             N, R, O, P = req["dims"]
             key, X, Y, Z, initY, initZ, maxR2, pf, nvox = req["model"]
             sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, R, R, R, R * O]
