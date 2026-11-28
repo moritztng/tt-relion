@@ -128,8 +128,9 @@ and 80 fine calls each, squared differences near 1,050 / 9,800 and 12,100):
 | chip, 13 digits | 0.0010 | 0.0011 | 0.0007 | 0.0011 | 320 / 320 |
 | chip, 11 digits | 0.0015 | 0.0051 | 0.0043 | 0.0085 | 320 / 320 |
 
-At 13 digits the op is at the float32 floor of its operands. The device server runs 16 digits (`TT_RELION_DIGITS`)
-until 13 is graded through RELION on both iteration types. Run the gate after every change to the op, the bridge or
+At 13 digits the op is at the float32 floor of its operands, and through RELION it moves the same poses as 16 (table
+below), so 13 is the default (`TT_RELION_DIGITS`). 16 costs 31 % more chip time in the fine product and 49 % more in
+the coarse one. Run the gate after every change to the op, the bridge or
 the batch form, then grade one iteration through RELION against the CPU arm continued from the same state
 (`perf/rlx/iter_ab.sh`): `star_cmp.py` counts the particles whose pose differs and
 `d32_cmp.py` correlates each half map with the CPU arm's.
@@ -143,6 +144,7 @@ One iteration of the 13,156-particle dev cell through RELION on 8 chips, against
 | global finer iteration, 13 digits | 0 | 1.0e-10, 1.2e-10 |
 | local-search iteration, 16 digits, before the balance fix | 24 | 6.3e-7, 4.5e-7 |
 | local-search iteration, 16 digits | 1 | 2.7e-9, 1.5e-8 |
+| local-search iteration, 13 digits | 1 | 2.0e-10, 1.5e-8 |
 
 Two CPU runs of the same iteration that differ only in the random seed read 1.2e-3 to 1.4e-3 on the same scale, so
 the chip path sits five to seven orders of magnitude inside the variation RELION has by itself.

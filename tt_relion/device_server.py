@@ -60,7 +60,7 @@ def main():
         if req.get("op") == "d2":
             if res is None:
                 from tt_relion.resident import Resident
-                res = Resident(dev, int(os.environ.get("TT_RELION_DIGITS", "16")))   # base-4 digits; 13 loses the fine pass on real spectra
+                res = Resident(dev, int(os.environ.get("TT_RELION_DIGITS", "13")))   # base-4 digits; 13 is at the float32 floor of the operands
             N, R, O, P = req["dims"]
             key, X, Y, Z, initY, initZ, maxR2, pf, nvox = req["model"]
             sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, R, R, R, R * O]
