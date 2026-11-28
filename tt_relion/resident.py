@@ -86,6 +86,14 @@ class Resident:
         self.geom = dict(X=X, Y=Y, Z=Z, initY=initY, initZ=initZ, maxR2=maxR2)
         self.pf, self.model_key = pf, key
 
+    def set_radius(self, maxR2):
+        """The projection's radius cut for the calls that follow. It belongs to the pass (the coarse pass cuts the same
+        model at a smaller radius than the fine one), so it is set per call; a held set keeps the cut it was projected
+        with, which is why the caller's ref_key carries the radius."""
+        assert maxR2 < FAR * FAR
+        if maxR2 != self.geom["maxR2"]:
+            self.geom = dict(self.geom, maxR2=maxR2)
+
     def set_pixels(self, key, x, y):
         """x, y float32 [P]: the image's Fourier pixel coordinates, in RELION's pixel order. Coarse and fine calls
         alternate between two image sizes, so every set of the current model stays on the chip."""

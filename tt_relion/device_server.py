@@ -67,6 +67,7 @@ def main():
             mdl, eul, x, y, xr, xi, w, tx, ty, out = np.split(buf, np.cumsum(sizes)[:-1])
             if req.get("model_sent"):
                 res.set_model(key, mdl.reshape(nvox, 2), X, Y, Z, initY, initZ, maxR2, pf)
+            res.set_radius(maxR2)       # the pass's, not the model's: coarse and fine cut one model at two radii
             res.set_pixels((P, x.tobytes()), x, y)
             t1 = time.time()
             out[:] = res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx.reshape(N, T),
