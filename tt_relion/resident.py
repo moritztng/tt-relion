@@ -449,3 +449,96 @@ class Resident:
         c["dev_s"] += time.time() - t1
         c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
         return out
+
+    def d2_own(self, eul, on, xr, xi, w, tx, ty, pn, x, y):
+        """Every particle against its own orientations: a list of float32 [T_i, on_i]. eul [sum(on), 9] in particle
+        order, on [N] the particles' set sizes; xr, xi, w, tx, ty, pn as in d2.
+
+        d2 scores every row of a batch against every orientation the call brings, so a batch of N particles with
+        their own sets (a local search, the last iteration) pays N times the products it needs. Here a particle is
+        one small product of its own, [T pad 32, K] by [K, on pad 32], and q of them run as one program. Per
+        particle the image digits, the reference digits and the product are those of its own rows only. The two
+        exact sums come back as (hi, lo) for the particle's rows alone and are added in float64 on the host.
+        """
+        N, t0 = len(xr), time.time()
+        on = np.asarray(on, np.int64)
+        nt = np.bincount(pn, minlength=N)
+        r0 = np.concatenate([[0], np.cumsum(nt)])
+        e0 = np.concatenate([[0], np.cumsum(on)])
+        assert (np.diff(pn) >= 0).all() and nt.min() > 0 and on.min() > 0
+        R1 = -(-int(nt.max()) // 32) * 32
+        assert R1 <= RBLK, "more translations per particle than a row block holds"
+        On = -(-int(on.max()) // 32) * 32
+        On = On if On <= OBLK else -(-On // OBLK) * OBLK       # one column block, or whole ones
+        # particles per program: the digit planes of both products get a third of what the table left (as in d2),
+        # and a projection call takes OCH orientations. A power of two, so a rank compiles few shapes.
+        qmax = max(1, min(self.free // 3 // (4 * self.n * self.Kp), OCH) // On)
+        qmax = 1 << (qmax.bit_length() - 1)
+        eul = np.asarray(eul, np.float32).reshape(-1, 9)
+        A0, A20, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, sel=np.arange(N))     # [R, K], [N, K], [N]
+        t0 = t1 = self._mark("host_s", t0)
+        out = []
+        for p0 in range(0, N, qmax):
+            m = min(qmax, N - p0)
+            q = 1 << (m - 1).bit_length()       # the last program of a call is padded with its first particle
+            idx = np.concatenate([np.arange(p0, p0 + m), np.full(q - m, p0)])
+            rot = np.zeros((q, On, 8), np.float32)
+            for j, i in enumerate(idx):
+                e = eul[e0[i]:e0[i + 1]]
+                rot[j, :len(e), :6] = e[:, [0, 1, 3, 4, 6, 7]] * self.pf
+                rot[j, len(e):] = rot[j, 0]     # pad with one of its own, so the maxima are the set's
+            t_rot = self._put(rot.reshape(q * On, 8), ttnn.ROW_MAJOR_LAYOUT)
+            B = ttnn.to_layout(ttnn.reshape(proj_rot(self.tab, self.pix, t_rot, self.geom), (q * On, self.K)), ttnn.TILE_LAYOUT)
+            ttnn.deallocate(t_rot)
+            B2 = ttnn.multiply(B, B)
+            t0 = self._mark("proj_s", t0)
+            mb = self._colmax(B)                # the K-diagonal balance of d2, per program
+            res = []
+            for X, mbx, a0, lens, rr, n in ((B, mb, A0, nt, R1, self.n), (B2, mb * mb, A20, None, 32, self.n2)):
+                A = np.zeros((q, rr, self.K), np.float32)
+                for j, i in enumerate(idx):     # a particle's rows lead its block
+                    A[j, :1 if lens is None else lens[i]] = a0[i:i + 1] if lens is None else a0[r0[i]:r0[i + 1]]
+                A = A.reshape(q * rr, self.K)
+                ma = _amax(A, 0)
+                ok = (ma > 0) & (mbx > 0)
+                e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mbx, 1)) - np.log2(np.where(ok, ma, 1)))), 0).astype(int)
+                # a pixel no reference of the program reaches adds nothing, but would set its row's exponent: zero it
+                A *= (np.ldexp(1.0, e) * (mbx > 0)).astype(np.float32)
+                ea = _exp(_amax(A, 1))
+                t0 = self._mark("host_s", t0)
+                ts = self._put(np.ldexp(1.0, -e).reshape(1, -1))
+                Xb = ttnn.multiply(X, ts)
+                eb = _exp(self._rowmax(Xb))
+                Bd = ttnn.reshape(self._digits(Xb, eb, q * On, n), (n * q, On, self.Kp))
+                for t in (ts, Xb, X):
+                    ttnn.deallocate(t)
+                t0 = self._mark("refdig_s", t0)
+                tA = self._put(A)
+                Ad = ttnn.reshape(self._digits(tA, ea, q * rr, n), (n * q, rr, self.Kp))
+                ttnn.deallocate(tA)
+                t0 = self._mark("imgdig_s", t0)
+                assert int(ea.min()) + int(eb.min()) - 2 * n > -126 and int(ea.max()) + int(eb.max()) < 127
+                S = oz_fused(Ad, Bd, n, rb=rr // 32, nb=min(On, OBLK) // 32, bt=True, q=q, adm=True, bdm=True)
+                hi, lo = oz_combine(S, self._ti(ea, q * rr), self._ti(eb, q * On), n, q=q)
+                for t in (S, Ad, Bd):
+                    ttnn.deallocate(t)
+                t0 = self._mark("prod_s", t0)
+                keep = 1 if lens is None else int(nt[idx].max())    # only the rows in use come back
+                got = 0.0
+                for v in (hi, lo):
+                    v3 = ttnn.reshape(v, (q, rr, On))
+                    v_ = ttnn.to_layout(ttnn.slice(v3, [0, 0, 0], [q, keep, On]), ttnn.ROW_MAJOR_LAYOUT)
+                    got = got + ttnn.to_torch(v_).double().numpy().reshape(q, keep, On)
+                    for t in (v_, v3, v):
+                        if t.is_allocated():
+                            ttnn.deallocate(t)
+                res.append(got)
+                t0 = self._mark("read_s", t0)
+            C, Nn = res
+            for j in range(m):
+                i = p0 + j
+                out.append((nx[i] + Nn[j, :1, :on[i]] - 2.0 * C[j, :nt[i], :on[i]]).astype(np.float32))
+        c = self.c
+        c["dev_s"] += time.time() - t1
+        c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + len(pn), c["rows_padded"] + N * R1
+        return out

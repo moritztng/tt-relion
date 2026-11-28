@@ -25,6 +25,7 @@ ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--digits", type=int, default=16, help="base-4 digits, the device server's default")
 ap.add_argument("--out", required=True)
 ap.add_argument("--cand", type=float, default=0, help="also grade the candidate form: samples within this window of each particle's best")
+ap.add_argument("--own", type=int, default=0, help="also grade d2_own: particle n scores its own orientations n*own .. (n+1)*own (needs O >= N*own)")
 a = ap.parse_args()
 
 from _tt import Clock, open_dev  # noqa: E402
@@ -63,6 +64,9 @@ pr, pi = pr.numpy(), pi.numpy()                                                #
 inside = (np.hypot(x, y) <= maxR)
 w = (inside * rng.uniform(0.5, 2.0, (a.N, P)) * (1 + np.hypot(x, y)) ** 1.5).astype(np.float32)   # 1/sigma2 grows with k
 truth = rng.integers(0, a.O, a.N)
+if a.own:                                       # every particle's pose lies in its own set
+    assert a.O >= a.N * a.own
+    truth = np.arange(a.N) * a.own + rng.integers(0, a.own, a.N)
 noise = rng.normal(size=(2, a.N, P)) / np.sqrt(np.maximum(w, 1e-3))
 xr = (pr[truth] + noise[0]).astype(np.float32)
 xi = (pi[truth] + noise[1]).astype(np.float32)
@@ -162,5 +166,35 @@ if a.cand:      # the candidate form against float64 with the same priors and wi
     rec["cand"] = dict(window=a.cand, n=int(len(rr)), per_particle=len(rr) / a.N, missed=missed, same_sig=f"{same}/{a.N}",
                        err_delta=err, err_best=errb, batch_s=ts, phases=phases(c0, a.reps),
                        counters={k: res.c.get(k) for k in ("cand", "cand_dense")})
+if a.own:      # the per-particle form against float64, and against the batch form of the same sets (the union)
+    pnr = np.repeat(np.arange(a.N), a.T)
+    eo, on = eul[:a.N * a.own], np.full(a.N, a.own)
+    ref = np.stack([d64[n, n * a.own:(n + 1) * a.own].T for n in range(a.N)])   # [N, T, own]
+    got = res.d2_own(eo, on, xr, xi, w, tx.ravel(), ty.ravel(), pnr, x, y)      # the first call builds the kernels
+    c0, ts, clk = dict(res.c), [], Clock(nodes)
+    for _ in range(a.reps):
+        t0 = time.perf_counter()
+        got = res.d2_own(eo, on, xr, xi, w, tx.ravel(), ty.ravel(), pnr, x, y)
+        ts.append(time.perf_counter() - t0)
+    d = np.stack(got).astype(np.float64)
+    near = ref < ref.min((1, 2), keepdims=True) + 40
+    bat = np.stack([again[n, n * a.own:(n + 1) * a.own].T for n in range(a.N)])
+    rec["own"] = dict(own=a.own, err_near=float(np.abs(d - ref)[near].max()), rel_all=float(np.abs(d - ref).max() / np.abs(ref).max()),
+                      argmin=int((d.reshape(a.N, -1).argmin(1) == ref.reshape(a.N, -1).argmin(1)).sum()),
+                      vs_batch_near=float(np.abs(d - bat)[near].max()), batch_s=ts, ms_per_particle=1e3 * min(ts) / a.N,
+                      phases=phases(c0, a.reps), aiclk_min_med=clk.stop(), load1=float(open("/proc/loadavg").read().split()[0]))
+    # sets and translation lists of different lengths in one call
+    on2 = np.array([max(1, a.own - 5 * n) for n in range(a.N)])
+    nt2 = np.array([max(1, a.T - n % 3) for n in range(a.N)])
+    eo2 = np.concatenate([eul[n * a.own:n * a.own + on2[n]] for n in range(a.N)])
+    cat = lambda v: np.concatenate([v[n, :nt2[n]] for n in range(a.N)])  # noqa: E731
+    got2 = res.d2_own(eo2, on2, xr, xi, w, cat(tx), cat(ty), np.repeat(np.arange(a.N), nt2), x, y)
+    err2, am2 = 0.0, 0
+    for n in range(a.N):
+        r_ = ref[n, :nt2[n], :on2[n]]
+        assert got2[n].shape == r_.shape
+        err2 = max(err2, float(np.abs(got2[n] - r_)[r_ < r_.min() + 40].max()))
+        am2 += int(got2[n].argmin() == r_.argmin())
+    rec["own_ragged"] = dict(err_near=err2, argmin=am2)
 print(json.dumps(rec))
 open(a.out, "a").write(json.dumps(rec) + "\n")
