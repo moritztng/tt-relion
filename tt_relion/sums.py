@@ -24,6 +24,9 @@ import struct
 
 import numpy as np
 
+# every other entry is a single number; these stay arrays whatever their length
+_ARRAYS = ("mdlComplex", "eulers", "Fimg_", "trans_", "weights", "ctfs", "wdiff2s_", "Minvsigma2s", "bp_index", "bp_real",
+           "bp_imag", "bp_weight", "Mresol_fine", "data_vs_prior", "fine_", "wsum_sigma2_noise", "wsum_pdf_direction")
 _TYPES = {b"f": np.float32, b"d": np.float64, b"i": np.int32, b"q": np.int64, b"Q": np.uint64}
 
 
@@ -43,7 +46,7 @@ def read(path):
             a = np.fromfile(f, dtype, count)
             if a.size != count:
                 raise ValueError(f"{path}: {name} is cut short")
-            out[name] = a[0].item() if count == 1 and not name.startswith(("fine_", "bp_", "wsum_", "Mresol", "data_vs")) else a
+            out[name] = a if name.startswith(_ARRAYS) else a[0].item()
 
 
 def load(path):
