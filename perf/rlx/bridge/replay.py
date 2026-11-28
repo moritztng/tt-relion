@@ -8,13 +8,16 @@ for everything at once and gives the rate the bridge and the chip can take with 
 
 Reports calls/s, batch fill, the chip's busy share of the wall (TTDEV/TTRES lines of the device servers), AICLK
 sampled during the replay and load1. --digest writes per call the argmin, the minimum and the significant set
-(the samples that carry 99.9 % of exp(-(d2 - min))); --ref compares against the digest of another arm.
+(the samples that carry 99.9 % of exp(-(d2 - min))); --ref compares against the digest of another arm. With a
+float64 reference (ref64.py) the arm is also graded on the reference's own significant samples: sig_err is the
+largest |d2 - d2_ref| there and sig_bias its mean, and for a call whose set differs set_diff_mass is the share of
+the weight sum that the samples in one set and not the other carry (the rule cuts the last 0.1 %, so a sample at
+the cut moves in and out on any rounding).
 
     RLX_RANK_CHIPS=18 TT_RELION_BACKEND=ttnn TT_RELION_RESIDENT=1 TT_RELION_BATCH=8 \
         python perf/rlx/bridge/replay.py --rec rec/rec.1234.pkl --out replay.jsonl --digest t.npz --ref cpu.npz
 """
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -66,19 +69,20 @@ if a.threads:                                       # a particle starts at a coa
     lanes = [[r for u in units[j::a.threads] for r in u] for j in range(a.threads)]
 
 n = len(calls)
-arg_min, d_min = np.zeros(n, np.int64), np.zeros(n, np.float64)
-n_sig, h_sig = np.zeros(n, np.int64), np.zeros(n, "S16")
-handled = np.zeros(n, bool)
+dg = record.Digests(n)
+arg_min, d_min, h_sig, handled = dg.arg_min, dg.d_min, dg.h_sig, dg.handled
+ref = np.load(a.ref) if a.ref and os.path.exists(a.ref) else None
+sig_err, sig_bias, diff_mass = np.zeros(n), np.zeros(n), np.zeros(n)
 
 
 def digest(i, d2):
-    d = d2.astype(np.float64)
-    arg_min[i], d_min[i] = int(d.argmin()), d.min()
-    w = np.exp(d.min() - d)
-    o = np.argsort(-w, kind="stable")
-    k = int(np.searchsorted(np.cumsum(w[o]), 0.999 * w.sum())) + 1
-    n_sig[i] = k
-    h_sig[i] = hashlib.sha256(np.sort(o[:k]).tobytes()).digest()[:16]
+    dg.put(i, d2)
+    if ref is not None and "sig_off" in ref and i < len(ref["handled"]) and ref["handled"][i]:
+        ri = ref["sig_idx"][ref["sig_off"][i]:ref["sig_off"][i + 1]]
+        e = d2[ri].astype(np.float64) - ref["sig_val"][ref["sig_off"][i]:ref["sig_off"][i + 1]]
+        sig_err[i], sig_bias[i] = np.abs(e).max(), e.mean()
+        odd = np.setxor1d(ri, dg.sig[i][0])
+        diff_mass[i] = np.exp(d_min[i] - d2[odd].astype(np.float64)).sum() / np.exp(d_min[i] - d2.astype(np.float64)).sum()
 
 
 def lane(q, timed=True):
@@ -87,8 +91,7 @@ def lane(q, timed=True):
             time.sleep(r["gap"] * a.think)
         args, out = record.args(models, euls, r)
         fn = relion.diff2_coarse if r["k"] == "C" else relion.diff2_fine
-        handled[r["i"]] = bool(fn(*args))
-        if a.digest and handled[r["i"]]:
+        if fn(*args):
             digest(r["i"], out)
 
 
@@ -184,9 +187,8 @@ res = dict(tag=a.tag, rec=os.path.basename(a.rec), backend=os.environ.get("TT_RE
            aiclk_min=min(clk.v) if clk.v else None, aiclk_med=int(np.median(clk.v)) if clk.v else None,
            nodes=sorted(clk.nodes), load1=[load0, open("/proc/loadavg").read().split()[0]])
 if a.digest:
-    np.savez(a.digest, arg_min=arg_min, d_min=d_min, n_sig=n_sig, h_sig=h_sig, handled=handled)
-if a.ref and os.path.exists(a.ref):
-    ref = np.load(a.ref)
+    dg.save(a.digest)
+if ref is not None:
     m = min(n, len(ref["handled"]))                 # a reference may cover only the first calls of the record
     ok = handled[:m] & ref["handled"][:m]
     res.update(ref=os.path.basename(a.ref), compared=int(ok.sum()),
@@ -200,6 +202,9 @@ if a.ref and os.path.exists(a.ref):
                                 same_set=int((h_sig[:m] == ref["h_sig"][:m])[mk].sum()),
                                 max_dmin_err=float(np.abs(d_min[:m] - ref["d_min"][:m])[mk].max()) if mk.any() else None,
                                 dmin_ref_median=float(np.median(ref["d_min"][:m][mk])) if mk.any() else None)
+        if "sig_off" in ref and mk.any():
+            res["pass_" + k].update(sig_err=float(sig_err[:m][mk].max()), sig_bias=float(sig_bias[:m][mk].mean()),
+                                    set_diff_mass=float(diff_mass[:m][mk].max()))
 with open(a.out, "a") as fh:
     fh.write(json.dumps(res) + "\n")
 print(json.dumps(res))
