@@ -78,6 +78,31 @@ the final map is the same to the last digit (4.033896 Å post-processed).
 cd relion && git apply /path/to/relion5-coarse-blocking.patch /path/to/relion5-nonzeroprob.patch
 ```
 
+## Particle preparation
+
+Before RELION scores a particle it shifts and normalises the image, applies the soft mask, takes the Fourier
+transform of the masked and of the unmasked image, sums the power spectrum and fills the CTF image. On a 360 pixel
+box that is 5 to 6 ms of CPU per particle in every iteration, which is most of what a rank's CPU does once the
+scoring runs on chips.
+
+`relion5-prep.patch` with `src_acc_tt/tt_prep.{h,cpp}` does the same work in about 1 ms. Mask weights, shell
+indices and FFT plans are built once per box size instead of once per particle, the transforms run as a row pass
+and a column pass that stops at the columns RELION keeps, the shift reads the preread single-precision image
+directly, and the CTF is filled a row at a time. RELION's work is kept in full: soft mask with its background
+fill, both transforms, power spectrum and the high-resolution sum.
+
+It handles 2D images in an even square box with `--zero_mask`. Helices, tomography and anything else take
+RELION's own code. Apply it after `relion5-tt.patch` and `relion5-estep-profile.patch`
+(`perf/rlx/build_relion.sh` has the order).
+
+| variable | meaning |
+|---|---|
+| `TT_RELION_PREP=0` | use RELION's own code |
+| `TT_RELION_PREP_WISDOM=<file>` | take measured FFT plans from an FFTW wisdom file, about 15 % faster; make it once with `bench_prep wisdom <box> <file>` (`perf/rlx/prep/`) so every rank and every run rounds alike |
+| `TT_RELION_RECORD_PREP=<dir>` | write inputs and outputs of the first particles for `perf/rlx/prep/check_prep.py` |
+
+Numbers and the float64 check: [`docs/particle-prep.md`](../../docs/particle-prep.md).
+
 `relion5-estep-profile.patch` adds the timers used to measure the expectation step and is not needed
 to run.
 
