@@ -27,6 +27,14 @@
  *
  * Set TT_RELION_PROFILE=1 to print the table at exit. Accumulation is always on: it is a handful of
  * relaxed atomic adds per particle per region against a stage that costs tens of milliseconds.
+ *
+ * Two columns. `wall-seconds` is steady_clock time inside the region, summed over threads; it includes
+ * time a thread sleeps there (a thread waiting in the bridge for the chip counts in full). `cpu-seconds`
+ * is the thread's own CPU time (CLOCK_THREAD_CPUTIME_ID) and is what a rank actually burns; it is
+ * sampled only when TT_RELION_PROFILE is set, because it is a system call per tic and per toc.
+ *
+ * TT_RELION_PROFILE_FILE=<prefix> also rewrites the table to <prefix>.<pid> every 256 particles, so an
+ * arm that is stopped by a signal after its iteration (auto-refine ignores --iter) still leaves one.
  */
 #ifndef TT_PROFILE_H_
 #define TT_PROFILE_H_
@@ -37,6 +45,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
+#include <time.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -48,8 +58,9 @@ struct Rec
 {
 	const char *label;
 	std::atomic<unsigned long long> ns;
+	std::atomic<unsigned long long> cpu_ns;
 	std::atomic<unsigned long long> n;
-	Rec(const char *l) : label(l), ns(0), n(0) {}
+	Rec(const char *l) : label(l), ns(0), cpu_ns(0), n(0) {}
 };
 
 // A vector of pointers, never of objects: the vector may reallocate and a Rec holds atomics.
@@ -70,6 +81,25 @@ inline std::mutex &table_mutex()
 }
 
 inline void report();
+inline void write_table(std::FILE *f);
+
+inline bool enabled()
+{
+	static const bool on = [] {
+		const char *e = std::getenv("TT_RELION_PROFILE");
+		return e && e[0] != '0' && e[0] != '\0';
+	}();
+	return on;
+}
+
+inline unsigned long long thread_cpu_ns()
+{
+	if (!enabled())
+		return 0;
+	struct timespec ts;
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+	return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
+}
 
 inline Rec *rec_for(const char *label)
 {
@@ -91,9 +121,16 @@ inline Rec *rec_for(const char *label)
 
 typedef std::chrono::steady_clock clk;
 
-inline std::vector<std::pair<Rec *, clk::time_point> > &open_stack()
+struct Open
 {
-	static thread_local std::vector<std::pair<Rec *, clk::time_point> > s;
+	Rec *rec;
+	clk::time_point wall;
+	unsigned long long cpu;
+};
+
+inline std::vector<Open> &open_stack()
+{
+	static thread_local std::vector<Open> s;
 	return s;
 }
 
@@ -111,51 +148,81 @@ inline Rec *cached_rec(const char *label)
 
 inline void tic(const char *label)
 {
-	open_stack().push_back(std::make_pair(cached_rec(label), clk::now()));
+	Open o = {cached_rec(label), clk::now(), thread_cpu_ns()};
+	open_stack().push_back(o);
+}
+
+// Rewrite <TT_RELION_PROFILE_FILE>.<pid> with the table so far.
+inline void dump_file()
+{
+	const char *prefix = std::getenv("TT_RELION_PROFILE_FILE");
+	if (!prefix || !prefix[0])
+		return;
+	const std::string path = std::string(prefix) + "." + std::to_string((long)getpid());
+	const std::string tmp = path + ".tmp";
+	std::lock_guard<std::mutex> g(table_mutex());
+	if (std::FILE *f = std::fopen(tmp.c_str(), "w"))
+	{
+		write_table(f);
+		std::fclose(f);
+		std::rename(tmp.c_str(), path.c_str());
+	}
 }
 
 inline void toc(const char *label)
 {
-	std::vector<std::pair<Rec *, clk::time_point> > &s = open_stack();
+	std::vector<Open> &s = open_stack();
 	const clk::time_point now = clk::now();
+	const unsigned long long cpu = thread_cpu_ns();
 	// Scan from the top for the matching open region rather than assuming the top is it: RELION has
 	// early returns between some CTIC/CTOC pairs, and a mismatched pop would then charge one stage's
 	// time to another for the rest of the run.
 	for (size_t k = s.size(); k-- > 0;)
 	{
-		if (s[k].first->label == label)
+		if (s[k].rec->label == label)
 		{
+			Rec *r = s[k].rec;
 			const unsigned long long ns =
-			    (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(now - s[k].second).count();
-			s[k].first->ns.fetch_add(ns, std::memory_order_relaxed);
-			s[k].first->n.fetch_add(1, std::memory_order_relaxed);
+			    (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(now - s[k].wall).count();
+			r->ns.fetch_add(ns, std::memory_order_relaxed);
+			r->cpu_ns.fetch_add(cpu - s[k].cpu, std::memory_order_relaxed);
+			const unsigned long long n = r->n.fetch_add(1, std::memory_order_relaxed) + 1;
 			s.resize(k);
+			if (enabled() && n % 256 == 0 && std::strcmp(label, "oneParticle") == 0)
+				dump_file();
 			return;
 		}
 	}
 	// No matching tic: a CTOC without its CTIC. Drop it rather than guess.
 }
 
-inline void report()
+// Caller holds table_mutex().
+inline void write_table(std::FILE *f)
 {
-	const char *on = std::getenv("TT_RELION_PROFILE");
-	if (!on || on[0] == '0' || on[0] == '\0')
-		return;
-	std::lock_guard<std::mutex> g(table_mutex());
 	unsigned long long total = 0;
 	for (size_t i = 0; i < table().size(); i++)
 		if (table()[i]->label && std::strcmp(table()[i]->label, "oneParticle") == 0)
-			total = table()[i]->ns.load();
-	std::printf("\nTTPROF rank_pid=%d stages=%zu denominator=oneParticle\n", (int)getpid(), table().size());
-	std::printf("TTPROF %-42s %14s %12s %9s\n", "region", "cpu-seconds", "calls", "%onePart");
+			total = table()[i]->cpu_ns.load();
+	std::fprintf(f, "\nTTPROF rank_pid=%d stages=%zu denominator=oneParticle\n", (int)getpid(), table().size());
+	std::fprintf(f, "TTPROF %-42s %14s %14s %12s %9s\n", "region", "wall-seconds", "cpu-seconds", "calls", "%cpu");
 	for (size_t i = 0; i < table().size(); i++)
 	{
 		const unsigned long long ns = table()[i]->ns.load();
+		const unsigned long long cpu = table()[i]->cpu_ns.load();
 		const unsigned long long n = table()[i]->n.load();
-		std::printf("TTPROF %-42s %14.4f %12llu %8.2f%%\n", table()[i]->label, ns / 1e9, n,
-		            total ? 100.0 * (double)ns / (double)total : 0.0);
+		std::fprintf(f, "TTPROF %-42s %14.4f %14.4f %12llu %8.2f%%\n", table()[i]->label, ns / 1e9, cpu / 1e9, n,
+		             total ? 100.0 * (double)cpu / (double)total : 0.0);
 	}
-	std::fflush(stdout);
+	std::fflush(f);
+}
+
+inline void report()
+{
+	if (!enabled())
+		return;
+	dump_file();
+	std::lock_guard<std::mutex> g(table_mutex());
+	write_table(stdout);
 }
 
 } // namespace TTProf
