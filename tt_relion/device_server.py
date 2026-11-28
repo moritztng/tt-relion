@@ -101,10 +101,11 @@ def main():
                 print("TTB %.4f %.4f %.4f %.4f %d %d %d %d" % (t0, time.time() - t0, res.c["host_s"], res.c["dev_s"],
                                                              N, R, O, P), file=sys.stderr, flush=True)
                 # and this batch's own seconds: reading the request, then each phase of the op
-                ph = {k: v for k, v in res.c.items() if k.endswith("_s")}
+                # (cand_dense counts the orientation chunks whose candidates overflowed and came back whole)
+                ph = {k: v for k, v in res.c.items() if k.endswith("_s") or k == "cand_dense"}
                 print("TTP %d %d read_req=%.4f " % (N, P, t1 - t0) + " ".join(
-                    "%s=%.4f" % (k[:-2], v - seen.get(k, 0.0)) for k, v in ph.items() if v > seen.get(k, 0.0)),
-                    file=sys.stderr, flush=True)
+                    "%s=%.4f" % (k[:-2] if k.endswith("_s") else k, v - seen.get(k, 0.0))
+                    for k, v in ph.items() if v > seen.get(k, 0.0)), file=sys.stderr, flush=True)
                 seen = ph
             client = req.get("client", client)
             calls += 1
