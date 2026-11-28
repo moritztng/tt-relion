@@ -193,8 +193,8 @@ if a.ref and os.path.exists(a.ref):
                same_argmin=int((arg_min[:m] == ref["arg_min"][:m])[ok].sum()),
                same_set=int((h_sig[:m] == ref["h_sig"][:m])[ok].sum()),
                max_dmin_err=float(np.abs(d_min[:m] - ref["d_min"][:m])[ok].max()) if ok.any() else None)
-    kind = np.array([r["k"] for r in calls[:m]])
-    for k in "CF":                                  # the coarse and the fine pass apart
+    kind = np.array([r["k"] for r in calls])[:m]
+    for k in "CF":                                  # the coarse and the fine pass apart: a mixed count hides a broken pass
         mk = ok & (kind == k)
         res["pass_" + k] = dict(compared=int(mk.sum()), same_argmin=int((arg_min[:m] == ref["arg_min"][:m])[mk].sum()),
                                 same_set=int((h_sig[:m] == ref["h_sig"][:m])[mk].sum()),

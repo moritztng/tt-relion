@@ -10,7 +10,9 @@ rm -rf "$OUT"
 git clone -q --shared --no-checkout "$SRC" "$OUT"
 cd "$OUT"
 git checkout -q "$REV"
-for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile; do
+# relion5-host-threads (rlx-mstep3): the host side between E-steps on --j threads (slab FFTs, threaded map loops);
+# HOST_THREADS=0 leaves it out, for a binary to compare against. JOBS = make -j (default a quarter of the cores).
+for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
   git apply "$HERE/$p.patch"
 done
 mkdir -p src/acc/tt build
@@ -18,4 +20,4 @@ cp "$HERE"/src_acc_tt/* src/acc/tt/
 cd build
 "$CMAKE" .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DALTCPU=ON -DCUDA=OFF \
   -DTT=ON -DGUI=OFF -DFETCH_WEIGHTS=OFF
-make -j"$(( $(nproc) / 4 ))" refine_mpi
+make -j"${JOBS:-$(( $(nproc) / 4 ))}" refine_mpi

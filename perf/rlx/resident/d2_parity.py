@@ -22,6 +22,7 @@ ap.add_argument("--N", type=int, default=8)
 ap.add_argument("--T", type=int, default=21)
 ap.add_argument("--pf", type=int, default=2)
 ap.add_argument("--reps", type=int, default=3)
+ap.add_argument("--digits", type=int, default=16, help="base-4 digits, the device server's default")
 ap.add_argument("--out", required=True)
 a = ap.parse_args()
 
@@ -78,10 +79,10 @@ for n in range(a.N):
     d64[n] = (wn * np.abs(sx[n]) ** 2).sum(1)[None] + (wn * np.abs(ref) ** 2).sum(1)[:, None] - 2 * cross.real
 
 dev, nodes = open_dev()
-res = Resident(dev)
+res = Resident(dev, a.digits)
 res.set_model("m", mdl, X, Y, Z, initY, initZ, maxR2, pf)
 res.set_pixels(P, x, y)
-rec = dict(size=s, O=a.O, N=a.N, T=a.T, P=P)
+rec = dict(size=s, O=a.O, N=a.N, T=a.T, P=P, digits=a.digits)
 
 
 def grade(name, d):
