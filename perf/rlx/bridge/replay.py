@@ -10,9 +10,10 @@ Reports calls/s, batch fill, the chip's busy share of the wall (TTDEV/TTRES line
 sampled during the replay and load1. --digest writes per call the argmin, the minimum and the significant set
 (the samples that carry 99.9 % of exp(-(d2 - min))); --ref compares against the digest of another arm. With a
 float64 reference (ref64.py) the arm is also graded on the reference's own significant samples: sig_err is the
-largest |d2 - d2_ref| there and sig_bias its mean, and for a call whose set differs set_diff_mass is the share of
-the weight sum that the samples in one set and not the other carry (the rule cuts the last 0.1 %, so a sample at
-the cut moves in and out on any rounding).
+largest |d2 - d2_ref| there, sig_bias its mean and sig_spread the largest range of the error within one call (an
+offset common to a call's samples cancels in the weights, the spread does not). For a call whose set differs
+set_diff_mass is the share of the weight sum that the samples in one set and not the other carry (the rule cuts
+the last 0.1 %, so a sample at the cut moves in and out on any rounding).
 
     RLX_RANK_CHIPS=18 TT_RELION_BACKEND=ttnn TT_RELION_RESIDENT=1 TT_RELION_BATCH=8 \
         python perf/rlx/bridge/replay.py --rec rec/rec.1234.pkl --out replay.jsonl --digest t.npz --ref cpu.npz
@@ -72,7 +73,7 @@ n = len(calls)
 dg = record.Digests(n)
 arg_min, d_min, h_sig, handled = dg.arg_min, dg.d_min, dg.h_sig, dg.handled
 ref = np.load(a.ref) if a.ref and os.path.exists(a.ref) else None
-sig_err, sig_bias, diff_mass = np.zeros(n), np.zeros(n), np.zeros(n)
+sig_err, sig_bias, sig_spread, diff_mass = np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
 
 
 def digest(i, d2):
@@ -80,7 +81,7 @@ def digest(i, d2):
     if ref is not None and "sig_off" in ref and i < len(ref["handled"]) and ref["handled"][i]:
         ri = ref["sig_idx"][ref["sig_off"][i]:ref["sig_off"][i + 1]]
         e = d2[ri].astype(np.float64) - ref["sig_val"][ref["sig_off"][i]:ref["sig_off"][i + 1]]
-        sig_err[i], sig_bias[i] = np.abs(e).max(), e.mean()
+        sig_err[i], sig_bias[i], sig_spread[i] = np.abs(e).max(), e.mean(), e.max() - e.min()
         odd = np.setxor1d(ri, dg.sig[i][0])
         diff_mass[i] = np.exp(d_min[i] - d2[odd].astype(np.float64)).sum() / np.exp(d_min[i] - d2.astype(np.float64)).sum()
 
@@ -204,6 +205,7 @@ if ref is not None:
                                 dmin_ref_median=float(np.median(ref["d_min"][:m][mk])) if mk.any() else None)
         if "sig_off" in ref and mk.any():
             res["pass_" + k].update(sig_err=float(sig_err[:m][mk].max()), sig_bias=float(sig_bias[:m][mk].mean()),
+                                    sig_spread=float(sig_spread[:m][mk].max()),
                                     set_diff_mass=float(diff_mass[:m][mk].max()))
 with open(a.out, "a") as fh:
     fh.write(json.dumps(res) + "\n")
