@@ -12,7 +12,9 @@ cd "$OUT"
 git checkout -q "$REV"
 # relion5-host-threads (rlx-mstep3): the host side between E-steps on --j threads (slab FFTs, threaded map loops);
 # HOST_THREADS=0 leaves it out, for a binary to compare against. JOBS = make -j (default a quarter of the cores).
-for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-prep $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
+# relion5-sums-sparse (rlx-wsum): the sums kernels skip samples below significance; SUMS_SPARSE=0 leaves it out.
+# relion5-prep (rlx-prep): particle prep on tables and its own FFT plans; TT_RELION_PREP=0 at run time takes RELION's code.
+for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-prep relion5-sums-record $([ "${SUMS_SPARSE:-1}" = 1 ] && echo relion5-sums-sparse) $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
   git apply "$HERE/$p.patch"
 done
 mkdir -p src/acc/tt build

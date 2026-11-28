@@ -71,8 +71,8 @@ def main():
             res.set_radius(maxR2)       # the pass's, not the model's: coarse and fine cut one model at two radii
             res.set_pixels((P, x.tobytes()), x, y)
             t1 = time.time()
-            out[:] = res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty,
-                            pn.astype(np.int64), x, y, req.get("ref_key")).reshape(-1)
+            res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty, pn.astype(np.int64),
+                   x, y, req.get("ref_key"), out.reshape(R, O))
             del mdl, eul, x, y, xr, xi, w, tx, ty, pn, out, buf
             up, mm = up + t1 - t0, mm + time.time() - t1
             if batchlog:                # one line per batch: start, wall, the op's host and chip seconds so far, N R O P

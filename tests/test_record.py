@@ -57,3 +57,20 @@ def test_replay_matches_itself(tmp_path):
     res = json.loads(p.stdout.strip().splitlines()[-1])
     assert res["calls"] == 12 and res["handled"] == 12 and res["threads"] == 3
     assert res["same_argmin"] == 12 and res["same_set"] == 12 and res["batches"] >= 1
+
+
+def test_float64_reference_grades_the_float32_arm(tmp_path):
+    _calls(str(tmp_path))
+    rec = glob.glob(str(tmp_path / "rec.*.pkl"))[0]
+    bridge = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "perf", "rlx", "bridge")
+    env = dict(os.environ, PYTHONPATH=os.path.join(bridge, "..", "..", ".."), TT_RELION_BACKEND="torch")
+    subprocess.run([sys.executable, os.path.join(bridge, "ref64.py"), "--rec", rec, "--out", str(tmp_path / "r64.npz"),
+                    "--procs", "2"], env=env, check=True, capture_output=True)
+    p = subprocess.run([sys.executable, os.path.join(bridge, "replay.py"), "--rec", rec, "--think", "0", "--out",
+                        str(tmp_path / "r.jsonl"), "--ref", str(tmp_path / "r64.npz")],
+                       env=env, check=True, capture_output=True, text=True)
+    import json
+    res = json.loads(p.stdout.strip().splitlines()[-1])
+    for k in "CF":      # float32 against float64: the same minimum, and d2 right to float32 rounding where it counts
+        g = res["pass_" + k]
+        assert g["compared"] == 6 == g["same_argmin"] and g["sig_err"] < 1e-5 * g["dmin_ref_median"], g

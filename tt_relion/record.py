@@ -90,3 +90,34 @@ def args(models, euls, r):
     out = np.zeros(r["out"] // 4, np.float32)
     mv = [memoryview(models[r["mdl"]]), memoryview(euls[r["eul"]])] + [memoryview(b) for b in r["mv"]]
     return tuple(mv) + (memoryview(out).cast("B"),) + tuple(r["sc"]), out
+
+
+def digest(d2):
+    """What RELION takes from one call's squared differences: (argmin, minimum, the significant samples in index
+    order, their values in float64). Significant = the samples that carry 99.9 % of sum exp(min - d2)."""
+    d = np.asarray(d2, np.float64).reshape(-1)
+    w = np.exp(d.min() - d)
+    o = np.argsort(-w, kind="stable")
+    sig = np.sort(o[:int(np.searchsorted(np.cumsum(w[o]), 0.999 * w.sum())) + 1])
+    return int(d.argmin()), float(d.min()), sig, d[sig]
+
+
+class Digests:
+    """The digests of a call stream, kept per call and written as one npz. h_sig is a hash of the significant set;
+    sig_idx / sig_val (flat, call i at sig_off[i]:sig_off[i + 1]) let a later arm be graded on the reference's own
+    significant samples, where an error in d2 moves a weight."""
+
+    def __init__(self, n):
+        self.arg_min, self.d_min = np.zeros(n, np.int64), np.zeros(n, np.float64)
+        self.n_sig, self.h_sig, self.handled = np.zeros(n, np.int64), np.zeros(n, "S16"), np.zeros(n, bool)
+        self.sig = [(np.zeros(0, np.int64), np.zeros(0))] * n
+
+    def put(self, i, d2):
+        self.arg_min[i], self.d_min[i], idx, val = digest(d2)
+        self.n_sig[i], self.h_sig[i], self.sig[i] = len(idx), hashlib.sha256(idx.tobytes()).digest()[:16], (idx, val)
+        self.handled[i] = True
+
+    def save(self, path):
+        np.savez(path, arg_min=self.arg_min, d_min=self.d_min, n_sig=self.n_sig, h_sig=self.h_sig, handled=self.handled,
+                 sig_off=np.concatenate([[0], np.cumsum(self.n_sig)]), sig_idx=np.concatenate([s[0] for s in self.sig]),
+                 sig_val=np.concatenate([s[1] for s in self.sig]))
