@@ -297,3 +297,23 @@ def test_relion_entry_writes_the_candidates_as_flat_indices():
         assert ret[0] is None                           # more candidates than idx holds
     finally:
         relion._BATCH, relion._CAND_WINDOW = 0, 0.0
+
+
+def test_rows_cut_does_not_open_a_tile_for_a_remainder():
+    """With a rows cut, a batch whose last particles would open a mostly empty 512-row tile is trimmed to whole tiles."""
+    q = lambda n, t: [{"tx": np.zeros(t, np.float32)} for _ in range(n)]     # noqa: E731
+    keep = relion._BATCH, relion._BATCH_ROWS
+    try:
+        relion._BATCH, relion._BATCH_ROWS = 32, 1024
+        assert relion._take(q(14, 37)) == (13, True)        # 518 rows: 13 fill one tile (481), one particle waits
+        assert relion._take(q(13, 37)) == (13, False)       # 481 rows: one tile, still collecting
+        assert relion._take(q(23, 37)) == (23, False)       # 851 of 1024: full enough to keep
+        assert relion._take(q(40, 37)) == (27, True)        # the rows cut itself: 999 of 1024
+        assert relion._take(q(17, 37)) == (13, True)        # 629 rows of 1024 would be 61 %
+        assert relion._take(q(1, 600)) == (1, False)        # one particle over a tile is taken as it is
+        assert relion._take(q(5, 9)) == (5, False)
+        relion._BATCH_ROWS = 0
+        assert relion._take(q(14, 37)) == (14, False)       # no rows cut, no trim
+        assert relion._take(q(40, 37)) == (32, True)
+    finally:
+        relion._BATCH, relion._BATCH_ROWS = keep

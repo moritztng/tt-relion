@@ -743,18 +743,30 @@ _BATCH = int(os.environ.get("TT_RELION_BATCH", "0"))
 _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
 # TT_RELION_BATCH_ROWS=<n>: also cut a batch once its particles bring n (particle, translation) rows. The chip
 # scores rows in tiles of 512, so 512 (or a multiple) fills the tile whatever each particle's translation count is.
+# A batch that would open another tile and leave it more than a quarter of the batch empty is trimmed to whole
+# tiles: 14 particles of 37 rows are 518 rows, two tiles for the price of one particle; 13 go now, one waits.
 _BATCH_ROWS = int(os.environ.get("TT_RELION_BATCH_ROWS", "0"))
+_TILE_ROWS = 512
 
 
 def _take(q):
     """How many particles from the head of the queue make the next batch, and whether that batch is full."""
-    n = rows = 0
+    n, rows, cum, full = 0, 0, [], False
     for it in q[:_BATCH]:
+        if n and _BATCH_ROWS and rows + it["tx"].size > _BATCH_ROWS:
+            full = True
+            break
         rows += it["tx"].size
-        if n and _BATCH_ROWS and rows > _BATCH_ROWS:
-            return n, True
         n += 1
-    return n, n >= _BATCH or bool(_BATCH_ROWS) and rows >= _BATCH_ROWS
+        cum.append(rows)
+    full = full or n >= _BATCH or bool(_BATCH_ROWS) and rows >= _BATCH_ROWS
+    if _BATCH_ROWS and rows > _TILE_ROWS:
+        whole = rows // _TILE_ROWS * _TILE_ROWS
+        if rows < 0.75 * (whole + _TILE_ROWS):
+            m = sum(1 for c in cum if c <= whole)
+            if m:
+                return m, True
+    return n, full
 _groups = {}
 _gcv = threading.Condition()
 _cpu = {"C": 0.0, "F": 0.0}         # CPU seconds this rank's threads spent inside the bridge, by pass
