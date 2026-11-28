@@ -34,6 +34,19 @@ def _exp(m):
     return np.where(m > 0, np.floor(np.log2(np.maximum(m, 1e-300))) + 1, 0).astype(np.int32)
 
 
+def _rep(x, k):
+    """x [m, O] (whole tiles) k times along the rows, by tile copies; x is consumed. ttnn.repeat_interleave rounds
+    fp32 through bf16, and one concat takes at most 50 tensors."""
+    if k == 1:
+        return x
+    y = ttnn.concat([x] * min(k, 16), dim=0)
+    if k > 16:
+        y, y16 = ttnn.concat([y] * (k // 16) + [x] * (k % 16), dim=0), y
+        ttnn.deallocate(y16)
+    ttnn.deallocate(x)
+    return y
+
+
 class Resident:
     def __init__(self, dev, digits=13):
         self.dev, self.n = dev, digits
@@ -108,11 +121,12 @@ class Resident:
         self.refs, self.bal, self.ref_key = [], None, None
 
     # ---- reference side ------------------------------------------------------------------------------------
-    def _kchip(self, re, im):
-        """[n, P] real and imaginary parts -> [n, K] in the chip's K order: per 1024-pixel chunk, re then im."""
-        n = re.shape[0]
+    def _kchip(self, re, im, at=slice(None), n=None):
+        """[m, P] real and imaginary parts -> [n, K] in the chip's K order: per 1024-pixel chunk, re then im. Input
+        row i lands on row at[i]; the other rows are zero."""
+        n = re.shape[0] if n is None else n
         z = np.zeros((2, n, self.NC * 1024), np.float32)
-        z[0, :, :self.P], z[1, :, :self.P] = re, im
+        z[0, at, :self.P], z[1, at, :self.P] = re, im
         return z.reshape(2, n, self.NC, 1024).transpose(1, 2, 0, 3).reshape(n, self.K)
 
     def _colmax(self, t):
@@ -168,25 +182,44 @@ class Resident:
     # ---- one batch -----------------------------------------------------------------------------------------
     def _product(self, Ad, ea, rows, r, name):
         Op = -(-r["O"] // OBLK) * OBLK
-        S = oz_fused(Ad, r[name + "d"], self.n, bt=True)
+        S = oz_fused(Ad, r[name + "d"], self.n, rb=min(rows, RBLK) // 32, bt=True)
         eb = r[name + "e"]
         assert int(ea.min()) + int(eb.min()) - 2 * self.n > -126 and int(ea.max()) + int(eb.max()) < 127
         hi, lo = oz_combine(S, self._ti(ea, rows), self._ti(eb, Op), self.n)
         ttnn.deallocate(S)
         return hi, lo
 
-    def _operands(self, xr, xi, w, tx, ty, pn, x, y):
-        """Particle side in float64, one row per (particle, translation): A [R, K] = w S_t X, A2 = w on both parts,
-        nx = sum w |X|^2. Row r is particle pn[r] at translation (tx[r], ty[r])."""
+    @staticmethod
+    def _layout(pn, N):
+        """Where the rows go on the chip: (device row of each row, particle of each norm row, norm rows, rows).
+
+        sum w |P_o|^2 depends on the particle alone, so its product runs on one row per particle and whole-tile
+        copies spread the result over the translations: device row = slot * nb + particle, with nb particle rows
+        (whole tiles) and one slot per translation of the longest list. A few particles with many translations
+        would pay more rows that way than with a norm row of their own per row; those keep their order."""
+        R = len(pn)
+        assert (np.diff(pn) >= 0).all()
+        blk = lambda v: -(-v // RBLK) * RBLK  # noqa: E731
+        slot = np.arange(R) - np.searchsorted(pn, pn)       # a row's place among the rows of its particle
+        nb = blk(N) if N > RBLK else 32 << int(np.ceil(np.log2(max(N, 32) / 32)))    # a row block oz_fused has
+        rows = blk((int(slot.max()) + 1) * nb)
+        if rows + nb < 2 * blk(R):
+            return slot * nb + pn, np.arange(N), nb, rows
+        return np.arange(R), pn, blk(R), blk(R)
+
+    def _operands(self, xr, xi, w, tx, ty, pn, x, y, dr=None, sel=None):
+        """Particle side in float64. Row r is particle pn[r] at translation (tx[r], ty[r]) and sits on device row
+        dr[r]: A [U, K] = w S_t X and nx [U] = sum w |X|^2. A2 = w on both parts, one row per particle in sel."""
+        dr, sel = np.arange(len(pn)) if dr is None else dr, pn if sel is None else sel
+        U = int(dr.max()) + 1
         w = w.astype(np.float64)
         ph = tx[:, None].astype(np.float64) * x + ty[:, None].astype(np.float64) * y            # [R, P]
         c, s = np.cos(ph), np.sin(ph)
         wr = w[pn]
-        ar = (c * xr[pn] - s * xi[pn]) * wr
-        ai = (c * xi[pn] + s * xr[pn]) * wr
-        A = self._kchip(ar, ai).astype(np.float64)
-        A2 = self._kchip(wr, wr).astype(np.float64)
-        nx = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)[pn]
+        A = self._kchip((c * xr[pn] - s * xi[pn]) * wr, (c * xi[pn] + s * xr[pn]) * wr, dr, U).astype(np.float64)
+        A2 = self._kchip(w, w)[sel].astype(np.float64)
+        nx = np.zeros(U)
+        nx[dr] = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)[pn]
         return A, A2, nx
 
     def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None):
@@ -198,9 +231,9 @@ class Resident:
         is used once.
         """
         R = len(tx)
-        rows = -(-R // RBLK) * RBLK
         t0 = time.time()
-        A, A2, nx = self._operands(xr, xi, w, tx, ty, pn, x, y)
+        dr, sel, nb, rows = self._layout(pn, len(xr))
+        A, A2, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, dr, sel)
         t0 = t1 = self._mark("host_s", t0)
 
         held = ref_key is not None and ref_key == self.ref_key
@@ -216,12 +249,12 @@ class Resident:
                 self.refs, self.bal, self.ref_key = refs, (e, e2), ref_key
         A, A2 = np.ldexp(A, e), np.ldexp(A2, e2)
         ea, ea2 = _exp(np.abs(A).max(1)), _exp(np.abs(A2).max(1))
-        up = lambda v: np.pad(v, ((0, -R % RUP), (0, 0)))  # noqa: E731
-        tA, tA2 = self._put(up(A)), self._put(up(A2))
-        Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, rows)
+        up = lambda v, m: np.pad(v, ((0, min(-len(v) % RUP, m - len(v))), (0, 0)))  # noqa: E731
+        tA, tA2 = self._put(up(A, rows)), self._put(up(A2, nb))
+        Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb)
         nxh = (nx / 2).astype(np.float32)
         nxl = (nx / 2 - nxh).astype(np.float32)
-        pad = lambda v: np.pad(v, (0, rows - R))[:, None]  # noqa: E731
+        pad = lambda v: np.pad(v, (0, rows - len(v)))[:, None]  # noqa: E731
         t_nxh, t_nxl = self._put(pad(nxh)), self._put(pad(nxl))
         t0 = self._mark("imgdig_s", t0)
 
@@ -234,14 +267,14 @@ class Resident:
         o0 = 0
         for r in refs:
             Ch, Cl = self._product(Ad, ea, rows, r, "B")
-            Nh, Nl = self._product(A2d, ea2, rows, r, "B2")
+            Nh, Nl = (_rep(t, rows // nb) for t in self._product(A2d, ea2, nb, r, "B2"))
             # d2 / 2 = (sum w|X|^2 + sum w|P|^2) / 2 - cross, rounded once at the end
             sh, se = tsum(ttnn.multiply(Nh, 0.5), ttnn.add(ttnn.multiply(Nh, 0.0), t_nxh))
             lo = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), t_nxl)
             dh, de = tsum(sh, ttnn.neg(Ch))
             D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
             t0 = self._mark("prod_s", t0)
-            out[:, o0:o0 + r["O"]] = ttnn.to_torch(D).numpy()[:R, :r["O"]]
+            out[:, o0:o0 + r["O"]] = ttnn.to_torch(D).numpy()[dr, :r["O"]]
             t0 = self._mark("read_s", t0)
             o0 += r["O"]
             for t in (Ch, Cl, Nh, Nl, D):

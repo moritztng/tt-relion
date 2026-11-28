@@ -31,3 +31,35 @@ def test_operands_match_direct_form():
     direct = (w[:, None, None].astype(np.float64) * np.abs(ref - sx[:, None]) ** 2).sum(-1)
     err = np.abs(d2 - direct).max() / np.abs(direct).max()
     assert err < 1e-6, err          # the operands are rounded to fp32 for upload
+
+
+def test_layout_spreads_the_particle_norm_over_its_rows():
+    """The chip runs sum w |P|^2 on the norm rows and copies it over rows // nb slots. Done here in float64, every
+    layout gives the direct sum: many particles (one norm row each), ragged translation lists, and a few particles
+    with many translations (a norm row per row)."""
+    rng = np.random.default_rng(1)
+    P, O = 300, 5
+    x, y = rng.integers(0, 30, P).astype(np.float32), rng.integers(-30, 30, P).astype(np.float32)
+    pr, pi = rng.normal(size=(2, O, P)).astype(np.float32)
+    r = Resident(None)
+    r.P, r.NC = P, 1
+    r.K = 2048
+    B = r._kchip(pr, pi).astype(np.float64)
+    for counts, per_particle in (([37] * 24, True), ([4, 16, 8, 1, 9] * 4, True), ([37] * 3, False), ([2] * 40, True)):
+        N = len(counts)
+        pn = np.repeat(np.arange(N), counts)
+        xr, xi = rng.normal(size=(2, N, P)).astype(np.float32)
+        w = rng.uniform(0, 1, (N, P)).astype(np.float32)
+        tx, ty = (rng.normal(size=(2, len(pn))) * 0.05).astype(np.float32)
+        dr, sel, nb, rows = r._layout(pn, N)
+        assert (len(sel) == N) == per_particle and rows % nb == 0 and rows % 512 == 0 and len(set(dr)) == len(pn)
+        assert nb in (32, 64, 128, 256) or nb % 512 == 0
+        A, A2, nx = r._operands(xr, xi, w, tx, ty, pn, x, y, dr, sel)
+        norm = np.zeros((nb, O))
+        norm[:len(A2)] = A2 @ (B * B).T
+        d2 = (nx[:, None] + np.tile(norm, (rows // nb, 1))[:len(A)] - 2 * A @ B.T)[dr]
+        ph = tx[:, None].astype(np.float64) * x + ty[:, None].astype(np.float64) * y
+        sx = (xr[pn] + 1j * xi[pn]) * np.exp(1j * ph)                               # [R, P]
+        direct = (w[pn][:, None].astype(np.float64) * np.abs((pr + 1j * pi)[None] - sx[:, None]) ** 2).sum(-1)
+        err = np.abs(d2 - direct).max() / np.abs(direct).max()
+        assert err < 1e-6, (counts[:3], err)
