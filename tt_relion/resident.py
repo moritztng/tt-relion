@@ -240,13 +240,13 @@ class Resident:
         nx[dr] = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)[pn]
         return A.reshape(n, self.K), self._kchip(w, w)[sel], nx
 
-    def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None):
+    def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None, out=None):
         """float32 [R, O]. eul [O, 9]; xr, xi, w [N, P]; tx, ty, pn [R]: row r scores particle pn[r] at translation
         (tx[r], ty[r]) (phase = x tx + y ty, RELION's units), so particles may bring different numbers of translations.
 
         ref_key names an orientation set shared by many batches (a global pass): its projections and digits stay on
         the chip until another key or model arrives, so the key must also identify the pixel set. Without it the set
-        is used once.
+        is used once. out: where to write the result (the server passes the shared segment).
         """
         R = len(tx)
         t0 = time.time()
@@ -281,7 +281,7 @@ class Resident:
             bp = ttnn.subtract(s_, a)
             return s_, ttnn.add(ttnn.subtract(a, ttnn.subtract(s_, bp)), ttnn.subtract(b, bp))
 
-        out = np.empty((R, len(eul)), np.float32)
+        out = np.empty((R, len(eul)), np.float32) if out is None else out
         o0 = 0
         for r in refs:
             Ch, Cl = self._product(Ad, ea, rows, r, "B")
@@ -292,7 +292,7 @@ class Resident:
             dh, de = tsum(sh, ttnn.neg(Ch))
             D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
             t0 = self._mark("prod_s", t0)
-            out[:, o0:o0 + r["O"]] = ttnn.to_torch(D).numpy()[dr, :r["O"]]
+            np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, o0:o0 + r["O"]])     # the chip holds d2 / 2
             t0 = self._mark("read_s", t0)
             o0 += r["O"]
             for t in (Ch, Cl, Nh, Nl, D):
@@ -307,4 +307,4 @@ class Resident:
         c = self.c
         c["dev_s"] += time.time() - t1
         c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
-        return 2.0 * out
+        return out
