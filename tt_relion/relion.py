@@ -216,17 +216,24 @@ class _Server:
         return out
 
 
-    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, ref_key):
+    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, ref_key, prior=None):
         """Resident diff2 on this chip (device_server "d2"): float32 [R, O], row r = particle pn[r] at translation
         (tx[r], ty[r]). model = [key, X, Y, Z, initY, initZ, maxR2, pf, nvox]; the volume is shipped only when this
-        chip does not hold that key."""
+        chip does not hold that key.
+
+        prior = (lo [O], lt [R], window, cap), float32 -log priors: the candidate form. Returns (row int32,
+        orientation int32, delta float32, best float64 [N]) for the samples within window of each particle's best,
+        or None when there are more than cap of them (the caller asks for the dense matrix instead)."""
         from multiprocessing import shared_memory
         N, R = xr.shape[0], tx.size
         O, P = eul.shape[0], x.shape[0]
         with self.lock:
             send = model[0] != self.model_key
             parts = ([np.frombuffer(mdl_mv, dtype=np.float32)] if send else []) + [eul, x, y, xr, xi, w, tx, ty, pn]
-            need = 4 * (sum(a.size for a in parts) + R * O)
+            if prior is not None:
+                cap = int(prior[3])
+                parts += [np.asarray(prior[0], np.float32), np.asarray(prior[1], np.float32)]
+            need = 4 * (sum(a.size for a in parts) + (R * O if prior is None else 3 * cap + 2 * N))
             if self.shm is None or self.shm.size < need:
                 if self.shm is not None:
                     self.shm.close()
@@ -243,13 +250,23 @@ class _Server:
                    "client": self.c}
             if ref_key is not None:
                 req["ref_key"] = ref_key
+            if prior is not None:
+                req["prior"] = [float(prior[2]), cap]
             self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             self.p.stdin.flush()
-            if self.p.stdout.readline().strip() != "ok":
+            ans = self.p.stdout.readline().split()
+            if ans[:1] != ["ok"]:
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
             t2 = time.time()
             self.model_key = model[0]
-            out = buf[o:o + R * O].reshape(R, O).copy()
+            if prior is None:
+                out = buf[o:o + R * O].reshape(R, O).copy()
+            elif int(ans[1]) < 0:
+                out = None
+            else:
+                n = int(ans[1])
+                out = (buf[o:o + n].view(np.int32).copy(), buf[o + cap:o + cap + n].view(np.int32).copy(),
+                       buf[o + 2 * cap:o + 2 * cap + n].copy(), buf[o + 3 * cap:o + 3 * cap + 2 * N].view(np.float64).copy())
             del buf
             c = self.c
             c["calls"] += 1
