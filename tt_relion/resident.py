@@ -28,6 +28,7 @@ OCH = max(OBLK, int(os.environ.get("TT_RELION_OCH", "4096")) // OBLK * OBLK)    
                 # its own run of programs, so a small batch (one 512-row tile) may be cheaper on fewer, wider chunks
 RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a new row count on every call, and
                 # each new shape costs seconds of program builds
+SUB = os.environ.get("TT_RELION_SUBPHASE", "") not in ("", "0")   # split prod_s (a device sync per step: a profile, not a rate)
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 FARP = 1e30     # -log prior / 2 of an excluded orientation and of a pad column: never inside a window
 
@@ -69,6 +70,7 @@ class Resident:
         # where a batch's wall goes: operand build on the host, then the chip (dev_s, split into its phases with
         # the device synchronised at each mark), and how full the row tile was (rows used of rows computed)
         self.c = dict(host_s=0.0, dev_s=0.0, proj_s=0.0, refdig_s=0.0, imgdig_s=0.0, prod_s=0.0, read_s=0.0,
+                      px_oz_s=0.0, px_comb_s=0.0, pn_oz_s=0.0, pn_comb_s=0.0, p_asm_s=0.0,
                       batches=0, rows=0, rows_padded=0)
 
     def _mark(self, name, t0):
@@ -76,6 +78,9 @@ class Resident:
         t1 = time.time()
         self.c[name] += t1 - t0
         return t1
+
+    def _sub(self, name, t0):
+        return self._mark(name, t0) if SUB else t0
 
     # ---- uploads -------------------------------------------------------------------------------------------
     def _put(self, x, layout=ttnn.TILE_LAYOUT):
@@ -204,11 +209,14 @@ class Resident:
     def _product(self, Ad, ea, rows, r, name):
         Op = -(-r["O"] // OBLK) * OBLK
         n = self.n2 if name == "B2" else self.n
+        ts = time.time()
         S = oz_fused(Ad, r[name + "d"], n, rb=min(rows, RBLK) // 32, bt=True)
+        ts = self._sub("px_oz_s" if name == "B" else "pn_oz_s", ts)
         eb = r[name + "e"]
         assert int(ea.min()) + int(eb.min()) - 2 * n > -126 and int(ea.max()) + int(eb.max()) < 127
         hi, lo = oz_combine(S, self._ti(ea, rows), self._ti(eb, Op), n)
         ttnn.deallocate(S)
+        self._sub("px_comb_s" if name == "B" else "pn_comb_s", ts)
         return hi, lo
 
     def _candidates(self, kept, rmin, plt, window, dr, pn, N, rows):
@@ -343,6 +351,7 @@ class Resident:
         for r in refs:
             Ch, Cl = self._product(Ad, ea, rows, r, "B")
             Nh, Nl = self._product(A2d, ea2, nb, r, "B2")
+            ts = time.time()
             # d2 / 2 = (sum w|X|^2 + sum w|P|^2) / 2 - cross, rounded once at the end. The first term is the
             # particle's alone: summed on the norm rows, then copied over the particle's translation slots.
             sh, se = tsum(ttnn.multiply(Nh, 0.5), ttnn.add(ttnn.multiply(Nh, 0.0), t_nxh))
@@ -363,6 +372,7 @@ class Resident:
             sh, lo = _rep(sh, rows // nb), _rep(lo, rows // nb)
             dh, de = tsum(sh, ttnn.neg(Ch))
             D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
+            self._sub("p_asm_s", ts)
             t0 = self._mark("prod_s", t0)
             if prior is None:
                 np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, o0:o0 + r["O"]])     # the chip holds d2 / 2
