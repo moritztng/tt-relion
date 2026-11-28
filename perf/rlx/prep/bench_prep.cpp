@@ -3,8 +3,9 @@
 // unmasked transform's column pass stopped at the window). Also checks forward against the 2D plan.
 // g++ -O3 -fopenmp -I integrations/relion/src_acc_tt perf/rlx/prep/bench_prep.cpp \
 //     integrations/relion/src_acc_tt/tt_prep.cpp -lfftw3f -ltbb -o bench_prep
-// usage: bench_prep [box 360] [current size 156] [particles 2000] [B factor 0]   (TT_RELION_PREP_WISDOM=<file> to time those plans)
-//        bench_prep wisdom <box> <file>                              (measure the plans once, write the file)
+// usage: bench_prep [box 360] [current size 156] [particles 2000] [B factor 0]
+// Times the measured plans of the plan file; TT_RELION_PREP_WISDOM=0 times estimated plans, and only then are
+// the two transforms the same bits.
 // Times are thread CPU seconds (CLOCK_THREAD_CPUTIME_ID), the clock the E-step profiler uses, best of 5 rounds.
 #include "tt_prep.h"
 #include <algorithm>
@@ -24,8 +25,6 @@ static double now() { timespec t; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t); re
 
 int main(int argc, char **argv)
 {
-	if (argc == 4 && !strcmp(argv[1], "wisdom"))
-		return TTPrep::write_wisdom(atoi(argv[2]), argv[3]) ? 0 : 1;
 	const int n = argc > 1 ? atoi(argv[1]) : 360, cur = argc > 2 ? atoi(argv[2]) : 156, reps = argc > 3 ? atoi(argv[3]) : 2000;
 	const int ix = n / 2 + 1, ox = cur / 2 + 1;
 	std::vector<double> img((size_t)n * n);
@@ -135,7 +134,7 @@ int main(int argc, char **argv)
 		double total = 0;
 		for (double v : best) total += v;
 		printf("%-22s box %d cur %d: total %.3f ms/particle | shift %.3f center %.3f FFT unmasked %.3f FFT masked %.3f 2xwindow %.3f mask %.3f power %.3f (%g)\n",
-		       mode ? (t.from_wisdom ? "blocks, wisdom" : "blocks, estimate") : "one 2D plan (RELION)", n, cur, 1e3 * total / reps, 1e3 * best[0] / reps, 1e3 * best[1] / reps,
+		       mode ? (t.from_wisdom ? "blocks, measured" : "blocks, estimate") : "one 2D plan (RELION)", n, cur, 1e3 * total / reps, 1e3 * best[0] / reps, 1e3 * best[1] / reps,
 		       1e3 * best[2] / reps, 1e3 * best[3] / reps, 1e3 * best[4] / reps, 1e3 * best[5] / reps, 1e3 * best[6] / reps, sink);
 	}
 	return 0;

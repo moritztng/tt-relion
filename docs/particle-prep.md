@@ -32,16 +32,18 @@ measured by the stage profiler (`TT_RELION_PROFILE=1`, `perf/rlx/wsum/split.py`)
 
 CPU-only arms, 2 ranks of 8 threads on a 64-core host (load average 18 to 36):
 
-| iteration | RELION's code | TTPrep | TTPrep with wisdom plans |
+| iteration | RELION's code | TTPrep, estimated plans | TTPrep (measured plans) |
 |---|---|---|---|
 | global search (current size 158) | 5.08 to 5.88 ms | 1.12 ms | 0.91 to 0.97 ms |
 | local search (current size 176) | 4.92 to 4.96 ms | 1.19 ms | 0.96 to 1.00 ms |
 
-FFTW's estimated plan for a 360 point transform is slow on this build (FFTW 3.3.8). A measured plan is about
-a third faster per transform, but FFTW picks measured plans by timing, so two ranks can end up with different plans
-and round differently. `bench_prep wisdom <box> <file>` measures once and writes a wisdom file;
-`TT_RELION_PREP_WISDOM=<file>` makes every rank and every run use those plans. Without it TTPrep uses estimated
-plans.
+FFTW's estimated plan for a 360 point transform is slow on this build (FFTW 3.3.8); a measured plan is about a
+third faster per transform. FFTW picks measured plans by timing, so two ranks that each measured would end up with
+different plans and round differently. TTPrep therefore measures once per box size and keeps the plans in a file,
+`~/.cache/tt-relion/fftw.<box>`: the first process that needs them takes about a second, and every rank and every
+later run reads the same file. `TT_RELION_PREP_WISDOM=<prefix>` puts the files elsewhere (a directory all nodes
+share, for a run across machines), and `TT_RELION_PREP_WISDOM=0` uses estimated plans as RELION does, which makes
+the unmasked transform the same bits as RELION's. Delete the file after changing the FFTW build.
 
 ## Accuracy
 
@@ -49,7 +51,7 @@ plans.
 the inputs and outputs of the first particles, and `perf/rlx/prep/check_prep.py <dir>` grades them. Worst relative
 L2 error over 32 real particles per iteration type:
 
-| output | RELION's code | TTPrep | TTPrep with wisdom plans |
+| output | RELION's code | TTPrep, estimated plans | TTPrep (measured plans) |
 |---|---|---|---|
 | unmasked transform | 1.1e-7 | 1.1e-7 | 1.1e-7 |
 | masked transform | 1.7e-7 | 1.7e-7 | 1.6e-7 |

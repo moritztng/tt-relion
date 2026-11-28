@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <fftw3.h>
@@ -60,6 +61,46 @@ static int plan(Tables &t, unsigned flags)
 	return made;
 }
 
+// Where the measured plans of an n box are kept: <TT_RELION_PREP_WISDOM>.<n>, under ~/.cache/tt-relion when
+// the variable is not set. Empty for TT_RELION_PREP_WISDOM=0: estimated plans, RELION's own planner flag.
+static std::string plan_file(int n)
+{
+	const char *e = getenv("TT_RELION_PREP_WISDOM"), *home = getenv("HOME");
+	std::string prefix = e ? e : "";
+	if (!e && home)
+	{
+		prefix = std::string(home) + "/.cache";
+		mkdir(prefix.c_str(), 0777);
+		prefix += "/tt-relion";
+		mkdir(prefix.c_str(), 0777);
+		prefix += "/fftw";
+	}
+	return prefix.empty() || prefix == "0" ? "" : prefix + "." + std::to_string(n);
+}
+
+// No file yet: measure the plans (FFTW_MEASURE, about a second) and publish them with link(), which fails when
+// another process got there first. Either way this process then plans from the published file, so every rank
+// and every later run has the same plans and rounds alike. Call under mkl_mutex.
+static bool measure(int n, const std::string &file)
+{
+	std::string mine = file + ".XXXXXX";
+	const int fd = mkstemp(&mine[0]);
+	if (fd < 0)
+		return false;
+	close(fd);
+	Tables t;
+	t.n = n;
+	fftwf_forget_wisdom();
+	plan(t, FFTW_MEASURE);
+	for (void *p : t.rows) if (p) fftwf_destroy_plan((fftwf_plan) p);
+	for (void *p : t.columns) if (p) fftwf_destroy_plan((fftwf_plan) p);
+	const bool first = fftwf_export_wisdom_to_filename(mine.c_str()) && link(mine.c_str(), file.c_str()) == 0;
+	(void) first;   // losing the race is fine: the winner's file is read below
+	unlink(mine.c_str());
+	fftwf_forget_wisdom();
+	return fftwf_import_wisdom_from_filename(file.c_str());
+}
+
 // The expressions of CpuKernels::softMaskBackgroundValue / cosineFilter and CpuKernels::powerClass,
 // evaluated once per pixel instead of once per pixel per particle.
 static std::unique_ptr<Tables> build(int n, float radius, float edge)
@@ -90,32 +131,16 @@ static std::unique_ptr<Tables> build(int n, float radius, float edge)
 		const size_t s = (size_t)(sqrtf((float)(x * x + y * y)) + 0.5f);
 		t->shell[v] = (s < (size_t)ix && !(x == 0 && y < 0)) ? s : ix;
 	}
-	const char *wisdom = getenv("TT_RELION_PREP_WISDOM");
+	const std::string file = plan_file(n);
 	tbb::spin_mutex::scoped_lock lock(mkl_mutex);
-	const bool have = wisdom && wisdom[0] && fftwf_import_wisdom_from_filename(wisdom);
-	t->from_wisdom = 0;
-	if (have)
-		t->from_wisdom = plan(*t, FFTW_MEASURE | FFTW_WISDOM_ONLY);
-	else
-		plan(*t, FFTW_ESTIMATE);
+	const bool have = !file.empty() && (fftwf_import_wisdom_from_filename(file.c_str()) || measure(n, file));
+	t->from_wisdom = have ? plan(*t, FFTW_MEASURE | FFTW_WISDOM_ONLY) : (plan(*t, FFTW_ESTIMATE), 0);
 	// The file is for these plans only: RELION's own keep planning as they did without it.
 	if (have) fftwf_forget_wisdom();
 	lock.release();
-	if (wisdom && wisdom[0])
-		fprintf(stderr, "TTPrep: box %d, %d of %d FFT plans from %s\n", n, t->from_wisdom, Tables::BLOCK + 2, wisdom);
+	if (!file.empty())
+		fprintf(stderr, "TTPrep: box %d, %d of %d FFT plans from %s\n", n, t->from_wisdom, Tables::BLOCK + 2, file.c_str());
 	return t;
-}
-
-bool write_wisdom(int n, const char *path)
-{
-	Tables t;
-	t.n = n;
-	tbb::spin_mutex::scoped_lock lock(mkl_mutex);
-	fftwf_forget_wisdom();
-	plan(t, FFTW_MEASURE);
-	const bool ok = fftwf_export_wisdom_to_filename(path);
-	fftwf_forget_wisdom();
-	return ok;
 }
 
 const Tables &tables(int n, float radius, float edge)

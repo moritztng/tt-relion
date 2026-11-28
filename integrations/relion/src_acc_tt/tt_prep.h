@@ -13,16 +13,18 @@
  * The transform is the same single-precision FFTW, called as its two passes: every row real to complex,
  * then the columns, in blocks of 32. The unmasked transform is only ever read inside the current-size
  * window, so its column pass runs over the window's columns and no others. Every value RELION keeps is
- * computed; the columns it throws away right after the transform are not. With RELION's planner flag
- * (FFTW_ESTIMATE, the default here) the passes are the ones its 2D plan runs and the output is the same
- * bits (perf/rlx/prep/bench_prep.cpp prints the difference: 0).
+ * computed; the columns it throws away right after the transform are not.
  *
  * The two transforms are most of what is left of the function, and an estimated plan for a 360 box is about
  * 1.6x slower than a measured one. A measured plan depends on timing, so two ranks or two runs would not
- * round alike. TT_RELION_PREP_WISDOM=<file> takes the plans from a file instead: written once per machine
- * by write_wisdom (bench_prep wisdom <box> <file>), it gives every rank and every run the same measured
- * plans. The result then differs from RELION's by float rounding in the FFT (about 1e-7 relative) and is
- * graded against the float64 reference like everything else. A plan the file does not hold is estimated.
+ * round alike if each measured its own. The plans are therefore measured once per box size and kept in a file
+ * (~/.cache/tt-relion/fftw.<box>, or <TT_RELION_PREP_WISDOM>.<box>): the first process to need them measures,
+ * about a second, and every rank and every later run plans from that file. The result then differs from
+ * RELION's by float rounding in the FFT (about 1e-7 relative) and is graded against the float64 reference
+ * like everything else. TT_RELION_PREP_WISDOM=0 keeps RELION's planner flag (FFTW_ESTIMATE): the passes are
+ * then the ones its 2D plan runs and the output is the same bits (perf/rlx/prep/bench_prep.cpp prints the
+ * difference: 0). A plan the file does not hold, from another FFTW build say, is estimated; delete the file
+ * to have it measured again.
  *
  * Arithmetic outside the FFT is RELION's, operation for operation, in single precision where RELION is
  * single, with two exceptions that are sums: the background value under the mask and the shell sums are
@@ -58,7 +60,7 @@ struct Tables
 	enum { BLOCK = 32 };          // rows or columns per FFT call; a block starts on a 64-byte boundary
 	void *rows[2];                // fftwf plans: BLOCK rows real to complex, and the n % BLOCK that remain
 	void *columns[BLOCK + 1];     // columns[k]: k neighbouring columns, complex, in place
-	int from_wisdom;              // how many of the plans came from TT_RELION_PREP_WISDOM
+	int from_wisdom;              // how many of the plans are the measured ones of the plan file
 };
 
 // Built on first use, shared by all threads, never freed.
@@ -94,9 +96,6 @@ inline void shift(const R *img, int n, float norm, int dx, int dy, float *out)
 			for (int x = x0; x < x1; x++) d[x] = (float)s[x];
 	}
 }
-
-// Measures the plans of an n box (FFTW_MEASURE, about a second) and writes them as FFTW wisdom.
-bool write_wisdom(int n, const char *path);
 
 // The image with its quadrants swapped (RELION's centerFFT), as FFT input.
 void center(const float *in, int n, float *out);

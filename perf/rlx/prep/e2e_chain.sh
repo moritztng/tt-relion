@@ -1,7 +1,7 @@
 #!/bin/bash
 # e2e_chain.sh: the prep A/B inside rlx-e2e's one-iteration arm T (iter_ab.sh: resident E-step on $CHIPS,
 # one rank per chip plus the leader, --j 40, TT_RELION_BATCH 32, 13 digits, hugetlb, profiler on). One binary, three prep modes:
-#   n  TT_RELION_PREP=0 (RELION's own code)   e  TTPrep, estimated plans (default)   w  TTPrep, plans from $R/wisdom.360
+#   n  TT_RELION_PREP=0 (RELION's own code)   e  TTPrep, estimated plans (TT_RELION_PREP_WISDOM=0)   w  TTPrep as it runs by default, measured plans
 # and a control s: the binary without the prep patch ($SBIN), which says whether n is that binary's result.
 # Per arm: prep thread CPU ms per particle (split.py), the E-step bar, AICLK of its chips sampled at 1 Hz while
 # it ran, pose rows and half-map correlation against rlx-e2e's CPU arm and against this chain's own n arm.
@@ -11,7 +11,7 @@
 # Env: PLAN (arms as tag:mode:iteration), SBIN, CHIPS (16,...,23; chip C in 16-23 is node C+8), MINMEM (150), R (~/rlx-prep), SRC (tree under $R, src-f; exported, iter_ab.sh takes its Python tree and run.sh from it), RELION_BIN, P (tag prefix, pe), GIVEUP (epoch), E2E (~/rlx-e2e/runs).
 R=${R:-$HOME/rlx-prep}; SRC=${SRC:-src-f}; P=${P:-pe}; S=$R/runs/$P.status; PY=${PY:-$HOME/fleet/env/bin/python}
 E2E=${E2E:-$HOME/rlx-e2e/runs}; CHIPS=${CHIPS:-16,17,18,19,20,21,22,23}; MINMEM=${MINMEM:-150}; NC=$(echo $CHIPS | tr , '\n' | wc -l); NODES=$(for c in ${CHIPS//,/ }; do echo -n "$((c + 8)) "; done)
-GIVEUP=${GIVEUP:-$(( $(date +%s) + 4 * 3600 ))}; W=$R/wisdom.360
+GIVEUP=${GIVEUP:-$(( $(date +%s) + 4 * 3600 ))}
 export R SRC; BIN=${RELION_BIN:-$R/relion-f/build/bin/relion_refine_mpi}; SBIN=${SBIN:-$HOME/rlx-e2e/relion-s/build/bin/relion_refine_mpi}
 PLAN=${PLAN:-n16a:n:16 e16a:e:16 w16a:w:16 e16b:e:16 n16b:n:16 s16a:s:16 n24a:n:24 e24a:e:24 w24a:w:24 e24b:e:24 n24b:n:24 s24a:s:24}
 say() { echo "$(date -u +%FT%TZ) $* load1 $(cut -d' ' -f1 /proc/loadavg)" >> $S; }
@@ -39,8 +39,8 @@ clk() { awk -F'\t' -v nodes="$NODES" 'BEGIN{split(nodes,q," "); for(k in q) want
 arm() {     # arm <tag> <mode n|e|w|s> <it> <rlx-e2e CPU arm dir> [<own n arm tag>]
   grep -q " $1 mode=$2 it0$3 .* T rc=" $S && return
   tag=${P}_$1; it=$3; o=$R/runs/${tag}_T; slot 480; export RELION_BIN=$BIN
-  case $2 in n) export TT_RELION_PREP=0; unset TT_RELION_PREP_WISDOM;; e) export TT_RELION_PREP=1; unset TT_RELION_PREP_WISDOM;;
-             w) export TT_RELION_PREP=1 TT_RELION_PREP_WISDOM=$W;; s) export RELION_BIN=$SBIN; unset TT_RELION_PREP TT_RELION_PREP_WISDOM;; esac
+  case $2 in n) export TT_RELION_PREP=0; unset TT_RELION_PREP_WISDOM;; e) export TT_RELION_PREP=1 TT_RELION_PREP_WISDOM=0;;
+             w) export TT_RELION_PREP=1; unset TT_RELION_PREP_WISDOM;; s) export RELION_BIN=$SBIN; unset TT_RELION_PREP TT_RELION_PREP_WISDOM;; esac
   [ $it = 24 ] && export FROM=$HOME/rlx/runs/d32_l_n14/run_it023_optimiser.star || unset FROM
   IT=$it TAG=$tag ARMS=T TT_RELION_RESIDENT=1 TT_RELION_BATCHLOG=1 RANKS=$((NC + 1)) J=40 BATCH=32 RLX_CHIP_LIST=$CHIPS END_BY=$END \
     TT_RELION_PROFILE_FILE=$o/prof $R/$SRC/perf/rlx/iter_ab.sh

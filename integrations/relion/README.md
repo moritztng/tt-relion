@@ -98,7 +98,7 @@ RELION's own code. Apply it after `relion5-tt.patch` and `relion5-estep-profile.
 | variable | meaning |
 |---|---|
 | `TT_RELION_PREP=0` | use RELION's own code |
-| `TT_RELION_PREP_WISDOM=<file>` | take measured FFT plans from an FFTW wisdom file, about 15 % faster; make it once with `bench_prep wisdom <box> <file>` (`perf/rlx/prep/`) so every rank and every run rounds alike |
+| `TT_RELION_PREP_WISDOM=<prefix>` | where the measured FFT plans are kept, one file per box size (`<prefix>.<box>`, default `~/.cache/tt-relion/fftw`); `0` uses estimated plans like RELION, slower |
 | `TT_RELION_RECORD_PREP=<dir>` | write inputs and outputs of the first particles for `perf/rlx/prep/check_prep.py` |
 
 Numbers and the float64 check: [`docs/particle-prep.md`](../../docs/particle-prep.md).
