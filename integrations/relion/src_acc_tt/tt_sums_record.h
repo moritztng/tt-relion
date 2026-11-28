@@ -31,12 +31,13 @@ namespace TTSumsRecord
 			bool refs_are_ctf_corrected, bool ctf_premultiplied);
 
 	// After runBackProjectKernel. model_* is what the same kernel adds to an all-zero volume for this
-	// particle (the caller runs it a second time into scratch); stored sparse.
+	// particle (the caller runs it a second time into scratch); stored sparse. stride 3 = the three arrays
+	// are one interleaved block (relion5-sums-memory.patch).
 	void backproject(
 			const float *Fimg_nomask_real, const float *Fimg_nomask_imag, const float *Minvsigma2s, long image_size,
 			int bpMaxR, int bpMaxR2, float bp_padding_factor,
 			int bpMdlX, int bpMdlY, int bpMdlZ, int bpMdlInitY, int bpMdlInitZ,
-			const float *model_real, const float *model_imag, const float *model_weight);
+			const float *model_real, const float *model_imag, const float *model_weight, long stride = 1);
 
 	// At the end of storeWeightedSums, before the sums are added to wsum_model. Closes the record.
 	void particle(
