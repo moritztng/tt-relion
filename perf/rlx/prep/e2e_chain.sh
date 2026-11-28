@@ -7,11 +7,13 @@
 # it ran, pose rows and half-map correlation against rlx-e2e's CPU arm and against this chain's own n arm.
 # Arms never run into a booked whole-box window (~/fleet/HOLDER.windows), stop at ~/fleet/HANDBACK and start only
 # with $MINMEM GB of MemAvailable, so a neighbour's memory-bound run is not pushed over.
+# No arm starts while $WANT exists (another row's flag that it needs these chips next; a running arm finishes).
 # An arm whose line is already in the status file is skipped, so a restarted chain goes on where the last one stopped.
-# Env: PLAN (arms as tag:mode:iteration), SBIN, CHIPS (16,...,23; chip C in 16-23 is node C+8), MINMEM (150), R (~/rlx-prep), SRC (tree under $R, src-f; exported, iter_ab.sh takes its Python tree and run.sh from it), RELION_BIN, P (tag prefix, pe), GIVEUP (epoch), E2E (~/rlx-e2e/runs).
+# Env: PLAN (arms as tag:mode:iteration), SBIN, CHIPS (16,...,23; chip C in 16-23 is node C+8), MINMEM (150), R (~/rlx-prep), SRC (tree under $R, src-f; exported, iter_ab.sh takes its Python tree and run.sh from it), RELION_BIN, P (tag prefix, pe), GIVEUP (epoch), E2E (~/rlx-e2e/runs), WANT ($E2E/WANT-20-23).
 R=${R:-$HOME/rlx-prep}; SRC=${SRC:-src-f}; P=${P:-pe}; S=$R/runs/$P.status; PY=${PY:-$HOME/fleet/env/bin/python}
 E2E=${E2E:-$HOME/rlx-e2e/runs}; CHIPS=${CHIPS:-16,17,18,19,20,21,22,23}; MINMEM=${MINMEM:-150}; NC=$(echo $CHIPS | tr , '\n' | wc -l); NODES=$(for c in ${CHIPS//,/ }; do echo -n "$((c + 8)) "; done)
 GIVEUP=${GIVEUP:-$(( $(date +%s) + 4 * 3600 ))}
+WANT=${WANT:-$E2E/WANT-20-23}
 export R SRC; BIN=${RELION_BIN:-$R/relion-f/build/bin/relion_refine_mpi}; SBIN=${SBIN:-$HOME/rlx-e2e/relion-s/build/bin/relion_refine_mpi}
 PLAN=${PLAN:-n16a:n:16 e16a:e:16 w16a:w:16 e16b:e:16 n16b:n:16 s16a:s:16 n24a:n:24 e24a:e:24 w24a:w:24 e24b:e:24 n24b:n:24 s24a:s:24}
 say() { echo "$(date -u +%FT%TZ) $* load1 $(cut -d' ' -f1 /proc/loadavg)" >> $S; }
@@ -26,7 +28,7 @@ room() { now=$(date +%s); r=86400       # seconds until 2 min before the next wi
   done < $HOME/fleet/HOLDER.windows; echo $r; }
 slot() {    # wait for $1 s of room, the memory floor and every chip of $CHIPS free; sets END
   while :; do stop
-    if [ $(room) -ge $1 ] && [ $(avail) -ge $MINMEM ]; then
+    if [ ! -e $WANT ] && [ $(room) -ge $1 ] && [ $(avail) -ge $MINMEM ]; then
       n=0; for d in $NODES; do busy $d || n=$((n + 1)); done
       [ $n = $NC ] && break
     fi; sleep 20
