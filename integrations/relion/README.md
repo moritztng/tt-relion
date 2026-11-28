@@ -41,7 +41,9 @@ particle with a fine pass to follow (`--oversampling` above 0) and no first-iter
 every other case, and any call the bridge declines, takes the dense path unchanged.
 On the global finer iteration of the dev cell (four chips, 13 digits) a window of 40 gave the poses of the
 CPU arm, 0 of 13,156 differ and every particle has the same number of significant samples, with the E-step
-at 2.07 min against 2.55 min dense (`results/e2e_cand`).
+at 2.07 min against 2.55 min dense (`results/e2e_cand`). On a local-search iteration the window and the dense
+block differ from the CPU arm in the same single pose of 13,156, and the E-step takes 2.67 min against 3.38 min
+(`results/e2e_it024`).
 
 `relion5-particle-arena.patch` (optional) lets `--j` exceed the number of cores. RELION's `--cpu` path
 runs its particle loop in TBB's default arena, which stops at the core count whatever `--j` says. With
