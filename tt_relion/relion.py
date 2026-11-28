@@ -851,7 +851,12 @@ def _take(q):
                 return m, True
     return n, full
 _groups = {}
-_gcv = threading.Condition()
+# Who wakes whom. A waiting particle sleeps on a condition of its own and is woken only for its result or to take the
+# lead; only the leaders, one a group, sleep on _gcv, where each arrival wakes them. With one condition for all, every
+# arrival woke every waiter (190 threads at --j 192) and the leader stacked its batch behind them: 42 ms instead of
+# 1.2 ms for a 58-particle batch on an idle host, with the chip reserved and idle meanwhile.
+_glock = threading.RLock()
+_gcv = threading.Condition(_glock)
 _cpu = {"C": 0.0, "F": 0.0}         # CPU seconds this rank's threads spent inside the bridge, by pass
 _cpu_lock = threading.Lock()
 
@@ -877,16 +882,18 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
             "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
             "ir": np.frombuffer(re_mv, dtype=np.float32).copy(),
             "ii": np.frombuffer(im_mv, dtype=np.float32).copy(),
-            "w": np.frombuffer(corr_mv, dtype=np.float32).copy(), "out": None, "err": None, "cut": False}
-    with _gcv:
+            "w": np.frombuffer(corr_mv, dtype=np.float32).copy(), "out": None, "err": None, "cut": False,
+            "cv": threading.Condition(_glock), "leads": False}
+    with _glock:
         g = _groups.setdefault(key, {"q": [], "led": False})
         g["q"].append(item)
-        _gcv.notify_all()
+        if g["led"]:
+            _gcv.notify_all()                       # its leader may have a full batch now
         while True:
             if item["out"] is not None or item["err"] is not None:
                 break
             if not g["led"] and not item["cut"]:
-                g["led"] = True
+                g["led"] = item["leads"] = True
                 deadline = time.time() + _BATCH_WAIT
                 while not _take(g["q"])[1] and time.time() < deadline:
                     _gcv.wait(deadline - time.time())
@@ -901,8 +908,10 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                 del g["q"][:n]
                 for b in batch:
                     b["cut"] = True
-                g["led"] = False                    # the next batch collects while this one runs
-                _gcv.notify_all()
+                g["led"] = False                    # the next batch collects while this one runs:
+                nxt = next((it for it in g["q"] if not it["leads"]), None)      # the first waiter takes the lead
+                if nxt is not None:
+                    nxt["cv"].notify()
                 _gcv.release()
                 try:
                     t_lead = time.time()
@@ -962,11 +971,14 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     if s is not None:               # the batch failed before it reached the chip
                         _free.put(s)
                     _gcv.acquire()
+                    item["leads"] = False
+                    for b in batch:
+                        if b is not item:
+                            b["cv"].notify()
                     if not g["q"] and not g["led"] and _groups.get(key) is g:
                         del _groups[key]
-                    _gcv.notify_all()
             else:
-                _gcv.wait()
+                item["cv"].wait(1.0)                # woken for its result or to lead; the timeout is a net only
     if item["err"] is not None:
         raise item["err"]
     return item["out"]
