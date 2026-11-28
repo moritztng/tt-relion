@@ -6,7 +6,12 @@
 r=${OMPI_COMM_WORLD_RANK:?not under mpirun}
 if [ "$r" -gt 0 ] && [ "${TT_RELION_BACKEND:-}" = ttnn ]; then
     k=${RLX_CHIPS_PER_RANK:-1} chips=()
-    for i in $(seq 0 $((k - 1))); do chips+=($(( ${RLX_CHIP_BASE:-0} + ((r - 1) * k + i) % ${RLX_CHIPS:-32} ))); done
+    if [ -n "${RLX_CHIP_LIST:-}" ]; then    # an explicit, possibly non-contiguous set: "16,17,20"
+        IFS=, read -ra all <<< "$RLX_CHIP_LIST"
+        for i in $(seq 0 $((k - 1))); do chips+=(${all[$(( ((r - 1) * k + i) % ${#all[@]} ))]}); done
+    else
+        for i in $(seq 0 $((k - 1))); do chips+=($(( ${RLX_CHIP_BASE:-0} + ((r - 1) * k + i) % ${RLX_CHIPS:-32} ))); done
+    fi
     export RLX_RANK_CHIPS=$(IFS=,; echo "${chips[*]}") TT_VISIBLE_DEVICES=${chips[0]}
     if [ -n "${RLX_LEASE_DIR:-}" ]; then
         for chip in "${chips[@]}"; do
