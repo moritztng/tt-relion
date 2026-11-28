@@ -1,0 +1,38 @@
+2026-11-28T12:19:33Z dc25 it016 chips 16,17,18,19 x2 per rank, ranks 3 --j 80 src-s relion-v digits 13 cand 40 batch 32 profile hugetlb MemAvailable 271 GB load1 72.22
+2026-11-28T12:24:05Z dc25: T rc=1 2026-11-28T12:24:05Z load1 79.86 wall 3:31.05 it016=yes E-step 1.70 min; aiclk samples 764 under1200 0 min 1337 load1 79.86
+rows 13156 vs 13156
+_rlnAngleRot differ 0 max 0
+_rlnAngleTilt differ 0 max 0
+_rlnAnglePsi differ 0 max 0
+_rlnOriginXAngst differ 2 max 1.31755
+_rlnOriginYAngst differ 1 max 1.31755
+_rlnMaxValueProbDistribution differ 9778 max 0.002425
+_rlnLogLikeliContribution differ 12354 max 0.007709
+_rlnNrOfSignificantSamples differ 0 max 0
+P 1021 coarse: batches 1035 particles/batch 24.1 rows/batch 891 tile_fill 0.73 O 19689 s/batch 0.362 total_s 374.7 particles/s/chip-busy 66.5
+P 9922 coarse: batches 1 particles/batch 2.0 rows/batch 100 tile_fill 0.20 O 136 s/batch 0.146 total_s 0.1 particles/s/chip-busy 13.7
+P 9922 fine: batches 1023 particles/batch 24.6 rows/batch 215 tile_fill 0.42 O 237 s/batch 0.192 total_s 196.0 particles/s/chip-busy 128.2
+span_s 201.1 chips 4 busy_s 570.8 busy_share 0.709
+dc25_T                                   res 14.188235  dOri 3.432365 dOff 1.217678  corr h1 1.000000 (1-c 1.04e-10)  h2 1.000000 (1-c 1.11e-10)
+2026-11-28T12:24:09Z dc25 lldiff: dc25_T LL diff: median 0.000977 p90 0.002927 p99 0.004824 max 0.007709; mean signed -1.073e-05; >0.1: 0; >1: 0; rot rows 0   half 1 n 6635 LL>0.1: 0 rot: 0   half 2 n 6521 LL>0.1: 0 rot: 0   by file order eighths, LL>0.1: [0, 0, 0, 0, 0, 0, 0, 0]  rot: [0, 0, 0, 0, 0, 0, 0, 0]  load1 83.88
+2026-11-28T12:24:09Z dc25 grade: Rot rows differing vs dc2_N = 0 of 13156; psm segments in /dev/shm 4 load1 83.88
+2026-11-28T12:24:09Z dc25 (window stack: prep off, cand 40, no preread) rows 0; w17 done load1 83.88
+2026-11-28T12:24:11Z dc26 it016 chips 16,17,18,19 x2 per rank, ranks 3 --j 80 src-t relion-w digits 13 cand 40 batch 32 profile hugetlb MemAvailable 243 GB load1 83.88
+2026-11-28T12:28:42Z dc26: T rc=1 2026-11-28T12:28:42Z load1 55.47 wall 3:30.01 it016=yes E-step 1.82 min; aiclk samples 800 under1200 0 min 1337 load1 55.47
+rows 13156 vs 13156
+_rlnAngleRot differ 0 max 0
+_rlnAngleTilt differ 0 max 0
+_rlnAnglePsi differ 0 max 0
+_rlnOriginXAngst differ 2 max 1.31755
+_rlnOriginYAngst differ 1 max 1.31755
+_rlnMaxValueProbDistribution differ 9785 max 0.002184
+_rlnLogLikeliContribution differ 12349 max 0.007709
+_rlnNrOfSignificantSamples differ 0 max 0
+P 1021 coarse: batches 974 particles/batch 25.4 rows/batch 940 tile_fill 0.73 O 19693 s/batch 0.422 total_s 410.9 particles/s/chip-busy 60.2
+P 9922 fine: batches 978 particles/batch 25.7 rows/batch 225 tile_fill 0.44 O 249 s/batch 0.204 total_s 199.8 particles/s/chip-busy 125.8
+span_s 196.5 chips 4 busy_s 610.6 busy_share 0.777
+dc26_T                                   res 14.188235  dOri 3.432365 dOff 1.217678  corr h1 1.000000 (1-c 1.03e-10)  h2 1.000000 (1-c 1.12e-10)
+2026-11-28T12:28:46Z dc26 lldiff: dc26_T LL diff: median 0.000977 p90 0.002927 p99 0.004807 max 0.007709; mean signed -1.089e-05; >0.1: 0; >1: 0; rot rows 0   half 1 n 6635 LL>0.1: 0 rot: 0   half 2 n 6521 LL>0.1: 0 rot: 0   by file order eighths, LL>0.1: [0, 0, 0, 0, 0, 0, 0, 0]  rot: [0, 0, 0, 0, 0, 0, 0, 0]  load1 58.47
+2026-11-28T12:28:46Z dc26 grade: Rot rows differing vs dc2_N = 0 of 13156; psm segments in /dev/shm 4 load1 58.47
+2026-11-28T12:28:46Z w18: leg B stays on the window's tree (dc26 rows 0, E-step 1.82, dc25 1.70) load1 58.47
+2026-11-28T12:28:46Z w18 done load1 58.47

@@ -14,7 +14,7 @@ for ln in open(sys.argv[1], errors="replace").read().replace("\r", "\n").split("
     elif "Maximization" in ln:
         stage = "M"
     m = re.match(r"\s*([\d.]+)/\s*([\d.]+) (sec|min|hrs)", ln)
-    if m and it is not None and float(m.group(1)) == float(m.group(2)):
+    if m and it is not None and ("yum!" in ln or float(m.group(1)) == float(m.group(2))):
         rows.setdefault(it, {})[stage] = float(m.group(1)) * UNIT[m.group(3)]
 for i in sorted(rows):
     print(f"it{i:03d} E {rows[i].get('E', float('nan')):7.0f} s  M {rows[i].get('M', float('nan')):6.0f} s")

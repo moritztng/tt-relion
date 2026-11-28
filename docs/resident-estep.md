@@ -200,13 +200,20 @@ float64 at this size (`perf/rlx/resident/d2_parity.py --size 360`, `results/e2e_
 orientations, the best pose agrees for all 12, and the squared difference is off by 0.014 at a value of 100,355,
 where float32 resolves 0.008. A batch takes 3.7 s, 0.31 s per particle.
 
-The table passes through host memory on its way to the chip, about 26 GB per chip while it does, and every chip
-wants it at the start of that iteration. `TT_RELION_TABLE_TURNS=<n>` (default 4) is how many chips of a host upload at
-once; the others wait their turn. `--preread_images` also counts here: RELION keeps the whole particle set in every
-MPI rank, so with one rank per chip the host holds as many copies as it has chips. Without it RELION reads each
-particle from its stack when it needs it, which costs nothing here if the stacks are in the page cache or on tmpfs:
-the same dev-cell iteration without `--preread_images` gave 0 of 13,156 differing poses and an E-step of 2.38 min
-(2.55 min with it; AICLK 1337 MHz or more, host load 103 to 123, `results/e2e_pre`).
+The table passes through host memory on its way to the chip: measured at box 360 (`perf/rlx/resident/table_probe.py`,
+`results/e2e_tp`, AICLK 1350 MHz), one server peaks at 24.5 GB during the 10.1 s build and 26.6 s first upload and
+drops back to 2.14 GB steady RSS afterwards, leaving 20.7 GB free on the chip beside the 11.2 GB table. Every chip
+wants its table at the start of that iteration, so `TT_RELION_TABLE_TURNS=<n>` (default 4) limits how many chips of a
+host upload at once while the others wait their turn. `--preread_images` also counts here: RELION keeps the whole
+particle set in every MPI rank, so with one rank per chip the host holds as many copies as it has chips. Without it
+RELION reads each particle from its stack when it needs it, which costs nothing here if the stacks are in the page
+cache or on tmpfs: the same dev-cell iteration without `--preread_images` gave 0 of 13,156 differing poses and an
+E-step of 2.38 min (2.55 min with it; AICLK 1337 MHz or more, host load 103 to 123, `results/e2e_pre`). Combining
+candidate window 40 and no `--preread_images` with `TT_RELION_PREP=0` (`results/e2e_stack`, four chips as two ranks
+with two chips and `--j 80`, AICLK 1337 MHz or more) kept 0 of 13,156 differing poses and half-map 1 - correlation
+1.04e-10 / 1.11e-10 (it016 E-step 1.70 min, it017 1.57 min); adding the weighted-sums memory, deferred back-projection
+and prefetch patches kept the same grade (0 of 13,156 poses, 1.03e-10 / 1.12e-10), cut rank CPU from 25.4 to 18.0 ms
+per particle, and took it017 from 1.57 to 1.38 min.
 
 A rank can drive more than one chip. `RLX_CHIPS_PER_RANK=<k>` (read by `perf/rlx/rank.sh`) gives every follower rank
 k chips and its `--j` threads feed all of them, so the host holds fewer copies of RELION for the same chips. On the

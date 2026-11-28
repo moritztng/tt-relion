@@ -1,0 +1,84 @@
+=== dc25 (src-s / relion-v) ===
+2 ranks, 25858 particles, 25.424 ms CPU per particle (1077.852 ms thread wall); without the two diff2 stages 18.461 ms
+  fft_ctf              7.974 ms   31.4 %
+      nonZeroProb                                     0.001
+      readData                                        0.457
+      makeNoiseMask                                   0.405
+      TranslateAndNormCorrect                         1.091
+      normalizeAndTransform_recImg                    1.488
+      applyMask                                       1.739
+      normalizeAndTransform                           1.433
+      powerClass                                      0.502
+      CTFRead2D                                       0.393
+      selfApplyBeamTilt                               0.002
+  diff2_coarse         5.753 ms   22.6 %
+      generateProjectionSetupCoarse                   1.892
+      translation_1                                   0.026
+  weights_coarse       0.055 ms    0.2 %
+  diff2_fine           1.210 ms    4.8 %
+      precalculateShiftedImagesCtfsAndInvSigma2s      0.124
+      translation_2                                   0.068
+      pair_list_1                                     0.009
+      generateEulerMatrices                           0.007
+      Diff2CALL                                       0.943
+  weights_fine         0.297 ms    1.2 %
+  sums                 6.883 ms   27.1 %
+      store_init                                      0.064
+      collect_data_2                                  0.033
+      translation_3                                   0.093
+      generateEulerMatricesProjector                  0.007
+      pre_wavg_map                                    0.002
+      wavg                                            2.362
+      backproject                                     4.005
+      store_post_gpu                                  0.128
+  weightpass_rest      1.380 ms    5.4 %
+  other                1.872 ms    7.4 %
+=== dc26 (src-t / relion-w) ===
+2 ranks, 25856 particles, 17.991 ms CPU per particle (1078.429 ms thread wall); without the two diff2 stages 12.403 ms
+  fft_ctf              7.468 ms   41.5 %
+      nonZeroProb                                     0.001
+      readData                                        0.330
+      makeNoiseMask                                   0.246
+      TranslateAndNormCorrect                         1.078
+      normalizeAndTransform_recImg                    1.456
+      applyMask                                       1.756
+      normalizeAndTransform                           1.403
+      powerClass                                      0.500
+      CTFRead2D                                       0.387
+      selfApplyBeamTilt                               0.002
+  diff2_coarse         4.525 ms   25.2 %
+      generateProjectionSetupCoarse                   1.759
+      translation_1                                   0.022
+  weights_coarse       0.070 ms    0.4 %
+  diff2_fine           1.063 ms    5.9 %
+      precalculateShiftedImagesCtfsAndInvSigma2s      0.111
+      translation_2                                   0.060
+      pair_list_1                                     0.009
+      generateEulerMatrices                           0.007
+      Diff2CALL                                       0.825
+  weights_fine         0.283 ms    1.6 %
+  sums                 3.091 ms   17.2 %
+      store_init                                      0.055
+      collect_data_2                                  0.031
+      translation_3                                   0.076
+      generateEulerMatricesProjector                  0.007
+      pre_wavg_map                                    0.002
+      wavg                                            1.695
+      backproject                                     0.969
+      store_post_gpu                                  0.120
+      splat_flush_tail                                0.011
+  weightpass_rest      0.693 ms    3.9 %
+  other                0.798 ms    4.4 %
+=== dc25 ttb ===
+P 1021 coarse: batches 1035 particles/batch 24.1 rows/batch 891 tile_fill 0.73 O 19689 s/batch 0.362 total_s 374.7 particles/s/chip-busy 66.5
+P 9922 coarse: batches 1 particles/batch 2.0 rows/batch 100 tile_fill 0.20 O 136 s/batch 0.146 total_s 0.1 particles/s/chip-busy 13.7
+P 9922 fine: batches 1023 particles/batch 24.6 rows/batch 215 tile_fill 0.42 O 237 s/batch 0.192 total_s 196.0 particles/s/chip-busy 128.2
+span_s 201.1 chips 4 busy_s 570.8 busy_share 0.709
+estep 1: wall_s 100.5 batches 1038 busy_s 296.0 busy_share 0.736 idle_ms_per_batch 101 tail_idle_s 11.9
+estep 2: wall_s 96.5 batches 1021 busy_s 274.9 busy_share 0.712 idle_ms_per_batch 103 tail_idle_s 14.6
+=== dc26 ttb ===
+P 1021 coarse: batches 974 particles/batch 25.4 rows/batch 940 tile_fill 0.73 O 19693 s/batch 0.422 total_s 410.9 particles/s/chip-busy 60.2
+P 9922 fine: batches 978 particles/batch 25.7 rows/batch 225 tile_fill 0.44 O 249 s/batch 0.204 total_s 199.8 particles/s/chip-busy 125.8
+span_s 196.5 chips 4 busy_s 610.6 busy_share 0.777
+estep 1: wall_s 107.5 batches 992 busy_s 344.5 busy_share 0.801 idle_ms_per_batch 84 tail_idle_s 11.2
+estep 2: wall_s 84.4 batches 960 busy_s 266.2 busy_share 0.789 idle_ms_per_batch 73 tail_idle_s 8.8

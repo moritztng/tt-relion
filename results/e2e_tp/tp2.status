@@ -1,0 +1,2 @@
+2026-11-28T12:28:57Z tp2 start: table probe s360 on chip 16, src-s, MemAvailable 249 GB load1 54.38
+2026-11-28T12:30:10Z tp2 rc=0: {"size": 360, "nvox": 187662601, "table_gb": 11.185562670230865, "rss_model_gb": 2.1387977600097656, "load1": 52.56, "build_s": 10.054994583129883, "first_s": 26.56092929840088, "first_rss_after_gb": 2.1393585205078125, "next_s": 25.93528962135315, "next_rss_after_gb": 2.139362335205078, "aiclk_min": 1350, "aiclk_med": 1350, "rss_peak_gb": 24.504432678222656, "chip_free_gb": 20.6894211769104} load1 45.66
