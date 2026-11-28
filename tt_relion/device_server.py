@@ -45,6 +45,7 @@ def main():
     shm = None
     held_key, held = None, None
     res = None                          # the resident diff2 state of this chip, made on first use
+    batchlog = os.environ.get("TT_RELION_BATCHLOG", "") not in ("", "0")
     t_open, calls, client = time.time(), 0, {}
     up = mm = down = 0.0
     for line in sys.stdin:
@@ -72,6 +73,9 @@ def main():
                             ty.reshape(N, T), x, y, req.get("ref_key")).reshape(-1)
             del mdl, eul, x, y, xr, xi, w, tx, ty, out, buf
             up, mm = up + t1 - t0, mm + time.time() - t1
+            if batchlog:                # one line per batch: start, wall, the op's host and chip seconds so far, shape
+                print("TTB %.4f %.4f %.4f %.4f %d %d %d %d" % (t0, time.time() - t0, res.c["host_s"], res.c["dev_s"],
+                                                             N, T, O, P), file=sys.stderr, flush=True)
             client = req.get("client", client)
             calls += 1
             reply.write("ok\n")
@@ -128,6 +132,9 @@ def main():
     print("TTDEV chip=%s calls=%d busy_s=%.3f up_s=%.3f mm_s=%.3f down_s=%.3f life_s=%.3f client=%s"
           % (os.environ.get("TT_VISIBLE_DEVICES", "?"), calls, up + mm + down, up, mm, down,
              time.time() - t_open, json.dumps(client, separators=(",", ":"))), file=sys.stderr, flush=True)
+    if res is not None:                 # the resident op's own split: host operand build vs chip, and row fill
+        print("TTRES chip=%s %s" % (os.environ.get("TT_VISIBLE_DEVICES", "?"),
+                                    json.dumps(res.c, separators=(",", ":"))), file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

@@ -42,12 +42,15 @@ class Resident:
         self.model_key = self.ref_key = None
         self.refs = []          # per orientation chunk: dict(O, B, B2) before the first batch, digits after
         self.bal = None         # (e, e2): the K-diagonal balance exponents of the held reference set
-        self.t = {}             # seconds per phase, device synchronised at each mark (the server reports them)
+        # where a batch's wall goes: operand build on the host, then the chip (dev_s, split into its phases with
+        # the device synchronised at each mark), and how full the row tile was (rows used of rows computed)
+        self.c = dict(host_s=0.0, dev_s=0.0, proj_s=0.0, refdig_s=0.0, imgdig_s=0.0, prod_s=0.0, read_s=0.0,
+                      batches=0, rows=0, rows_padded=0)
 
     def _mark(self, name, t0):
         ttnn.synchronize_device(self.dev)
         t1 = time.time()
-        self.t[name] = self.t.get(name, 0.0) + t1 - t0
+        self.c[name] += t1 - t0
         return t1
 
     # ---- uploads -------------------------------------------------------------------------------------------
@@ -197,7 +200,7 @@ class Resident:
         rows = -(-R // RBLK) * RBLK
         t0 = time.time()
         A, A2, nx = self._operands(xr, xi, w, tx, ty, x, y)
-        t0 = self._mark("host_s", t0)
+        t0 = t1 = self._mark("host_s", t0)
 
         held = ref_key is not None and ref_key == self.ref_key
         if held:
@@ -249,4 +252,7 @@ class Resident:
                 for v in r.values():
                     if isinstance(v, ttnn.Tensor):
                         ttnn.deallocate(v)
+        c = self.c
+        c["dev_s"] += time.time() - t1
+        c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
         return (2.0 * out).reshape(N, T, -1).transpose(0, 2, 1)

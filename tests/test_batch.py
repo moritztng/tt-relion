@@ -119,3 +119,35 @@ def test_threads_with_own_orientation_sets():
         rel = np.abs(outs[p] - ref[p]).max() / np.abs(ref[p]).max()
         assert rel < 1e-5, (p, rel)
         assert outs[p].argmin() == ref[p].argmin()
+
+
+def test_fine_scores_only_the_asked_translations():
+    """diff2_fine equals the requested entries of the dense matrix, alone and collected into batches."""
+    import threading
+    import torch
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case(seed=2, n=6, T=24)
+    n, T, O = tx.shape[0], tx.shape[1], eul.shape[0]
+    sc = (g["mdlX"], g["mdlY"], g["mdlZ"], g["mdlInitY"], g["mdlInitZ"], g["maxR"], g["maxR2_padded"],
+          g["padding_factor"], g["imgX"], g["imgY"])
+    rng = np.random.default_rng(5)
+    rot = [np.sort(rng.integers(0, O, 30)).astype(np.uint64) for _ in range(n)]
+    trn = [rng.choice(rng.choice(T, 2 + p, replace=False), 30).astype(np.uint64) for p in range(n)]
+    mv = lambda p: [memoryview(v) for v in (mdl, eul.ravel(), tx[p], ty[p], ir[p], ii[p], corr[p])]  # noqa: E731
+    ref = [relion._dense_diff2(torch, *mv(p), *sc, O, T, P, "F")[rot[p] * np.uint64(T) + trn[p]] + np.float32(0.5)
+           for p in range(n)]
+    outs = [np.zeros(30, np.float32) for _ in range(n)]
+
+    def run(p):
+        assert relion.diff2_fine(*mv(p), memoryview(rot[p]), memoryview(trn[p]), memoryview(outs[p]), *sc, 0.5,
+                                 O, T, 30, P, 30)
+    for p in range(n):
+        run(p)
+        assert np.array_equal(outs[p], ref[p])
+        outs[p][:] = 0
+    relion._BATCH, relion._BATCH_WAIT = 4, 0.2
+    th = [threading.Thread(target=run, args=(p,)) for p in range(n)]
+    [x.start() for x in th]
+    [x.join(60) for x in th]
+    relion._BATCH = 0
+    for p in range(n):
+        assert np.abs(outs[p] - ref[p]).max() / np.abs(ref[p]).max() < 1e-5
