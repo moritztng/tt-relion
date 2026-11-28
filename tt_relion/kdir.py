@@ -33,6 +33,7 @@ def kernel_dir(name):
         tmp = Path(tempfile.mkdtemp(dir=dst.parent, prefix=".new-"))
         for p in files:
             shutil.copyfile(p, tmp / p.name)
+        os.chmod(tmp, 0o755)                # mkdtemp makes it private; a shared cache is read by others
         try:
             os.rename(tmp, dst)             # whole or not at all: another process may place it first
         except OSError:

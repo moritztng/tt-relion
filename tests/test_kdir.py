@@ -19,6 +19,7 @@ def test_two_trees_with_the_same_kernels_read_one_directory(monkeypatch, tmp_pat
     assert a != kdir._SRC / "oz_fused" and a.name == "oz_fused"
     for p in (kdir._SRC / "oz_fused").iterdir():
         assert (a / p.name).read_bytes() == p.read_bytes()
+    assert a.stat().st_mode & 0o777 == 0o755
     tree = tmp_path / "tree2" / "kernels"                       # the same sources placed somewhere else
     shutil.copytree(kdir._SRC, tree)
     monkeypatch.setattr(kdir, "_SRC", tree)
