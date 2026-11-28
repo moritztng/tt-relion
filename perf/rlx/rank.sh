@@ -15,8 +15,10 @@ if [ "$r" -gt 0 ] && [ "${TT_RELION_BACKEND:-}" = ttnn ]; then
     export RLX_RANK_CHIPS=$(IFS=,; echo "${chips[*]}") TT_VISIBLE_DEVICES=${chips[0]}
     if [ -n "${RLX_LEASE_DIR:-}" ]; then
         for chip in "${chips[@]}"; do
-            exec {fd}>"$RLX_LEASE_DIR/${RLX_LEASE_HOST}-card$chip.json"
+            lease="$RLX_LEASE_DIR/${RLX_LEASE_HOST}-card$chip.json"
+            exec {fd}<>"$lease"     # not ">": that empties the file of a holder before the lock is even tried
             flock -n "$fd" || { echo "rank $r: chip $chip is leased by someone else" >&2; exit 3; }
+            : > "$lease"
             printf '{"host":"%s","card":"%s","holder":"worker:rlx-galaxy-floor","pid":%d,"acquired":%d,"released":null}\n' \
                 "$RLX_LEASE_HOST" "$chip" $$ "$(date +%s)" >&"$fd"
         done

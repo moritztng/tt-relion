@@ -21,7 +21,7 @@ IN_WEIGHTPASS = ["getAllSquaredDifferencesCoarse", "convertAllSquaredDifferences
                  "getAllSquaredDifferencesFine", "convertAllSquaredDifferencesToWeightsFine"]
 DETAIL = {
     "fft_ctf": ["nonZeroProb", "readData", "makeNoiseMask", "TranslateAndNormCorrect", "normalizeAndTransform_recImg",
-                "applyMask", "normalizeAndTransform", "powerClass", "CTFRead2D", "selfApplyBeamTilt"],
+                "applyMask", "normalizeAndTransform", "powerClass", "ttPrep", "CTFRead2D", "selfApplyBeamTilt"],
     "diff2_coarse": ["generateProjectionSetupCoarse", "translation_1"],
     "diff2_fine": ["precalculateShiftedImagesCtfsAndInvSigma2s", "translation_2", "pair_list_1", "generateEulerMatrices", "Diff2CALL"],
     "sums": ["store_init", "collect_data_2", "translation_3", "generateEulerMatricesProjector", "pre_wavg_map",

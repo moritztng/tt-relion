@@ -180,7 +180,10 @@ k chips and its `--j` threads feed all of them, so the host holds fewer copies o
 global finer iteration of the dev cell, four chips as two ranks with two chips and `--j 80` each gave the poses of
 the CPU arm (0 of 13,156 differ, half maps 1.0e-10 and 1.1e-10) and finished the E-step in 2.75 min; one rank per
 chip with `--j 40` took 3.28 min on the same chips with the same grade (AICLK 1343 MHz or more in every sample of
-both runs, host load 54 to 95). Split half-sets need two follower ranks, so k is at most half the chips.
+both runs, host load 54 to 95). Four chips per rank grade the same: eight chips as two ranks with four chips and
+`--j 160` each gave 0 of 13,156 differing poses and an E-step of 1.23 min (host load 8 to 29, AICLK 1331 MHz or
+more), and the same eight chips as four ranks with two chips and `--j 80` each took 1.18 min (host load 29 to 80,
+`results/e2e_k4`). Split half-sets need two follower ranks, so k is at most half the chips.
 
 `TT_RELION_NORM_DIGITS=<n>` gives the norm product alone more digits than the cross product. Off by default: with
 the balance fix the norm term needs none.

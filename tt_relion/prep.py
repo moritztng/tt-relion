@@ -1,0 +1,121 @@
+"""Float64 reference of RELION's particle prep (getFourierTransformsAndCtfs; 2D image, --zero_mask).
+
+Computed from a record's inputs alone (tt_prep.h, TT_RELION_RECORD_PREP), so it grades RELION's own path and the
+TTPrep path against the same numbers. The image is taken as the float32 values the kernels see; everything
+after that is float64. The CTF is CTF::initialise + getCTF for a plain optics group (no magnification matrix,
+no even Zernike terms, no CTF padding).
+"""
+import numpy as np
+
+
+def read_record(path):
+    """A record file as {name: array or float}: items of 'name dtype ydim xdim\\n' followed by raw values."""
+    out = {}
+    with open(path, "rb") as f:
+        while True:
+            line = f.readline()
+            if not line:
+                return out
+            name, dtype, y, x = line.decode().split()
+            a = np.frombuffer(f.read(np.dtype(dtype).itemsize * int(y) * int(x)), dtype=dtype).reshape(int(y), int(x))
+            out[name] = float(a[0, 0]) if a.shape == (1, 1) and dtype == "f8" and name != "power" else a
+
+
+def shifted(img, norm, dx, dy):
+    """img * norm moved by whole pixels; what leaves the box is dropped, what is uncovered is zero."""
+    n = img.shape[0]
+    out = np.zeros((n, n))
+    y0, y1, x0, x1 = max(0, -dy), min(n, n - dy), max(0, -dx), min(n, n - dx)
+    if y0 < y1 and x0 < x1:
+        out[y0 + dy:y1 + dy, x0 + dx:x1 + dx] = img[y0:y1, x0:x1].astype(np.float32).astype(np.float64) * norm
+    return out
+
+
+def mask_weights(n, radius, edge):
+    """0 inside the mask, raised cosine across its edge, 1 outside."""
+    if radius < 0:
+        radius = n / 2
+    y, x = np.mgrid[:n, :n] - n // 2
+    r = np.sqrt(x * x + y * y)
+    w = 0.5 + 0.5 * np.cos((radius + edge - r) / edge * np.pi)
+    return np.where(r < radius, 0.0, np.where(r > radius + edge, 1.0, w))
+
+
+def masked(a, w):
+    """Outside the mask the image becomes its own weighted mean there."""
+    bg = (w * a).sum() / w.sum()
+    return a * (1 - w) + bg * w
+
+
+def transform(a):
+    """Centred FFT, normalised by the pixel count: n x (n/2+1)."""
+    return np.fft.rfft2(np.fft.fftshift(a)) / a.size
+
+
+def window(F, cur):
+    """The cur x (cur/2+1) low-frequency window."""
+    n, ox = F.shape[0], cur // 2 + 1
+    rows = [i if i < ox else i - cur + n for i in range(cur)]
+    return F[rows][:, :ox]
+
+
+def power(F, cur):
+    """Power per shell of the full transform and its sum over shells past the current size."""
+    n, ix = F.shape
+    y = np.arange(n)[:, None]
+    y = np.where(y < ix, y, y - n)
+    x = np.arange(ix)[None, :]
+    shell = (np.sqrt(x * x + y * y) + 0.5).astype(int)
+    ok = (shell < ix) & ~((x == 0) & (y < 0))
+    spectrum = np.bincount(shell[ok], weights=(np.abs(F) ** 2)[ok], minlength=ix)
+    return spectrum, spectrum[cur // 2 + 1:].sum()
+
+
+def ctf(rec):
+    """The CTF on the cur x (cur/2+1) window; frequencies are in units of the full box."""
+    if rec["ctf_padding"]:
+        raise NotImplementedError("CTF padding")
+    n, cur = rec["img"].shape[0], int(rec["current_size"])
+    if not rec["ctf_correction"]:
+        return np.ones((cur, cur // 2 + 1))
+    kv = rec["ctf_kV"] * 1e3
+    lam = 12.2643247 / np.sqrt(kv * (1 + kv * 0.978466e-6))
+    k1, k2 = np.pi * lam, np.pi / 2 * rec["ctf_Cs"] * 1e7 * lam ** 3
+    k3 = np.arctan(rec["ctf_Q0"] / np.sqrt(1 - rec["ctf_Q0"] ** 2))
+    k5 = np.deg2rad(rec["ctf_phase_shift"])
+    az = np.deg2rad(rec["ctf_angle"])
+    u, v = rec["ctf_defU"], rec["ctf_defV"]
+    axx = -(u * np.cos(az) ** 2 + v * np.sin(az) ** 2)
+    axy = (v - u) * np.sin(az) * np.cos(az)
+    ayy = -(u * np.sin(az) ** 2 + v * np.cos(az) ** 2)
+    ox = cur // 2 + 1
+    i = np.arange(cur)[:, None]
+    y = np.where(i < ox, i, i - cur) / (n * rec["angpix"])
+    x = np.arange(ox)[None, :] / (n * rec["angpix"])
+    u2 = x * x + y * y
+    gamma = k1 * (axx * x * x + 2 * axy * x * y + ayy * y * y) + k2 * u2 * u2 - k5 - k3
+    c = -np.sin(gamma)
+    if rec["ctf_intact_first_peak"]:
+        c = np.where(np.abs(gamma) < np.pi / 2, 1.0, c)
+    c = c * np.exp(-rec["ctf_Bfac"] / 4 * u2)
+    if rec["ctf_phase_flipped"]:
+        c = np.abs(c)
+    elif rec["ctf_only_flip_phases"]:
+        c = np.where(c < 0, -1.0, 1.0)
+    c = c * rec["ctf_scale"]
+    c = np.where(np.abs(c) < 1e-8, np.where(c >= 0, 1e-8, -1e-8), c)
+    return c * c if rec["ctf_premultiplied"] else c
+
+
+def reference(rec):
+    """{Fimg_nomask, Fimg, Fctf, power, highres_Xi2} for one record."""
+    img = rec["img"]
+    n, cur = img.shape[0], int(rec["current_size"])
+    a = shifted(img, rec["norm"], int(rec["dx"]), int(rec["dy"]))
+    m = transform(masked(a, mask_weights(n, float(np.float32(rec["radius"])), float(np.float32(rec["edge"])))))
+    out = {"Fimg_nomask": window(transform(a), cur), "Fimg": window(m, cur), "Fctf": ctf(rec),
+           "power": np.zeros((1, 0)), "highres_Xi2": 0.0}
+    if cur < n:
+        spectrum, out["highres_Xi2"] = power(m, cur)
+        out["power"] = spectrum[None, :]
+    return out

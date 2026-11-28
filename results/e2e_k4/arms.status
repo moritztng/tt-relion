@@ -1,0 +1,34 @@
+2026-11-28T11:29:07Z dc18 it016 chips 16,17,18,19,20,21,22,23 x4 per rank, ranks 3 --j 160 src-q relion-t digits 13 cand 0 batch 32 profile hugetlb MemAvailable 297 GB load1 7.58
+2026-11-28T11:33:07Z dc18: T rc=1 2026-11-28T11:33:07Z load1 29.40 wall 3:00.00 it016=yes E-step 1.23 min; aiclk samples 1384 under1200 0 min 1331 load1 29.40
+rows 13156 vs 13156
+_rlnAngleRot differ 0 max 0
+_rlnAngleTilt differ 0 max 0
+_rlnAnglePsi differ 0 max 0
+_rlnOriginXAngst differ 1 max 1.31755
+_rlnOriginYAngst differ 1 max 1.31755
+_rlnMaxValueProbDistribution differ 9761 max 0.002425
+_rlnLogLikeliContribution differ 12359 max 0.007709
+_rlnNrOfSignificantSamples differ 0 max 0
+P 1300 coarse: batches 976 particles/batch 29.1 rows/batch 1077 tile_fill 0.76 O 19588 s/batch 0.734 total_s 716.0 particles/s/chip-busy 39.7
+P 12640 fine: batches 1018 particles/batch 28.4 rows/batch 248 tile_fill 0.48 O 274 s/batch 0.250 total_s 254.6 particles/s/chip-busy 113.5
+span_s 168.9 chips 8 busy_s 970.6 busy_share 0.718
+dc18_T                                   res 14.188235  dOri 3.432365 dOff 1.217637  corr h1 1.000000 (1-c 1.06e-10)  h2 1.000000 (1-c 1.12e-10)
+2026-11-28T11:33:10Z dc18 lldiff: dc18_T LL diff: median 0.000977 p90 0.002927 p99 0.004821 max 0.007709; mean signed -1.129e-05; >0.1: 0; >1: 0; rot rows 0   half 1 n 6635 LL>0.1: 0 rot: 0   half 2 n 6521 LL>0.1: 0 rot: 0   by file order eighths, LL>0.1: [0, 0, 0, 0, 0, 0, 0, 0]  rot: [0, 0, 0, 0, 0, 0, 0, 0]  load1 29.40
+2026-11-28T11:33:10Z dc18 grade: Rot rows differing vs dc2_N = 0 of 13156; psm segments in /dev/shm 0 load1 29.40
+2026-11-28T11:33:10Z dc18b it016 chips 16,17,18,19,20,21,22,23 x2 per rank, ranks 5 --j 80 src-q relion-t digits 13 cand 0 batch 32 profile hugetlb MemAvailable 226 GB load1 29.40
+2026-11-28T11:37:56Z dc18b: T rc=1 2026-11-28T11:37:56Z load1 75.74 wall 3:45.03 it016=yes E-step 1.18 min; aiclk samples 1304 under1200 0 min 1343 load1 75.74
+rows 13156 vs 13156
+_rlnAngleRot differ 0 max 0
+_rlnAngleTilt differ 0 max 0
+_rlnAnglePsi differ 0 max 0
+_rlnOriginXAngst differ 2 max 1.31755
+_rlnOriginYAngst differ 1 max 1.31755
+_rlnMaxValueProbDistribution differ 9790 max 0.002425
+_rlnLogLikeliContribution differ 12363 max 0.007709
+_rlnNrOfSignificantSamples differ 0 max 0
+P 1300 coarse: batches 1025 particles/batch 25.5 rows/batch 943 tile_fill 0.73 O 19631 s/batch 0.714 total_s 732.3 particles/s/chip-busy 35.7
+P 12640 fine: batches 1051 particles/batch 24.6 rows/batch 216 tile_fill 0.42 O 238 s/batch 0.246 total_s 258.2 particles/s/chip-busy 100.1
+span_s 172.8 chips 8 busy_s 990.5 busy_share 0.717
+dc18b_T                                  res 14.188235  dOri 3.432365 dOff 1.217678  corr h1 1.000000 (1-c 1.02e-10)  h2 1.000000 (1-c 1.15e-10)
+2026-11-28T11:38:00Z dc18b lldiff: dc18b_T LL diff: median 0.000977 p90 0.002927 p99 0.004821 max 0.007709; mean signed -9.039e-06; >0.1: 0; >1: 0; rot rows 0   half 1 n 6635 LL>0.1: 0 rot: 0   half 2 n 6521 LL>0.1: 0 rot: 0   by file order eighths, LL>0.1: [0, 0, 0, 0, 0, 0, 0, 0]  rot: [0, 0, 0, 0, 0, 0, 0, 0]  load1 80.17
+2026-11-28T11:38:00Z dc18b grade: Rot rows differing vs dc2_N = 0 of 13156; psm segments in /dev/shm 0 load1 80.17
