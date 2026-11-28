@@ -12,7 +12,7 @@ cd "$OUT"
 git checkout -q "$REV"
 # relion5-host-threads (rlx-mstep3): the host side between E-steps on --j threads (slab FFTs, threaded map loops);
 # HOST_THREADS=0 leaves it out, for a binary to compare against. JOBS = make -j (default a quarter of the cores).
-for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
+for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-prep $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
   git apply "$HERE/$p.patch"
 done
 mkdir -p src/acc/tt build
