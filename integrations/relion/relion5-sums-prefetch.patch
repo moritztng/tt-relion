@@ -1,17 +1,17 @@
 diff --git a/src/acc/acc_projectorkernel_impl.h b/src/acc/acc_projectorkernel_impl.h
-index 5d0ce8db..23987873 100644
+index 5d0ce8db..89a1b958 100644
 --- a/src/acc/acc_projectorkernel_impl.h
 +++ b/src/acc/acc_projectorkernel_impl.h
-@@ -74,6 +74,37 @@ public:
- #else
- 	inline
+@@ -69,6 +69,37 @@ public:
+ 		{};
  #endif
+ 
 +	// The cache lines one image row of a slice reads from the reference (2 voxels on each of 4 rows of the volume
 +	// per pixel), asked for before the row is projected. The reference is far larger than the caches and nothing
 +	// else on the host reads it when the chip scores the orientations, so every pixel meets it cold; the projection
 +	// loop then waits on memory with a few misses in flight, while this loop keeps as many in flight as the core
 +	// allows. The projection itself is untouched.
-+	inline void prefetch3Dmodel(int xstart, int xend, int y, XFLOAT e0, XFLOAT e1, XFLOAT e3, XFLOAT e4, XFLOAT e6, XFLOAT e7) const
++	void prefetch3Dmodel(int xstart, int xend, int y, XFLOAT e0, XFLOAT e1, XFLOAT e3, XFLOAT e4, XFLOAT e6, XFLOAT e7) const
 +	{
 +#if defined(PROJECTOR_NO_TEXTURES) && !defined(_CUDA_ENABLED) && !defined(_HIP_ENABLED) && !defined(_SYCL_ENABLED)
 +		for (int x = xstart; x < xend; x++)
@@ -37,9 +37,9 @@ index 5d0ce8db..23987873 100644
 +#endif
 +	}
 +
- 	void project3Dmodel(
- 			int x,
- 			int y,
+ #if defined _CUDA_ENABLED || defined _HIP_ENABLED
+ 	__device__ __forceinline__
+ #else
 diff --git a/src/acc/cpu/cpu_kernels/wavg.h b/src/acc/cpu/cpu_kernels/wavg.h
 index 398126ea..d833c568 100644
 --- a/src/acc/cpu/cpu_kernels/wavg.h
