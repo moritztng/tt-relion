@@ -17,9 +17,11 @@ git checkout -q "$REV"
 # volume on 2 MB pages; SUMS_MEMORY=0 leaves it out.
 # relion5-sums-defer (rlx-wsum): the back-projection logs its pixels and applies them in batches sorted by volume
 # tile (needs relion5-sums-memory); SUMS_DEFER=0 leaves it out, TT_RELION_SPLAT_DEFER=0 turns it off at run time.
+# relion5-sums-prefetch (rlx-wsum): the sums ask for the reference lines of an image row before projecting it;
+# SUMS_PREFETCH=0 leaves it out.
 # relion5-tt-candidates (rlx-bridge): the coarse pass may hand back candidates instead of the dense matrix (used only
 # with TT_RELION_CAND_WINDOW). relion5-particle-arena: --j may exceed the core count. CANDIDATES=0 / ARENA=0 leave them out.
-for p in relion5-tt $([ "${CANDIDATES:-1}" = 1 ] && echo relion5-tt-candidates) relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-sums-record $([ "${SUMS_SPARSE:-1}" = 1 ] && echo relion5-sums-sparse) $([ "${SUMS_MEMORY:-1}" = 1 ] && echo relion5-sums-memory) $([ "${SUMS_DEFER:-1}" = 1 ] && [ "${SUMS_MEMORY:-1}" = 1 ] && echo relion5-sums-defer) $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads) $([ "${ARENA:-1}" = 1 ] && echo relion5-particle-arena); do
+for p in relion5-tt $([ "${CANDIDATES:-1}" = 1 ] && echo relion5-tt-candidates) relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-sums-record $([ "${SUMS_SPARSE:-1}" = 1 ] && echo relion5-sums-sparse) $([ "${SUMS_MEMORY:-1}" = 1 ] && echo relion5-sums-memory) $([ "${SUMS_DEFER:-1}" = 1 ] && [ "${SUMS_MEMORY:-1}" = 1 ] && echo relion5-sums-defer) $([ "${SUMS_PREFETCH:-1}" = 1 ] && echo relion5-sums-prefetch) $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads) $([ "${ARENA:-1}" = 1 ] && echo relion5-particle-arena); do
   git apply "$HERE/$p.patch"
 done
 mkdir -p src/acc/tt build
