@@ -63,24 +63,42 @@ def main():
                 res = Resident(dev, int(os.environ.get("TT_RELION_DIGITS", "16")))   # base-4 digits; 13 loses the fine pass on real spectra
             N, R, O, P = req["dims"]
             key, X, Y, Z, initY, initZ, maxR2, pf, nvox = req["model"]
-            sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, R, R, R, R * O]
+            # "prior": [window, cap]: the candidate form. The segment then carries -log of the orientation prior [O]
+            # and of the offset prior [R] after pn, and room for cap candidates (row int32, orientation int32, delta
+            # float32) and the particles' best values [N] float64; the reply is "ok <n>", n = -1 when cap is too small.
+            pr = req.get("prior")
+            sizes = [2 * nvox if req.get("model_sent") else 0, 9 * O, P, P, N * P, N * P, N * P, R, R, R]
+            sizes += [O, R, 3 * int(pr[1]) + 2 * N] if pr else [R * O]
             buf = np.ndarray((sum(sizes),), np.float32, shm.buf)
-            mdl, eul, x, y, xr, xi, w, tx, ty, pn, out = np.split(buf, np.cumsum(sizes)[:-1])
+            mdl, eul, x, y, xr, xi, w, tx, ty, pn, *pri, out = np.split(buf, np.cumsum(sizes)[:-1])
             if req.get("model_sent"):
                 res.set_model(key, mdl.reshape(nvox, 2), X, Y, Z, initY, initZ, maxR2, pf)
             res.set_radius(maxR2)       # the pass's, not the model's: coarse and fine cut one model at two radii
             res.set_pixels((P, x.tobytes()), x, y)
             t1 = time.time()
-            res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty, pn.astype(np.int64),
-                   x, y, req.get("ref_key"), out.reshape(R, O))
-            del mdl, eul, x, y, xr, xi, w, tx, ty, pn, out, buf
+            ncand = None
+            if pr:
+                cap = int(pr[1])
+                rr, oo, dl, best = res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty,
+                                          pn.astype(np.int64), x, y, req.get("ref_key"),
+                                          prior=(pri[0].astype(np.float64), pri[1].astype(np.float64), float(pr[0])))
+                ncand = len(rr) if len(rr) <= cap else -1
+                if ncand >= 0:
+                    out[:ncand].view(np.int32)[:] = rr
+                    out[cap:cap + ncand].view(np.int32)[:] = oo
+                    out[2 * cap:2 * cap + ncand] = dl
+                    out[3 * cap:].view(np.float64)[:] = best
+            else:
+                res.d2(eul.reshape(O, 9), xr.reshape(N, P), xi.reshape(N, P), w.reshape(N, P), tx, ty,
+                       pn.astype(np.int64), x, y, req.get("ref_key"), out.reshape(R, O))
+            del mdl, eul, x, y, xr, xi, w, tx, ty, pn, pri, out, buf
             up, mm = up + t1 - t0, mm + time.time() - t1
             if batchlog:                # one line per batch: start, wall, the op's host and chip seconds so far, N R O P
                 print("TTB %.4f %.4f %.4f %.4f %d %d %d %d" % (t0, time.time() - t0, res.c["host_s"], res.c["dev_s"],
                                                              N, R, O, P), file=sys.stderr, flush=True)
             client = req.get("client", client)
             calls += 1
-            reply.write("ok\n")
+            reply.write("ok\n" if ncand is None else "ok %d\n" % ncand)
             continue
         nc, m, kc, n = req["shape"]
         buf = np.ndarray((nc * m * kc + nc * kc * n + nc * m * n,), np.float32, shm.buf)
