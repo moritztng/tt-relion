@@ -223,14 +223,17 @@ class _Server:
         return out
 
 
-    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, ref_key, prior=None):
+    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, ref_key, prior=None, own=None):
         """Resident diff2 on this chip (device_server "d2"): float32 [R, O], row r = particle pn[r] at translation
         (tx[r], ty[r]). model = [key, X, Y, Z, initY, initZ, maxR2, pf, nvox]; the volume is shipped only when this
         chip does not hold that key.
 
         prior = (lo [O], lt [R], window, cap), float32 -log priors: the candidate form. Returns (row int32,
         orientation int32, delta float32, best float64 [N]) for the samples within window of each particle's best,
-        or None when there are more than cap of them (the caller asks for the dense matrix instead)."""
+        or None when there are more than cap of them (the caller asks for the dense matrix instead).
+
+        own = [on_1 .. on_N]: eul holds the particles' own orientation sets one after the other, and the result is the
+        list of their float32 [T_i, on_i] blocks: each particle is scored on its own set only."""
         N, R = xr.shape[0], tx.size
         O, P = eul.shape[0], x.shape[0]
         with self.lock:
@@ -239,7 +242,10 @@ class _Server:
             if prior is not None:
                 cap = int(prior[3])
                 parts += [np.asarray(prior[0], np.float32), np.asarray(prior[1], np.float32)]
-            need = 4 * (sum(a.size for a in parts) + (R * O if prior is None else 3 * cap + 2 * N))
+            if own is not None:
+                nt = np.bincount(pn.astype(np.int64), minlength=N)
+                nout = int((nt * np.asarray(own)).sum())
+            need = 4 * (sum(a.size for a in parts) + ((R * O if own is None else nout) if prior is None else 3 * cap + 2 * N))
             t0 = time.time()
             buf = self._segment(need)
             o = 0
@@ -253,6 +259,8 @@ class _Server:
                 req["ref_key"] = ref_key
             if prior is not None:
                 req["prior"] = [float(prior[2]), cap]
+            if own is not None:
+                req["own"], req["own_out"] = [int(v) for v in own], nout
             self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             self.p.stdin.flush()
             ans = self.p.stdout.readline().split()
@@ -260,7 +268,10 @@ class _Server:
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
             t2 = time.time()
             self.model_key = model[0]
-            if prior is None:
+            if own is not None:
+                cut = np.cumsum(nt * np.asarray(own))[:-1]
+                out = [b.reshape(t_, -1) for b, t_ in zip(np.split(buf[o:o + nout].copy(), cut), nt)]
+            elif prior is None:
                 out = buf[o:o + R * O].reshape(R, O).copy()
             elif int(ans[1]) < 0:
                 out = None
@@ -378,7 +389,29 @@ def _window(d2, lo, lt, pn, n, window):
 _CAND_CAP = int(os.environ.get("TT_RELION_CAND_CAP", str(1 << 20)))     # candidates a batch may return before it falls back
 
 
-def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared, prior=None):
+# RELION hands over every pixel of the coarse or fine image and gives the ones it does not score (past the
+# resolution limit, and the origin) a weight of exactly zero: 21 % of the image in a 3D refinement. A pixel no
+# particle of the batch weights adds exactly nothing to any of the three sums, so the chip is not given it: 1300
+# points become 1021 on a 50-pixel coarse pass, one 1024-point chunk instead of two. TT_RELION_PIX_DROP=0: all.
+_PIX_DROP = os.environ.get("TT_RELION_PIX_DROP", "1") not in ("", "0")
+_support_of = {}        # pixel grid -> bool [P], the pixels some particle has weighted. It only grows.
+
+
+def _support(x, y, corr):
+    """-> the indices of the pixels to hand over (ascending), or None for all of them. One set per pixel grid: a
+    batch that weights a pixel outside it widens it, so the chip sees few distinct sets and never a wrong one."""
+    if not _PIX_DROP:
+        return None
+    nz = np.asarray(corr).reshape(-1, x.size).any(axis=0)
+    key = (x.size, hash(x.tobytes()), hash(y.tobytes()))
+    with _lock:
+        keep = _support_of.get(key)
+        if keep is None or nz[~keep].any():
+            keep = _support_of[key] = nz if keep is None else keep | nz
+    return None if keep.all() or not keep.any() else np.flatnonzero(keep)
+
+
+def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared, prior=None, own=None):
     """diff2 [R, O] from the resident chip op, row r = particle pn[r] at (tx[r], ty[r]). shared: the orientation set
     is the iteration's (a global coarse pass), so the chip keeps its projections; otherwise it is this call's own and
     is used once."""
@@ -386,11 +419,16 @@ def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared
     mdlX, mdlY, mdlZ = geom[:3]
     model = [hashlib.sha256(repr(_model_key(mdl_mv)).encode()).hexdigest(), *geom, mdlX * mdlY * mdlZ]
     f32 = lambda a: np.asarray(a, np.float32)  # noqa: E731
+    keep = _support(x, y, corr)
+    if keep is not None:
+        x, y = x[keep], y[keep]
+        img_r, img_i, corr = (np.asarray(a).reshape(-1, a.shape[-1])[:, keep] for a in (img_r, img_i, corr))
     s = _server()
     try:
         return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty), f32(pn),
-                    "%s.%s.%d.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size, geom[5]) if shared else None,
-                    None if prior is None else (f32(prior[0]), f32(prior[1]), float(prior[2]), _CAND_CAP))
+                    "%s.%s.%d.%s.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size,
+                                        hashlib.sha256(x.tobytes() + y.tobytes()).hexdigest()[:16], geom[5]) if shared else None,
+                    None if prior is None else (f32(prior[0]), f32(prior[1]), float(prior[2]), _CAND_CAP), own)
     finally:
         _free.put(s)
 
@@ -707,7 +745,7 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom, keep=True):
 
 def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
                        mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-                       padding_factor, imgX, imgY, shared=True, prior=None):
+                       padding_factor, imgX, imgY, shared=True, prior=None, own=None):
     """diff2 for N particles over one orientation set: float32 [R, O], one row per (particle, translation).
 
     prior = (lo [O], lt [R], window), -log of RELION's orientation and offset priors: the candidate form instead,
@@ -715,6 +753,9 @@ def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
 
     shared: the set is the iteration's (a global coarse pass), so its projections are kept for the next
     batch. A batch of particles with their own orientations passes the union of them and shared=False.
+
+    own = [on_1 .. on_N] (resident chip op only): eul is the particles' own sets one after the other, and the result
+    is the list of float32 [T_i, on_i] blocks, each particle scored on its own set alone.
 
     img_r/img_i/corr are [N, image_size]; tx, ty and pn are [R]: row r is particle pn[r] at its own offset
     (tx[r], ty[r]), so particles may bring different numbers of translations. eul is [O, 9]. The cross term is
@@ -733,6 +774,8 @@ def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
     if _RESIDENT and _BACKEND == "ttnn":
         args = (mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty, pn,
                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
+        if own is not None:
+            return _resident_d2(*args, shared=False, own=own)
         got = _resident_d2(*args, shared=shared, prior=prior)
         if got is None:                         # more candidates than the segment holds: the dense matrix, cut here
             got = _window(_resident_d2(*args, shared=shared), prior[0], prior[1], pn, len(img_r), prior[2])
@@ -780,6 +823,11 @@ _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
 _BATCH_ROWS = int(os.environ.get("TT_RELION_BATCH_ROWS", "0"))
 _OWN_ROWS = int(os.environ.get("TT_RELION_OWN_ROWS", "0"))
 _TILE_ROWS = 512
+
+
+# TT_RELION_OWN_FORM=1: a batch of particles with their own orientation sets goes to the chip as one small product
+# per particle instead (Resident.d2_own), each particle against its own set alone. Off by default.
+_OWN_FORM = os.environ.get("TT_RELION_OWN_FORM", "") not in ("", "0")
 
 
 def _take(q):
@@ -862,10 +910,13 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     st = lambda k: np.stack([b[k] for b in batch])  # noqa: E731
                     cat = lambda k: np.concatenate([b[k] for b in batch])  # noqa: E731
                     cand = prior is not None and same        # own orientation sets: the window is cut per block here
+                    own = (_OWN_FORM and not same and _RESIDENT and _BACKEND == "ttnn"
+                           and max(b["tx"].size for b in batch) <= 512)
                     res = diff2_coarse_batch(mdl_mv, batch[0]["eul"] if same else cat("eul"), cat("tx"), cat("ty"),
                                              np.repeat(np.arange(len(batch)), [b["tx"].size for b in batch]),
                                              st("ir"), st("ii"), st("w"), *geom, shared=same,
-                                             prior=(batch[0]["lo"], cat("lt"), prior[2]) if cand else None)
+                                             prior=(batch[0]["lo"], cat("lt"), prior[2]) if cand else None,
+                                             own=[len(b["eul"]) for b in batch] if own else None)
                     t_back = time.time()
                     r0 = o = 0
                     for i, b in enumerate(batch):
@@ -874,8 +925,11 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                             k0, k1 = np.searchsorted(res[0], [r0, r0 + n_t])
                             b["out"] = (res[1][k0:k1], res[0][k0:k1] - r0, res[2][k0:k1], float(res[3][i]))
                         else:
-                            r = res[r0:r0 + n_t]
-                            r = r if same else r[:, o:o + n_o]      # [T, O] view; its thread adds it in
+                            if own:
+                                r = res[i]
+                            else:
+                                r = res[r0:r0 + n_t]
+                                r = r if same else r[:, o:o + n_o]  # [T, O] view; its thread adds it in
                             if prior is not None:
                                 w_ = _window(r, b["lo"], b["lt"], np.zeros(n_t, np.int64), 1, prior[2])
                                 r = (w_[1], w_[0], w_[2], float(w_[3][0]))
