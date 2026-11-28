@@ -12,7 +12,7 @@
 R=${R:-$HOME/rlx-prep}; SRC=${SRC:-src-f}; P=${P:-pe}; S=$R/runs/$P.status; PY=${PY:-$HOME/fleet/env/bin/python}
 E2E=${E2E:-$HOME/rlx-e2e/runs}; CHIPS=${CHIPS:-16,17,18,19,20,21,22,23}; MINMEM=${MINMEM:-150}; NC=$(echo $CHIPS | tr , '\n' | wc -l); NODES=$(for c in ${CHIPS//,/ }; do echo -n "$((c + 8)) "; done)
 GIVEUP=${GIVEUP:-$(( $(date +%s) + 4 * 3600 ))}; W=$R/wisdom.360
-export R; BIN=${RELION_BIN:-$R/relion-f/build/bin/relion_refine_mpi}; SBIN=${SBIN:-$HOME/rlx-e2e/relion-s/build/bin/relion_refine_mpi}
+export R SRC; BIN=${RELION_BIN:-$R/relion-f/build/bin/relion_refine_mpi}; SBIN=${SBIN:-$HOME/rlx-e2e/relion-s/build/bin/relion_refine_mpi}
 PLAN=${PLAN:-n16a:n:16 e16a:e:16 w16a:w:16 e16b:e:16 n16b:n:16 s16a:s:16 n24a:n:24 e24a:e:24 w24a:w:24 e24b:e:24 n24b:n:24 s24a:s:24}
 say() { echo "$(date -u +%FT%TZ) $* load1 $(cut -d' ' -f1 /proc/loadavg)" >> $S; }
 stop() { [ -e $HOME/fleet/HANDBACK ] && { say HANDBACK; exit 0; }; [ $(date +%s) -gt $GIVEUP ] && { say "past give-up time"; exit 0; }; }
