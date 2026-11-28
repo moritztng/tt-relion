@@ -153,6 +153,28 @@ The gate for a whole refinement is `perf/rlx/fsc.py REF.mrc X.mrc --floor SEED.m
 reference, shell by shell, beside the reference against a second CPU run with another seed. It passes when no shell
 up to the seed pair's own resolution is more than 0.02 under the pair.
 
+### Pixels RELION weights with zero
+
+RELION hands over the whole (size / 2 + 1) x size transform and weights every pixel past its resolution limit with
+exactly zero, so about pi / 4 of the pixels carry weight (iteration 16 of the 10028 job: 1,021 of 1,300 on the
+coarse pass, 9,922 of 12,640 on the fine pass). A zero-weight pixel adds nothing to any of the three sums, so the
+bridge does not hand it to the chip (`TT_RELION_PIX_DROP`, on by default). It keeps one set per pixel grid, the
+union of the pixels any particle has weighted so far, so the chip sees one set per pass. The products run over K in
+chunks of 1,024 pixels: the coarse pass goes from two chunks to one, the fine pass from 13 to 10.
+
+Replay of 160 recorded calls on one chip against float64 (`perf/rlx/bridge/replay.py`, 13 digits, batch 32, AICLK
+1,343 to 1,350): the best pose and the significant set agree for 160 of 160 calls with the drop and without, global
+iteration and local iteration alike, and the largest error is 1.0e-3 in both. Chip seconds for the 160 calls: 5.2
+with the drop against 11.0 without (global, iteration 16), 4.3 against 5.2 (local, iteration 24).
+
+### Waking the threads
+
+RELION runs one particle per `--j` thread, and the bridge parks each thread until its batch is back. A parked thread
+is woken for its result or to collect the next batch, never because another particle arrived: with one condition for
+all, each arrival woke every parked thread (190 at `--j 192`), and the thread that stacks the batch for the chip
+waited behind them. On an idle 8-core host with 190 parked threads, stacking a 58-particle batch takes 1.2 ms alone
+and 42 ms while 64 particles arrive (`tests/test_batch.py` counts the wake-ups).
+
 ### Leaving small orientation sets to RELION
 
 `TT_RELION_MIN_ORI=<n>` declines a coarse call that brings fewer than n orientations, and the fine call that follows
