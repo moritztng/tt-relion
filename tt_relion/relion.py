@@ -835,6 +835,9 @@ _OWN_FORM = os.environ.get("TT_RELION_OWN_FORM", "") not in ("", "0")
 # when they ask: the chip waits on the server's host work, RELION's threads lose only the slices the server takes.
 # 0 (the default): off.
 _NICE = int(os.environ.get("TT_RELION_NICE", "0"))
+_SWITCH_MS = float(os.environ.get("TT_RELION_SWITCH_MS", "0"))
+if _SWITCH_MS > 0:          # how long a thread may keep the interpreter lock while another asks (CPython: 5 ms)
+    sys.setswitchinterval(_SWITCH_MS / 1e3)
 
 
 def _be_nice():
@@ -930,7 +933,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     nxt["cv"].notify()
                 _gcv.release()
                 try:
-                    t_lead = time.time()
+                    t_lead, c_lead = time.time(), time.thread_time()
                     same = all(b["eh"] == batch[0]["eh"] for b in batch)
                     st = lambda k: np.stack([b[k] for b in batch])  # noqa: E731
                     cat = lambda k: np.concatenate([b[k] for b in batch])  # noqa: E731
@@ -964,20 +967,24 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
                     _stats["lead_s"] = _stats.get("lead_s", 0.0) + t_back - t_lead
                     _stats["share_s"] = _stats.get("share_s", 0.0) + time.time() - t_back
+                    _stats["lead_cpu_s"] = _stats.get("lead_cpu_s", 0.0) + time.thread_time() - c_lead
                     n = _stats["batches"]
                     if n % 50 == 0 or n & (n - 1) == 0:     # 1, 2, 4, ... then every 50
                         # rank_cpu_s is the whole rank process (RELION's own per-particle work + the bridge),
                         # bridge_cpu_s the part spent in here; calls counts coarse and fine calls done so far.
                         # A chip waits for its next batch through lead_s - rt_s (the leader stacking the batch and
                         # copying it to the server, copy_s of it) and share_s (handing the results out); rt_s is
-                        # the server's own time.
+                        # the server's own time. lead_cpu_s is the leader thread's own CPU from the cut to the hand-out:
+                        # what is left of lead_s - rt_s + share_s after it is the leader waiting for the interpreter
+                        # lock or for a core, not working.
                         print(f"tt_relion: batches={_stats['batches']} particles="
                               f"{_stats['batched']} mean={_stats['batched'] / _stats['batches']:.2f} "
                               f"calls={_stats['handled']}+{_stats['fine_handled']} "
                               f"rank_cpu_s={time.process_time():.1f} bridge_cpu_s={_cpu['C']:.1f}+{_cpu['F']:.1f} "
                               f"lead_s={_stats['lead_s']:.1f} share_s={_stats['share_s']:.1f} "
                               f"copy_s={sum(s_.c.get('copy_s', 0) for s_ in _srv):.1f} "
-                              f"rt_s={sum(s_.c.get('rt_s', 0) for s_ in _srv):.1f}",
+                              f"rt_s={sum(s_.c.get('rt_s', 0) for s_ in _srv):.1f} "
+                              f"lead_cpu_s={_stats['lead_cpu_s']:.1f}",
                               file=sys.stderr, flush=True)
                 except Exception as exc:            # every particle of the batch declines
                     for b in batch:
