@@ -35,6 +35,17 @@ TBLK = 1 << 14  # voxels per block of the table build (1 MB of table)
 TURNS = int(os.environ.get("TT_RELION_TABLE_TURNS", "4"))   # chips of a host that upload a large table at once
 SUB = os.environ.get("TT_RELION_SUBPHASE", "") not in ("", "0")   # split prod_s (a device sync per step: a profile, not a rate)
 OPT = int(os.environ.get("TT_RELION_OP_THREADS", "4"))     # host threads that build a batch's image operand
+# Column tiles per unit of the own-form products (0: one unit per particle and digit, the widest). The fused product
+# hands whole units (digit k, row block, column block) to cores and unit k costs k + 1 digit pairs: q particles of
+# one row tile and one column block are q n unequal units, fewer than the cores of a chip, so the largest unit sets
+# the wall. Narrower units give every core several (with TT_RELION_OZ_ZIG balanced), at more B fetches per product.
+OWN_NB = int(os.environ.get("TT_RELION_OWN_NB", "0"))
+
+
+def _nb(tiles, most):
+    """the widest column block of at most `most` tiles that divides `tiles` (OWN_NB caps it)"""
+    most = min(most, OWN_NB) if OWN_NB > 0 else most
+    return max(d for d in range(1, most + 1) if tiles % d == 0)
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 FARP = 1e30     # -log prior / 2 of an excluded orientation and of a pad column: never inside a window
 
@@ -543,11 +554,11 @@ class Resident:
                 assert int(ea.min()) + int(eb.min()) - 2 * n > -126 and int(ea.max()) + int(eb.max()) < 127
                 t_ea, t_eb = self._ti(ea, nq * rr), self._ti(eb, q * On)
                 if norm:
-                    S = oz_fused(Ad, Bd, n, rb=1, nb=OBLK // 32 if q * On % OBLK == 0 else On // 32, bt=True)
+                    S = oz_fused(Ad, Bd, n, rb=1, nb=_nb(q * On // 32, OBLK // 32 if q * On % OBLK == 0 else On // 32), bt=True)
                     hi, lo = oz_combine(S, t_ea, t_eb, n)
                 else:
                     S = oz_fused(ttnn.reshape(Ad, (n * q, rr, self.Kp)), ttnn.reshape(Bd, (n * q, On, self.Kp)), n,
-                                 rb=rr // 32, nb=min(On, OBLK) // 32, bt=True, q=q, adm=True, bdm=True)
+                                 rb=rr // 32, nb=_nb(On // 32, min(On, OBLK) // 32), bt=True, q=q, adm=True, bdm=True)
                     hi, lo = oz_combine(S, t_ea, t_eb, n, q=q)
                 for t in (S, Ad, Bd):
                     if t.is_allocated():
