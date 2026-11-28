@@ -25,8 +25,6 @@ for kind, compact in (("C", False), ("F", False), ("F", True)):
     if compact:
         keep = [np.unique(np.frombuffer(r["mv"][6], np.uint64)) for r in c]
         tx, ty = [v[k] for v, k in zip(tx, keep)], [v[k] for v, k in zip(ty, keep)]
-    T = max(len(v) for v in tx)
-    pad = lambda vs: np.stack([np.pad(v, (0, T - len(v))) for v in vs])  # noqa: E731
     xr, xi, w = (np.stack([f32(r["mv"][j]) for r in c]) for j in (2, 3, 4))
     P = xr.shape[1]
     imgX = c[0]["sc"][8]
@@ -36,15 +34,16 @@ for kind, compact in (("C", False), ("F", False), ("F", True)):
     R.P, R.NC = P, -(-P // 1024)
     R.K = R.NC * 2048
     t0 = time.time()
-    A, A2, nx = R._operands(xr, xi, w * 0.5, pad(tx), pad(ty), x, y)
+    pn = np.repeat(np.arange(len(c)), [len(v) for v in tx])
+    A, A2, nx = R._operands(xr, xi, w * 0.5, np.concatenate(tx), np.concatenate(ty), pn, x, y)
     t1 = time.time()
     e = np.zeros(R.K, int)
     A, A2 = np.ldexp(A, e), np.ldexp(A2, e)
     ea, ea2 = resident._exp(np.abs(A).max(1)), resident._exp(np.abs(A2).max(1))
     A32, A232 = np.ascontiguousarray(A, np.float32), np.ascontiguousarray(A2, np.float32)
     t2 = time.time()
-    rows = len(c) * T
-    print(json.dumps(dict(kind=kind, asked_only=compact, N=len(c), T=T, P=P, rows=rows, rows_padded=-(-rows // 512) * 512,
+    rows = len(pn)
+    print(json.dumps(dict(kind=kind, asked_only=compact, N=len(c), P=P, rows=rows, rows_padded=-(-rows // 512) * 512,
                           K=R.K, O=[r["sc"][-3] if kind == "C" else r["sc"][-5] for r in c][:3],
                           operands_s=round(t1 - t0, 3), scale_cast_s=round(t2 - t1, 3),
                           upload_mb=round((A32.nbytes + A232.nbytes) / 2**20, 1))))

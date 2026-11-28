@@ -91,14 +91,16 @@ def grade(name, d):
                      d2_at_min=float(d64.min()))
 
 
-grade("once", res.d2(eul, xr, xi, w, tx, ty, x, y))
-held = res.d2(eul, xr, xi, w, tx, ty, x, y, ref_key="it")
+pn = np.repeat(np.arange(tx.shape[0]), tx.shape[1])
+d2 = lambda **k: res.d2(eul, xr, xi, w, tx.ravel(), ty.ravel(), pn, x, y, **k).reshape(*tx.shape, -1).transpose(0, 2, 1)  # noqa: E731
+grade("once", d2())
+held = d2(ref_key="it")
 grade("held_first", held)
 clk = Clock(nodes)
 ts = []
 for _ in range(a.reps):
     t0 = time.perf_counter()
-    again = res.d2(eul, xr, xi, w, tx, ty, x, y, ref_key="it")
+    again = d2(ref_key="it")
     ts.append(time.perf_counter() - t0)
 rec["aiclk_min_med"] = clk.stop()
 rec["load1"] = float(open("/proc/loadavg").read().split()[0])

@@ -163,7 +163,7 @@ if len(tb) and (tb[:, 0] >= t0).any():
     base = tb[tb[:, 0] < t0]
     # with one chip the cumulative counters difference over the window is exact; with several it is their sum
     host0, dev0 = (base[-1, 2], base[-1, 3]) if len(base) and len(chips) == 1 else (None, None)
-    rows = w[:, 4] * w[:, 5]
+    rows = w[:, 5]
     steady = dict(batches=len(w), particles_per_batch=round(float(w[:, 4].mean()), 2), rows_per_batch=round(float(rows.mean()), 1),
                   fill=round(float(rows.sum() / (np.ceil(rows / 512) * 512).sum()), 3),
                   batch_wall_ms=[round(float(v) * 1e3, 1) for v in np.percentile(w[:, 1], [5, 50, 95])],
