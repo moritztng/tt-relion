@@ -7,7 +7,8 @@
 # it ran, pose rows and half-map correlation against rlx-e2e's CPU arm and against this chain's own n arm.
 # Arms never run into a booked whole-box window (~/fleet/HOLDER.windows), stop at ~/fleet/HANDBACK and start only
 # with $MINMEM GB of MemAvailable, so a neighbour's memory-bound run is not pushed over.
-# No arm starts while $WANT exists (another row's flag that it needs these chips next; a running arm finishes).
+# No arm starts while $WANT exists (another row's flag that it needs these chips next; a running arm finishes) or
+# while a chip's lease is locked: a neighbour inside its start check holds the leases before it opens the nodes.
 # An arm whose line is already in the status file is skipped, so a restarted chain goes on where the last one stopped.
 # Env: PLAN (arms as tag:mode:iteration), SBIN, CHIPS (16,...,23; chip C in 16-23 is node C+8), MINMEM (150), R (~/rlx-prep), SRC (tree under $R, src-f; exported, iter_ab.sh takes its Python tree and run.sh from it), RELION_BIN, P (tag prefix, pe), GIVEUP (epoch), E2E (~/rlx-e2e/runs), WANT ($E2E/WANT-20-23).
 R=${R:-$HOME/rlx-prep}; SRC=${SRC:-src-f}; P=${P:-pe}; S=$R/runs/$P.status; PY=${PY:-$HOME/fleet/env/bin/python}
@@ -19,6 +20,7 @@ PLAN=${PLAN:-n16a:n:16 e16a:e:16 w16a:w:16 e16b:e:16 n16b:n:16 s16a:s:16 n24a:n:
 say() { echo "$(date -u +%FT%TZ) $* load1 $(cut -d' ' -f1 /proc/loadavg)" >> $S; }
 stop() { [ -e $HOME/fleet/HANDBACK ] && { say HANDBACK; exit 0; }; [ $(date +%s) -gt $GIVEUP ] && { say "past give-up time"; exit 0; }; }
 busy() { [ -n "$(fuser /dev/tenstorrent/$1 2>/dev/null)" ]; }
+leases() { for c in ${CHIPS//,/ }; do f=${RLX_LEASE_DIR:-/tmp/tt-bio-device-leases}/$(hostname)-card$c.json; [ -e $f ] || continue; grep -q "FLOCK.*:$(stat -c %i $f) 0 EOF" /proc/locks && return 1; done; return 0; }   # read from /proc/locks, the lock is never taken to test it
 avail() { awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo; }
 room() { now=$(date +%s); r=86400       # seconds until 2 min before the next window of another row; 0 inside one
   while read -r slug a b _; do case "$slug" in ""|\#*|rlx*) continue;; esac
@@ -26,9 +28,9 @@ room() { now=$(date +%s); r=86400       # seconds until 2 min before the next wi
     [ $now -ge $e ] && continue
     d=$(( s - 120 - now )); [ $d -lt 0 ] && d=0; [ $d -lt $r ] && r=$d
   done < $HOME/fleet/HOLDER.windows; echo $r; }
-slot() {    # wait for $1 s of room, the memory floor and every chip of $CHIPS free; sets END
+slot() {    # wait for $1 s of room, the memory floor, no want file and every chip of $CHIPS free (lease and node); sets END
   while :; do stop
-    if [ ! -e $WANT ] && [ $(room) -ge $1 ] && [ $(avail) -ge $MINMEM ]; then
+    if [ ! -e $WANT ] && leases && [ $(room) -ge $1 ] && [ $(avail) -ge $MINMEM ]; then
       n=0; for d in $NODES; do busy $d || n=$((n + 1)); done
       [ $n = $NC ] && break
     fi; sleep 20
