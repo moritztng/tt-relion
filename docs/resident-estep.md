@@ -119,17 +119,21 @@ recorded global finer iteration (80 coarse and 80 fine calls):
 The error is on a squared difference near 1,050 (coarse) and 9,800 (fine). The device server runs 16 digits
 (`TT_RELION_DIGITS`).
 
-That table is against the float32 host arm. Against float64 the 16 digit op reads low on every sample: the norm
-term sum w |P|^2 multiplies two positive operands, so the digit pairs the product drops all carry the same sign.
-The cross term's dropped pairs cancel. The norm product therefore takes its own digit count
-(`TT_RELION_NORM_DIGITS`, default 20); it is one row per particle, so the rate does not move. Measured on chip
-against float64 digests of 160 recorded calls each, 16 digits everywhere else:
+That table is against the float32 host arm and predates the balance fix. Against float64 the 16 digit op read
+low on every sample (0.17 to 0.33 on a squared difference near 10,000). The cause: image columns outside the
+projection radius, where every reference is zero, kept exponent 0 in the balance and set the row scale, so half
+the digits went to columns that multiply zeros. The norm term sum w |P|^2 showed it because both its operands
+are positive and the dropped digit pairs add up; in the cross term they cancel. The balance now zeroes those
+columns (exact). Two chip measurements against float64 digests of 160 recorded calls each bracket it. Before the
+balance fix, with the norm product alone given more digits (`TT_RELION_NORM_DIGITS`, off by default):
 
 | norm digits | global it016, fine: bias / max error / sets | local it024, coarse: bias / max error / sets |
 |---|---|---|
 | 16 | -0.174 / 0.302 / 80 of 80 | -0.286 / 0.396 / 78 of 80 |
 | 20 | -0.0002 / 0.0019 / 80 of 80 | -0.0003 / 0.0029 / 80 of 80 |
 | 24 | 0.0000 / 0.0012 / 80 of 80 | 0.0000 / 0.0019 / 80 of 80 |
+
+With the balance fix at 16 digits everywhere the largest error is 0.001 on all four passes and every significant set matches (rlx-e2e, chip replays of the same records).
 
 Run the gate after every change to the op, the bridge or the batch form, then grade one
 iteration through RELION against the CPU arm continued from the same state (`perf/rlx/iter_ab.sh`, `star_cmp.py`).
