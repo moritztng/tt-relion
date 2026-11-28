@@ -29,6 +29,8 @@ ap.add_argument("--rec", required=True)
 ap.add_argument("--think", type=float, default=1.0, help="scale of the recorded gap between a thread's calls")
 ap.add_argument("--threads", type=int, default=0, help="0: as recorded; else deal the particles over this many")
 ap.add_argument("--limit", type=int, default=0, help="first N calls only")
+ap.add_argument("--warm", type=int, default=0, help="run the first N calls before the clock starts (device open, "
+                "kernel compile, model upload and the shared projections are paid once per iteration, not per batch)")
 ap.add_argument("--out", default="replay.jsonl")
 ap.add_argument("--digest", default="")
 ap.add_argument("--ref", default="")
@@ -36,6 +38,7 @@ ap.add_argument("--tag", default="")
 a = ap.parse_args()
 
 err = a.out + ".%d.err" % os.getpid()               # the device servers inherit fd 2: their exit lines land here
+os.environ["TT_RELION_BATCHLOG"] = "1"              # and one TTB line per chip batch
 sys.stderr.flush()
 os.dup2(os.open(err, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644), 2)
 
@@ -78,9 +81,9 @@ def digest(i, d2):
     h_sig[i] = hashlib.sha256(np.sort(o[:k]).tobytes()).digest()[:16]
 
 
-def lane(q):
+def lane(q, timed=True):
     for r in q:
-        if a.think and r["gap"]:
+        if timed and a.think and r["gap"]:
             time.sleep(r["gap"] * a.think)
         args, out = record.args(models, euls, r)
         fn = relion.diff2_coarse if r["k"] == "C" else relion.diff2_fine
@@ -114,6 +117,16 @@ class Clock(threading.Thread):
             time.sleep(0.25)
 
 
+if a.warm:
+    th = [threading.Thread(target=lane, args=([r for r in q if r["i"] < a.warm], False)) for q in lanes]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join()
+    lanes = [[r for r in q if r["i"] >= a.warm] for q in lanes]
+    n_timed = n - min(n, a.warm)
+else:
+    n_timed = n
 load0 = open("/proc/loadavg").read().split()[0]
 clk = Clock()
 clk.start()
@@ -142,13 +155,29 @@ for m in re.finditer(r"^TTDEV chip=(\S+) calls=(\d+) busy_s=([0-9.]+) up_s=([0-9
         c["fill"] = round(c["rows"] / max(1, c["rows_padded"]), 3)
     c["busy_frac"] = round(c.get("dev_s", c["busy_s"]) / wall, 3)
     chips.append(c)
+# The timed window alone, from the servers' per-batch lines (cumulative host and chip seconds of the resident op).
+tb = np.array([[float(v) for v in m.group(1).split()] for m in re.finditer(r"^TTB (.*)$", log, re.M)]).reshape(-1, 8)
+steady = None
+if len(tb) and (tb[:, 0] >= t0).any():
+    w = tb[tb[:, 0] >= t0]
+    base = tb[tb[:, 0] < t0]
+    # with one chip the cumulative counters difference over the window is exact; with several it is their sum
+    host0, dev0 = (base[-1, 2], base[-1, 3]) if len(base) and len(chips) == 1 else (None, None)
+    rows = w[:, 4] * w[:, 5]
+    steady = dict(batches=len(w), particles_per_batch=round(float(w[:, 4].mean()), 2), rows_per_batch=round(float(rows.mean()), 1),
+                  fill=round(float(rows.sum() / (np.ceil(rows / 512) * 512).sum()), 3),
+                  batch_wall_ms=[round(float(v) * 1e3, 1) for v in np.percentile(w[:, 1], [5, 50, 95])],
+                  server_busy_frac=round(float(w[:, 1].sum()) / wall / max(1, len(chips)), 3))
+    if host0 is not None:
+        steady.update(host_s=round(float(w[-1, 2] - host0), 3), dev_s=round(float(w[-1, 3] - dev0), 3),
+                      chip_busy_frac=round(float(w[-1, 3] - dev0) / wall, 3))
 
 st = relion.stats()
 res = dict(tag=a.tag, rec=os.path.basename(a.rec), backend=os.environ.get("TT_RELION_BACKEND", "torch"),
            resident=os.environ.get("TT_RELION_RESIDENT", ""), batch=os.environ.get("TT_RELION_BATCH", ""),
            rank_chips=os.environ.get("RLX_RANK_CHIPS", ""), threads=len(lanes), think=a.think, calls=n,
-           coarse=sum(r["k"] == "C" for r in calls), handled=int(handled.sum()), wall_s=round(wall, 3),
-           calls_per_s=round(n / wall, 2), recorded_span_s=round(max(r["t1"] for r in calls) - min(r["t0"] for r in calls), 3),
+           coarse=sum(r["k"] == "C" for r in calls), handled=int(handled.sum()), warm=a.warm, wall_s=round(wall, 3),
+           calls_per_s=round(n_timed / wall, 2), steady=steady, recorded_span_s=round(max(r["t1"] for r in calls) - min(r["t0"] for r in calls), 3),
            recorded_gap_s=round(sum(r["gap"] for r in calls), 3), batches=st.get("batches", 0),
            mean_batch=round(st.get("batched", 0) / max(1, st.get("batches", 0)), 2), chips=chips,
            busy_frac=round(float(np.mean([c["busy_frac"] for c in chips])), 3) if chips else None,
@@ -156,7 +185,7 @@ res = dict(tag=a.tag, rec=os.path.basename(a.rec), backend=os.environ.get("TT_RE
            nodes=sorted(clk.nodes), load1=[load0, open("/proc/loadavg").read().split()[0]])
 if a.digest:
     np.savez(a.digest, arg_min=arg_min, d_min=d_min, n_sig=n_sig, h_sig=h_sig, handled=handled)
-if a.ref:
+if a.ref and os.path.exists(a.ref):
     ref = np.load(a.ref)
     ok = handled & ref["handled"]
     res.update(ref=os.path.basename(a.ref), compared=int(ok.sum()),
