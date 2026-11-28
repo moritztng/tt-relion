@@ -1,6 +1,6 @@
 #!/bin/bash
 # Timed RLX runs on a rented 8-GPU box. Runs as root in /work, detached; progress in /work/box.log, DONE/FAILED marker.
-# Inputs in /work: subset.py, stage.sh, check_stacks.py, refine_cmd.sh, and either relion-builds.tgz or build.sh
+# Inputs in /work: subset.py, stage.sh, check_stacks.py, refine_cmd.sh, tsline.py, phases.py, and either relion-builds.tgz or build.sh
 # plus the two patches (then it builds while the data stages).
 #   box_timed.sh <a100|b200> "<ranks j pool;...>|auto" <seeds> [stock]
 # auto = 1, 2, 3 ranks per GPU plus a leader, --j min(6, cores/ranks), --pool 100 (NVIDIA's run_relion.sh), and
@@ -19,14 +19,15 @@ apt-get update -qq && apt-get install -y -qq git cmake build-essential libopenmp
 [ -s shiny_2sets.star ] || curl -sf https://ftp.ebi.ac.uk/empiar/world_availability/10028/data/Particles/shiny_2sets.star -o shiny_2sets.star || fail star
 python3 subset.py shiny_2sets.star dev.star > dev.txt && python3 subset.py shiny_2sets.star full.star --n 0 > full.txt || fail subset
 if [ -s relion-builds.tgz ]; then tar -C /opt -xzf relion-builds.tgz || fail untar; BP=
-else ARCH=80; [ $KIND = b200 ] && ARCH=100; bash build.sh fair:$ARCH stock:$ARCH:stock > build.log 2>&1 & BP=$!; fi
+else ARCH=80; [ $KIND = b200 ] && ARCH=100; bash build.sh fair:$ARCH ${STOCK:+stock:$ARCH:stock} > build.log 2>&1 & BP=$!; fi
 # The dev cell (1/8) stages first and the sweep runs on it while nothing else is paid for, so a config that cannot run
 # costs minutes, not the 2 h full staging (11-26: 51 GB staged, then every config aborted at iteration 2).
 bash stage.sh data dev.txt || fail stage; cp dev.star full.star data/
 [ -z "$BP" ] || { wait $BP || { tail -30 build.log; fail build; }; cat build.log; st built; }
 FAIR=/opt/relion-fair; [ $KIND = b200 ] && [ -d /opt/relion-fair100 ] && FAIR=/opt/relion-fair100
 nvidia-cuda-mps-control -d && st "MPS on" || st "MPS unavailable"
-NG=$(nvidia-smi -L | wc -l) NC=$(nproc)
+NG=$(nvidia-smi -L | wc -l) NC=$(nproc) NGPU_SCREEN=8
+st "THP $(cat /sys/kernel/mm/transparent_hugepage/enabled) GLIBC_TUNABLES default glibc.malloc.hugetlb=1 (refine_cmd.sh)"
 # Gold-standard refine needs an odd rank count (leader + even followers), so on one GPU 1 and 3 followers per GPU
 # would be 2 and 4 ranks and abort; use 2, 4, 6 followers there.
 F="1 2 3"; [ $((NG % 2)) = 1 ] && F="2 4 6"
@@ -35,6 +36,7 @@ F="1 2 3"; [ $((NG % 2)) = 1 ] && F="2 4 6"
 smi(){ nvidia-smi --query-gpu=timestamp,index,clocks.sm,power.draw,utilization.gpu,memory.used --format=csv -l 1 > smi-$1.csv 2>&1 & echo $!; }
 run(){ local name=$1 relion=$2 star=$3 n=$4 j=$5 p=$6 s=$7 x=${8:-} pid; rm -rf $name; pid=$(smi $name); st "run $name start ($n ranks --j $j --pool $p seed $s)"
   bash refine_cmd.sh $relion data $star $name $n $j $p $s "" "$x" > $name.out 2>&1; local rc=$?; kill $pid
+  [ -s phases.py ] && python3 phases.py $name.out $NGPU_SCREEN > $name.phases 2>&1 && st "run $name $(tail -2 $name.phases | tr '\n' ' ')"
   st "run $name rc=$rc wall=$(awk -F': ' '/Elapsed/{print $2}' $name/time-v.txt) $(grep -h 'Auto-refine: Refinement has converged\|Final resolution' $name.out | tail -1)"; return $rc; }
 best= bt=
 IFS=';' read -ra CS <<< "$CONFIGS"
