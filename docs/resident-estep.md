@@ -95,3 +95,27 @@ The batch call goes in `MlOptimiser::expectationSomeParticles`, before the threa
 
 Each particle that the batch did not cover (declined shape, broken chip) runs RELION's own code unchanged, so a
 failure degrades to the CPU path instead of failing the run.
+
+### Parity of the RELION-called path
+
+The chip op is checked against float64 on synthetic operands (`perf/rlx/resident/d2_parity.py`), and that is not
+enough. Two defects passed it and were found only when RELION called the op on real data: the chip kept the radius cut
+of the coarse pass for the fine pass's references (the model is uploaded once, the cut belongs to the pass), and 13
+base-4 digits per operand were too few for a real spectrum, where a few low-frequency columns set the scale of a row.
+Together they changed the pose of one particle in eight in a single iteration.
+
+So the gate for this path is the recorded call stream: `TT_RELION_RECORD` writes what a rank asked the bridge, and
+`perf/rlx/bridge/replay_gate.sh` replays it on a chip and compares every call with the CPU digest of the same record,
+coarse and fine pass apart (a mixed count hides a broken pass: 122 of 160 looks like noise, 43 of 80 does not). On a
+recorded global finer iteration (80 coarse and 80 fine calls):
+
+| digits | coarse: same argmin / same significant set / max error | fine |
+|---|---|---|
+| 13 | 79 / 80 / 0.26 | 79 / 78 / 9.2 |
+| 14 | 80 / 80 / 0.063 | 79 / 80 / 3.2 |
+| 15 | 80 / 80 / 0.011 | 79 / 79 / 0.84 |
+| 16 | 80 / 80 / 0.004 | 80 / 80 / 0.31 |
+
+The error is on a squared difference near 1,050 (coarse) and 9,800 (fine). The device server runs 16 digits
+(`TT_RELION_DIGITS`). Run the gate after every change to the op, the bridge or the batch form, then grade one
+iteration through RELION against the CPU arm continued from the same state (`perf/rlx/iter_ab.sh`, `star_cmp.py`).
