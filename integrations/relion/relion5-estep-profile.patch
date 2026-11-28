@@ -1,6 +1,7 @@
 Give RELION's ALTCPU CTIC/CTOC macros a thread-safe body, so the E-step's stage split is observable.
 
-Applies on top of relion5-tt.patch (it needs src/acc/tt/ to exist). One file changes. Accumulation is
+Applies on top of relion5-tt.patch (it needs src/acc/tt/ to exist). Two files change: the macros, and one
+CTIC/CTOC pair around runWavgKernel, which RELION leaves unbracketed inside "maximization". Accumulation is
 always compiled in; TT_RELION_PROFILE=1 gates the report, so the same binary serves a timed arm and a
 profiled arm. See src_acc_tt/tt_profile.h for why neither RELION's -DTIMING timers nor its own CTIC
 macros can produce this number.
@@ -24,3 +25,22 @@ index a8daa31..baab47b 100644
  #define	GATHERGPUTIMINGS(timer) 
  
  namespace CpuKernels
+diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
+--- a/src/acc/acc_ml_optimiser_impl.h
++++ b/src/acc/acc_ml_optimiser_impl.h
+@@ -3294,6 +3294,7 @@
+ 						op.local_Minvsigma2.zdim,
+ 						op.local_Minvsigma2.xdim-1);
+ 
++				CTIC(accMLO->timer,"wavg");
+ 				runWavgKernel(
+ 						projKernel,
+ 						~eulers[iclass],
+@@ -3319,6 +3320,7 @@
+ 						ctf_premultiplied,
+ 						accMLO->dataIs3D,
+ 						accMLO->classStreams[iclass]);
++				CTOC(accMLO->timer,"wavg");
+ 
+ 				AAXA_pos += image_size;
+ 				classPos += orientation_num*translation_num;
