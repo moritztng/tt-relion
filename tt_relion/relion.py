@@ -482,15 +482,17 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         t0, c0 = time.time(), time.thread_time()    # bridge wall and CPU per call, summed over threads
         t = _torch()
         geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
-        if _BATCH > 1:
-            acc = _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom,
-                           orientation_num).reshape(-1)
+        out = np.frombuffer(out_mv, dtype=np.float32)
+        if _BATCH > 1:              # [T, O], this thread's rows of the batch result; RELION's block is [O, T]
+            acc = _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num)
+            _book("C_s", time.time() - t0)
+            out = out.reshape(orientation_num, -1)
+            out += acc.T
         else:
             acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                                *geom, orientation_num, translation_num, image_size, "C")
-        _book("C_s", time.time() - t0)
-        out = np.frombuffer(out_mv, dtype=np.float32)
-        out += acc
+            _book("C_s", time.time() - t0)
+            out += acc
         _book_cpu("C", c0)
         _stats["handled"] += 1
         return True
@@ -537,16 +539,16 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
         # translations (8 of 148 at a global finer pass). Only those are scored, as in RELION's own kernel.
         trans, trans_idx = np.unique(np.frombuffer(trans_idx_mv, dtype=np.uint64), return_inverse=True)
         tx, ty = (np.frombuffer(mv, dtype=np.float32)[trans] for mv in (tx_mv, ty_mv))
-        if _BATCH > 1:
-            acc = _collect(mdl_mv, eul_mv, tx, ty, re_mv, im_mv, corr_mv, geom,
-                           orientation_num).reshape(-1)
+        out = np.frombuffer(out_mv, dtype=np.float32)
+        if _BATCH > 1:              # [T, O], this thread's rows of the batch result
+            acc = _collect(mdl_mv, eul_mv, tx, ty, re_mv, im_mv, corr_mv, geom, orientation_num)
+            _book("F_s", time.time() - t0)
+            out += acc[trans_idx, rot_idx.astype(np.intp)] + np.float32(sum_init)
         else:
             acc = _dense_diff2(t, mdl_mv, eul_mv, tx, ty, re_mv, im_mv, corr_mv,
                                *geom, orientation_num, len(trans), image_size, "F")
-        _book("F_s", time.time() - t0)
-        take = rot_idx * np.uint64(len(trans)) + trans_idx.astype(np.uint64)
-        out = np.frombuffer(out_mv, dtype=np.float32)
-        out += acc[take] + np.float32(sum_init)
+            _book("F_s", time.time() - t0)
+            out += acc[rot_idx * np.uint64(len(trans)) + trans_idx.astype(np.uint64)] + np.float32(sum_init)
         _book_cpu("F", c0)
         _stats["fine_handled"] += 1
         return True
@@ -722,7 +724,7 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     for b in batch:
                         n_t, n_o = b["tx"].size, len(b["eul"])
                         r = res[r0:r0 + n_t]
-                        b["out"] = np.ascontiguousarray((r if same else r[:, o:o + n_o]).T)        # [O, T]
+                        b["out"] = r if same else r[:, o:o + n_o]   # [T, O] view; its thread adds it in
                         r0, o = r0 + n_t, o + n_o
                     _stats["batches"] = _stats.get("batches", 0) + 1
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
