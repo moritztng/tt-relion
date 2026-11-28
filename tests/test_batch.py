@@ -219,3 +219,33 @@ def test_batch_candidate_form_is_the_window_of_the_dense_matrix():
                                     prior=(lo, lt, 25.0))
     want = relion._window(d, lo, lt, np.repeat(np.arange(n), T), n, 25.0)
     assert all(np.array_equal(a, b) for a, b in zip(got, want)) and len(got[0]) > n and 3 not in got[1]
+
+
+def test_threads_collect_the_candidate_form():
+    """The candidate form through the collector: each thread gets its own particle's window, whatever batch it
+    rode in, equal to the window of its own dense rows."""
+    import threading
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case()
+    n, T, O = tx.shape[0], tx.shape[1], eul.shape[0]
+    rng = np.random.default_rng(9)
+    lo, lt = rng.uniform(0, 4, O).astype(np.float32), rng.uniform(0, 6, (n, T)).astype(np.float32)
+    d = relion.diff2_coarse_batch(mdl, eul, tx.ravel(), ty.ravel(), np.repeat(np.arange(n), T), ir, ii, corr, **g)
+    geom = tuple(g[k] for k in ("mdlX", "mdlY", "mdlZ", "mdlInitY", "mdlInitZ", "maxR", "maxR2_padded",
+                                "padding_factor", "imgX", "imgY"))
+    outs = [None] * n
+    relion._BATCH, relion._BATCH_WAIT = 4, 0.2
+
+    def run(p):
+        outs[p] = relion._collect(memoryview(mdl), memoryview(eul.ravel()), memoryview(tx[p].copy()),
+                                  memoryview(ty[p].copy()), memoryview(ir[p].copy()), memoryview(ii[p].copy()),
+                                  memoryview(corr[p].copy()), geom, O, prior=(lo, lt[p], 25.0))
+    try:
+        th = [threading.Thread(target=run, args=(p,)) for p in range(n)]
+        [t.start() for t in th]
+        [t.join() for t in th]
+    finally:
+        relion._BATCH = 0
+    for p in range(n):
+        r, o, dl, best = relion._window(d[p * T:(p + 1) * T], lo, lt[p], np.zeros(T, np.int64), 1, 25.0)
+        assert np.array_equal(outs[p][0], o) and np.array_equal(outs[p][1], r)
+        assert np.abs(outs[p][2] - dl).max() < 1e-4 and abs(outs[p][3] - best[0]) < 1e-6 * abs(best[0])

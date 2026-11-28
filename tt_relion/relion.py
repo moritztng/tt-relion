@@ -717,13 +717,18 @@ def _book_cpu(k, c0):
         _cpu[k] += time.thread_time() - c0
 
 
-def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num):
+def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num, prior=None):
     """Queue this particle with its group. One waiter at a time collects a batch; it hands the lead on when it
-    cuts the batch, so batches run side by side on a rank's chips and the queue fills behind a busy chip."""
+    cuts the batch, so batches run side by side on a rank's chips and the queue fills behind a busy chip.
+
+    prior = (lo [O], lt [T], window): the candidate form. The particle then gets (orientation int32, translation
+    int32, delta float32, best) for its samples within window of its best instead of its [T, O] rows."""
     import hashlib
     eul = np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9).copy()
-    key = (_model_key(mdl_mv), geom)
-    item = {"eul": eul, "eh": hashlib.sha256(eul.tobytes()).digest(),
+    key = (_model_key(mdl_mv), geom, None if prior is None else float(prior[2]))
+    lo, lt = (None, None) if prior is None else (np.array(prior[0], np.float32), np.array(prior[1], np.float32))
+    item = {"eul": eul, "eh": hashlib.sha256(eul.tobytes() + (b"" if lo is None else lo.tobytes())).digest(),
+            "lo": lo, "lt": lt,
             "tx": np.frombuffer(tx_mv, dtype=np.float32).copy(),
             "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
             "ir": np.frombuffer(re_mv, dtype=np.float32).copy(),
@@ -759,14 +764,24 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                     same = all(b["eh"] == batch[0]["eh"] for b in batch)
                     st = lambda k: np.stack([b[k] for b in batch])  # noqa: E731
                     cat = lambda k: np.concatenate([b[k] for b in batch])  # noqa: E731
+                    cand = prior is not None and same        # own orientation sets: the window is cut per block here
                     res = diff2_coarse_batch(mdl_mv, batch[0]["eul"] if same else cat("eul"), cat("tx"), cat("ty"),
                                              np.repeat(np.arange(len(batch)), [b["tx"].size for b in batch]),
-                                             st("ir"), st("ii"), st("w"), *geom, shared=same)        # [R, O]
+                                             st("ir"), st("ii"), st("w"), *geom, shared=same,
+                                             prior=(batch[0]["lo"], cat("lt"), prior[2]) if cand else None)
                     r0 = o = 0
-                    for b in batch:
+                    for i, b in enumerate(batch):
                         n_t, n_o = b["tx"].size, len(b["eul"])
-                        r = res[r0:r0 + n_t]
-                        b["out"] = r if same else r[:, o:o + n_o]   # [T, O] view; its thread adds it in
+                        if cand:                # rows come back in order: this particle's are one run
+                            k0, k1 = np.searchsorted(res[0], [r0, r0 + n_t])
+                            b["out"] = (res[1][k0:k1], res[0][k0:k1] - r0, res[2][k0:k1], float(res[3][i]))
+                        else:
+                            r = res[r0:r0 + n_t]
+                            r = r if same else r[:, o:o + n_o]      # [T, O] view; its thread adds it in
+                            if prior is not None:
+                                w_ = _window(r, b["lo"], b["lt"], np.zeros(n_t, np.int64), 1, prior[2])
+                                r = (w_[1], w_[0], w_[2], float(w_[3][0]))
+                            b["out"] = r
                         r0, o = r0 + n_t, o + n_o
                     _stats["batches"] = _stats.get("batches", 0) + 1
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
