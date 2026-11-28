@@ -470,6 +470,25 @@ def _marshal(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, orientation_nu
             np.frombuffer(corr_mv, dtype=np.float32).copy())
 
 
+# TT_RELION_MIN_ORI=<n>: a coarse call that brings fewer than n orientations is declined, and so is the fine call
+# that follows it on the same thread (RELION runs one particle per thread, coarse then fine). In a local search a
+# particle brings a few hundred orientations of its own, a chip tile cannot be filled and RELION's own kernel is
+# the faster one; the chips keep the global passes. 0 (the default) takes every call.
+_MIN_ORI = int(os.environ.get("TT_RELION_MIN_ORI", "0"))
+
+
+def _small(orientation_num=None):
+    """True when this call stays with RELION's kernel. The coarse call decides, the fine call asks."""
+    if not _MIN_ORI:
+        return False
+    if orientation_num is not None:
+        _tl.small = orientation_num < _MIN_ORI
+    if getattr(_tl, "small", False):
+        _stats["declined_small"] = _stats.get("declined_small", 0) + 1
+        return True
+    return False
+
+
 def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
                  mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
                  padding_factor, imgX, imgY,
@@ -479,6 +498,8 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         if _BACKEND == "null":
             _marshal(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, orientation_num)
         _stats["declined"] += 1
+        return False
+    if _small(orientation_num):
         return False
     try:
         t0, c0 = time.time(), time.thread_time()    # bridge wall and CPU per call, summed over threads
@@ -531,6 +552,8 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     if _BACKEND in ("nullbase", "null"):
         # Only has to cost what an entry-and-decline costs, so that the coarse arms differ in one term.
         _stats["fine_declined"] += 1
+        return False
+    if _small():
         return False
     try:
         t0, c0 = time.time(), time.thread_time()    # bridge wall and CPU per call, summed over threads

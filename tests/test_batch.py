@@ -187,3 +187,30 @@ def test_batch_is_cut_by_rows():
         rel = np.abs(outs[p] - refs[p]).max() / np.abs(refs[p]).max()
         assert rel < 1e-5, (p, rel)
         assert outs[p].argmin() == refs[p].argmin()
+
+
+def test_small_orientation_sets_stay_with_relion():
+    """TT_RELION_MIN_ORI: a coarse call under the threshold is declined untouched, and so is the fine call after it
+    on the same thread; a call at or over the threshold is handled, and its fine call too."""
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case(seed=2, n=2, T=24)
+    T, O = tx.shape[1], eul.shape[0]
+    sc = (g["mdlX"], g["mdlY"], g["mdlZ"], g["mdlInitY"], g["mdlInitZ"], g["maxR"], g["maxR2_padded"],
+          g["padding_factor"], g["imgX"], g["imgY"])
+    mv = lambda p: [memoryview(v) for v in (mdl, eul.ravel(), tx[p], ty[p], ir[p], ii[p], corr[p])]  # noqa: E731
+    rot, trn = np.arange(8, dtype=np.uint64), np.arange(8, dtype=np.uint64)
+    fine = lambda out: relion.diff2_fine(*mv(0), memoryview(rot), memoryview(trn), memoryview(out), *sc, 0.5,  # noqa: E731
+                                         O, T, 8, P, 8)
+    keep, n0 = relion._MIN_ORI, relion._stats.get("declined_small", 0)
+    try:
+        relion._MIN_ORI = O + 1
+        out, fo = np.zeros(O * T, np.float32), np.zeros(8, np.float32)
+        assert relion.diff2_coarse(*mv(0), memoryview(out), *sc, O, T, P) is False and not out.any()
+        assert fine(fo) is False and not fo.any()
+        assert relion._stats["declined_small"] == n0 + 2
+        relion._MIN_ORI = O
+        assert relion.diff2_coarse(*mv(0), memoryview(out), *sc, O, T, P) is True and out.any()
+        assert fine(fo) is True and fo.any()
+        assert relion._stats["declined_small"] == n0 + 2
+    finally:
+        relion._MIN_ORI = keep
+        relion._tl.__dict__.pop("small", None)
