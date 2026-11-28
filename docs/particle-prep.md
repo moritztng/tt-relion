@@ -47,7 +47,8 @@ the unmasked transform the same bits as RELION's. Delete the file after changing
 
 ## Accuracy
 
-`tt_relion/prep.py` is a float64 reference of the whole function. `TT_RELION_RECORD_PREP=<dir>` makes RELION write
+`tt_relion/prep.py` is a float64 reference of the whole function (`tests/test_prep.py` checks each of its pieces
+against RELION's definitions written out as loops). `TT_RELION_RECORD_PREP=<dir>` makes RELION write
 the inputs and outputs of the first particles, and `perf/rlx/prep/check_prep.py <dir>` grades them. Worst relative
 L2 error over 32 real particles per iteration type:
 
