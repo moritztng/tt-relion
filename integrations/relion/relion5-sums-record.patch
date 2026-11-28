@@ -1,0 +1,115 @@
+Record storeWeightedSums for a float64 reference (TT_RELION_RECORD_SUMS, src_acc_tt/tt_sums_record.h).
+
+Applies on top of relion5-tt.patch and relion5-estep-profile.patch. Three calls, each one branch when recording
+is off: after RELION's wavg kernel, after its backprojection kernel (which is then run once more into an empty
+volume, so the record holds what one particle adds), and before a particle's sums are added to wsum_model.
+
+diff --git a/src/acc/acc_helper_functions_impl.h b/src/acc/acc_helper_functions_impl.h
+index 23dcc416..7752d928 100644
+--- a/src/acc/acc_helper_functions_impl.h
++++ b/src/acc/acc_helper_functions_impl.h
+@@ -14,6 +14,7 @@
+ */
+ #ifdef _TT_ENABLED
+ #include "src/acc/tt/tt_bridge.h"
++#include "src/acc/tt/tt_sums_record.h"
+ #endif
+ 
+ #ifdef _CUDA_ENABLED
+@@ -504,6 +505,21 @@ void runWavgKernel(
+ #elif _HIP_ENABLED
+ 	LAUNCH_HANDLE_ERROR(hipGetLastError());
+ #endif
++#ifdef _TT_ENABLED
++	// TT_RELION_RECORD_SUMS only: this particle's operands and what the kernel above made of them.
++	if (projector.mdlZ != 0 && !data_is_3D)
++		TTSumsRecord::wavg(
++				(const float*)projector.mdlComplex,
++				projector.mdlX, projector.mdlXY / projector.mdlX, projector.mdlZ,
++				projector.mdlInitY, projector.mdlInitZ,
++				projector.maxR, projector.maxR2_padded, projector.padding_factor,
++				projector.imgX, projector.imgY,
++				eulers, Fimg_real, Fimg_imag, trans_x, trans_y, sorted_weights, ctfs,
++				wdiff2s_parts, wdiff2s_AA, wdiff2s_XA,
++				(long)orientation_num, (long)translation_num, (long)image_size,
++				(double)op.sum_weight, (double)op.significant_weight, (double)part_scale,
++				refs_are_ctf_corrected, ctf_premultiplied);
++#endif
+ }
+ 
+ void runBackProjectKernel(
+@@ -1091,6 +1107,35 @@ void runBackProjectKernel(
+ 		LAUNCH_HANDLE_ERROR(hipGetLastError());
+ 	#endif
+ 	}
++#ifdef _TT_ENABLED
++	// TT_RELION_RECORD_SUMS only: the same kernel once more into an empty volume, so the record holds
++	// what this particle alone adds (the shared volume is written by every thread).
++	if (BP.mdlZ != 1 && !do_grad && !data_is_3D && TTSumsRecord::active())
++	{
++		std::vector<XFLOAT> sr(BP.mdlXYZ, 0), si(BP.mdlXYZ, 0), sw(BP.mdlXYZ, 0);
++		if (ctf_premultiplied)
++			CpuKernels::backprojectRef3D<true>(imageCount,
++				d_img_real, d_img_imag, trans_x, trans_y, d_weights, d_Minvsigma2s, d_ctfs,
++				translation_num, significant_weight, weight_norm, d_eulers,
++				sr.data(), si.data(), sw.data(),
++				BP.maxR, BP.maxR2, (XFLOAT)BP.padding_factor,
++				(unsigned)imgX, (unsigned)imgY, (unsigned)imgZ, (size_t)imgX*(size_t)imgY*(size_t)imgZ,
++				(unsigned)BP.mdlX, (unsigned)BP.mdlY, BP.mdlInitY, BP.mdlInitZ, BP.mutexes);
++		else
++			CpuKernels::backprojectRef3D<false>(imageCount,
++				d_img_real, d_img_imag, trans_x, trans_y, d_weights, d_Minvsigma2s, d_ctfs,
++				translation_num, significant_weight, weight_norm, d_eulers,
++				sr.data(), si.data(), sw.data(),
++				BP.maxR, BP.maxR2, (XFLOAT)BP.padding_factor,
++				(unsigned)imgX, (unsigned)imgY, (unsigned)imgZ, (size_t)imgX*(size_t)imgY*(size_t)imgZ,
++				(unsigned)BP.mdlX, (unsigned)BP.mdlY, BP.mdlInitY, BP.mdlInitZ, BP.mutexes);
++		TTSumsRecord::backproject(
++				d_img_real, d_img_imag, d_Minvsigma2s, (long)imgX * imgY * imgZ,
++				BP.maxR, BP.maxR2, (float)BP.padding_factor,
++				BP.mdlX, BP.mdlY, BP.mdlZ, BP.mdlInitY, BP.mdlInitZ,
++				sr.data(), si.data(), sw.data());
++	}
++#endif
+ }
+ 
+ #define WEIGHT_MAP_BLOCK_SIZE 512
+diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
+index f2e0e2cc..09bc431a 100644
+--- a/src/acc/acc_ml_optimiser_impl.h
++++ b/src/acc/acc_ml_optimiser_impl.h
+@@ -2548,6 +2548,9 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
+ }
+ 
+ // ----------------------------------------------------------------------------
++#ifdef _TT_ENABLED
++#include "src/acc/tt/tt_sums_record.h"
++#endif
+ // -------------------------- storeWeightedSums -------------------------------
+ // ----------------------------------------------------------------------------
+ template<class MlClass>
+@@ -3583,6 +3586,24 @@ void storeWeightedSums(OptimisationParamters &op, SamplingParameters &sp,
+         thr_sum_Pmax += DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PMAX);
+ 
+ 
++#ifdef _TT_ENABLED
++		// TT_RELION_RECORD_SUMS only: this particle's sums before they are added to wsum_model.
++		if (TTSumsRecord::active())
++			TTSumsRecord::particle(
++				(long)op.part_id, baseMLO->image_full_size[optics_group], baseMLO->image_current_size[optics_group],
++				(double)op.sum_weight, (double)op.significant_weight, (double)op.min_diff2,
++				XX(op.old_offset), YY(op.old_offset), XX(op.prior), YY(op.prior),
++				baseMLO->Mresol_fine[optics_group].data, (long)baseMLO->Mresol_fine[optics_group].nzyxdim,
++				baseMLO->mymodel.data_vs_prior_class[0].data, (long)baseMLO->mymodel.data_vs_prior_class[0].nzyxdim,
++				&FinePassWeights.weights[0], &FinePassWeights.rot_id[0], &FinePassWeights.rot_idx[0],
++				&FinePassWeights.trans_idx[0], &FinePassWeights.ihidden_overs[0], (long)FinePassWeights.weights.getSize(),
++				thr_wsum_sigma2_noise.data, (long)thr_wsum_sigma2_noise.nzyxdim,
++				thr_wsum_pdf_direction[0].data, (long)thr_wsum_pdf_direction[0].nzyxdim,
++				(double)exp_wsum_norm_correction, (double)exp_wsum_scale_correction_XA, (double)exp_wsum_scale_correction_AA,
++				(double)thr_wsum_sigma2_offset, (double)thr_sumw_group, (double)dLL,
++				(double)DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_NORM),
++				(double)DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_PMAX));
++#endif
+ 		// Now, inside a global_mutex, update the other weighted sums among all threads
+ 		#pragma omp critical(AccMLO_global)
+         {
