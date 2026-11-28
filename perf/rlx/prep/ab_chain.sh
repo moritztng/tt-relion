@@ -3,8 +3,8 @@
 #   n  TT_RELION_PREP=0, RELION's own code
 #   e  TTPrep with estimated FFT plans (same bits as RELION's transform)
 #   w  TTPrep with the plans of $R/wisdom.<box> (measured once here, the same for every rank and run)
-# First the record arms of both iteration types, whose first particles go to check_prep.py (float64
-# reference), then per iteration type the profile arms n w e w n (thread CPU per particle by stage, split.py).
+# Per iteration type: three record arms whose first particles go to check_prep.py (float64 reference),
+# then the profile arms n w e w n (thread CPU per particle by stage, split.py).
 # Status: $R/runs/$P.status. Env: R (~/rlx-prep), RELION_BIN, P (tag prefix, ab), BOX (360),
 # IT16 / IT24 (optimiser.star to continue from), N16 / N24 (particles per rank before an arm stops).
 R=${R:-$HOME/rlx-prep}; here=$(cd "$(dirname "$0")" && pwd); src=$(cd "$here/../../.." && pwd)
@@ -23,7 +23,7 @@ arm() { # arm <tag> <mode> <optimiser> <it> <n>
 }
 rec() { # rec <tag> <mode> <optimiser> <it>
   mkdir -p $R/runs/${P}_rec_$1; mode $2
-  TT_RELION_RECORD_PREP=$R/runs/${P}_rec_$1 TT_RELION_RECORD_PREP_N=16 RANKS=3 N=256 "$here/../wsum/prof_arm.sh" ${P}_$1 $3 $4
+  TT_RELION_RECORD_PREP=$R/runs/${P}_rec_$1 TT_RELION_RECORD_PREP_N=16 RANKS=3 N=64 "$here/../wsum/prof_arm.sh" ${P}_$1 $3 $4
   echo "$1 mode=$2 records $(ls $R/runs/${P}_rec_$1 | wc -l) wisdom: $(grep -m1 -h TTPrep: $R/runs/${P}_$1/*.log $R/runs/${P}_$1/run.* 2>/dev/null | head -1)" >> $S
 }
 check() { # check <it tag>: every mode against float64, and e and w against n
@@ -39,10 +39,11 @@ if [ ! -s $W ]; then
   echo "wisdom $W $(wc -c < $W) bytes $(date -u +%FT%TZ)" >> $S
 fi
 for m in n e w; do rec r${m}16 $m $IT16 16; done; check 16
-for m in n e w; do rec r${m}24 $m $IT24 24; done; check 24
-echo "records checked $(date -u +%FT%TZ)" >> $S
+echo "it016 records checked $(date -u +%FT%TZ)" >> $S
 arm n16a n $IT16 16 ${N16:-768}; arm w16a w $IT16 16 ${N16:-768}; arm e16a e $IT16 16 ${N16:-768}
 arm w16b w $IT16 16 ${N16:-768}; arm n16b n $IT16 16 ${N16:-768}
+for m in n e w; do rec r${m}24 $m $IT24 24; done; check 24
+echo "it024 records checked $(date -u +%FT%TZ)" >> $S
 arm n24a n $IT24 24 ${N24:-2048}; arm w24a w $IT24 24 ${N24:-2048}; arm e24a e $IT24 24 ${N24:-2048}
 arm w24b w $IT24 24 ${N24:-2048}; arm n24b n $IT24 24 ${N24:-2048}
 echo "done $(date -u +%FT%TZ)" >> $S

@@ -125,6 +125,17 @@ inline void window(const float *f, int n, int cur, float scale, C *out)
 // spectrum[s] = sum of |f * scale|^2 over shell s, for s in 0..n/2. Returns the sum over shells >= first.
 double power(const Tables &t, const float *f, float scale, int first, double *spectrum);
 
+// The CTF image of a plain optics group: no magnification matrix, no even Zernike offset, no dose weighting,
+// no CTF padding. CTF::getFftwImage calls CTF::getCTF per pixel, which evaluates the phase, one sin and one
+// exp through libm. Here the phase of a row is computed with the same double-precision expressions, then
+// the sin of the whole row comes from glibc's vector library (4 doubles per call on AVX2, libm otherwise;
+// accurate to a few ulp of a double, where the image is consumed in single precision), and the exp is
+// skipped when the B factor is zero, where it is exactly 1. K1..K5, Axx, Axy, Ayy are CTF's own, read after
+// CTF::initialise. xs, ys: box edge times pixel size. out: ydim x xdim, FFTW half-transform layout.
+struct Ctf { double K1, K2, K3, K4, K5, Axx, Axy, Ayy, scale; };
+void ctf(const Ctf &c, double xs, double ys, bool do_abs, bool only_flip_phases, bool intact_first_peak,
+         bool damping, int ydim, int xdim, double *out);
+
 // TT_RELION_RECORD_PREP=<dir>: what went into and came out of the first TT_RELION_RECORD_PREP_N (default 8)
 // particles of this process, one file each, for perf/rlx/prep/check_prep.py (float64 reference). A file is
 // a sequence of items: a text line "name dtype ydim xdim" followed by ydim*xdim raw values.

@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <fftw3.h>
+#include <immintrin.h>
 #include <tbb/spin_mutex.h>
 
 // RELION's lock around the single-precision FFTW planner (src/acc/cpu/cpu_ml_optimiser.cpp). Every plan its
@@ -221,6 +222,62 @@ double power(const Tables &t, const float *f, float scale, int first, double *sp
 		if (s >= first) high += acc[s];
 	}
 	return high;
+}
+
+// glibc's vector math (libmvec, linked through -lm): sin and exp of four doubles.
+extern "C" { __m256d _ZGVdN4v_sin(__m256d); __m256d _ZGVdN4v_exp(__m256d); }
+
+__attribute__((target("avx2")))
+static void sin_exp4(const double *phase, const double *arg, int n, double *s, double *e)
+{
+	for (int j = 0; j < n; j += 4)
+		_mm256_storeu_pd(s + j, _ZGVdN4v_sin(_mm256_loadu_pd(phase + j)));
+	if (e)
+		for (int j = 0; j < n; j += 4)
+			_mm256_storeu_pd(e + j, _ZGVdN4v_exp(_mm256_loadu_pd(arg + j)));
+}
+
+void ctf(const Ctf &c, double xs, double ys, bool do_abs, bool only_flip_phases, bool intact_first_peak,
+         bool damping, int ydim, int xdim, double *out)
+{
+	static const bool avx2 = __builtin_cpu_supports("avx2");
+	static thread_local std::vector<double> buf;
+	const int m = (xdim + 3) & ~3;
+	buf.assign((size_t)4 * m, 0.);
+	double *phase = buf.data(), *arg = phase + m, *s = arg + m, *e = s + m;
+	const bool decay = damping && c.K4 != 0.;   // exp(K4 * u2) is exactly 1 when K4 is 0
+	for (int i = 0; i < ydim; i++)
+	{
+		// FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM2D, and the body of CTF::getCTF up to its sin
+		const double Y = (double)(i < xdim ? i : i - ydim) / ys;
+		for (int j = 0; j < xdim; j++)
+		{
+			const double X = (double)j / xs;
+			const double u2 = X * X + Y * Y, u4 = u2 * u2;
+			phase[j] = c.K1 * (c.Axx * X * X + 2.0 * c.Axy * X * Y + c.Ayy * Y * Y) + c.K2 * u4 - c.K5 - c.K3 + 0.0;
+			arg[j] = c.K4 * u2;
+		}
+		if (avx2)
+			sin_exp4(phase, arg, m, s, decay ? e : nullptr);
+		else
+			for (int j = 0; j < xdim; j++)
+			{
+				s[j] = sin(phase[j]);
+				if (decay) e[j] = exp(arg[j]);
+			}
+		// the rest of CTF::getCTF
+		double *o = out + (size_t)i * xdim;
+		for (int j = 0; j < xdim; j++)
+		{
+			double v = (intact_first_peak && fabs(phase[j]) < M_PI / 2.) ? 1. : -s[j];
+			if (decay) v *= e[j];
+			if (do_abs) v = fabs(v);
+			else if (only_flip_phases) v = (v < 0.) ? -1. : 1.;
+			v *= c.scale;
+			if (fabs(v) < 1e-8) v = (v >= 0 ? 1 : -1) * 1e-8;
+			o[j] = v;
+		}
+	}
 }
 
 Record::Record(long part) : f(nullptr)

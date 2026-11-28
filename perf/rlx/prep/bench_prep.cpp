@@ -3,7 +3,7 @@
 // unmasked transform's column pass stopped at the window). Also checks forward against the 2D plan.
 // g++ -O3 -fopenmp -I integrations/relion/src_acc_tt perf/rlx/prep/bench_prep.cpp \
 //     integrations/relion/src_acc_tt/tt_prep.cpp -lfftw3f -ltbb -o bench_prep
-// usage: bench_prep [box 360] [current size 156] [particles 2000]     (TT_RELION_PREP_WISDOM=<file> to time those plans)
+// usage: bench_prep [box 360] [current size 156] [particles 2000] [B factor 0]   (TT_RELION_PREP_WISDOM=<file> to time those plans)
 //        bench_prep wisdom <box> <file>                              (measure the plans once, write the file)
 // Times are thread CPU seconds (CLOCK_THREAD_CPUTIME_ID), the clock the E-step profiler uses, best of 5 rounds.
 #include "tt_prep.h"
@@ -71,6 +71,40 @@ int main(int argc, char **argv)
 	printf("forward vs 2D plan, relative L2: unmasked window %.2e, masked window %.2e, spectrum %.2e, highres Xi2 %.2e\n",
 	       rel(Fa, Ga), rel(Fb, Gb), sqrt(ds / ss), fabs(xa - xb) / xa);
 
+	{
+		// The CTF image: CTF::getCTF's per-pixel body through libm (as RELION runs it) against TTPrep::ctf.
+		const TTPrep::Ctf c = {0.123456 * M_PI, 1.98e9 * M_PI / 2 * 7.7e-6, 0.1001674, argc > 4 ? -atof(argv[4]) / 4. : 0., 0.,
+		                       -14000., 320., -15000., 1.};
+		const double xs = n * 1.34, ys = n * 1.34;
+		std::vector<double> A((size_t)cur * ox), B((size_t)cur * ox);
+		volatile bool do_abs = false, flip = false, intact = false, damping = true;
+		double ta = 1e9, tb = 1e9, worst = 0;
+		for (int round = 0; round < 5; round++)
+		{
+			double a = now();
+			for (int r = 0; r < reps / 4; r++)
+				for (int i = 0; i < cur; i++)
+					for (int j = 0; j < ox; j++)
+					{
+						const double X = (double)j / xs, Y = (double)(i < ox ? i : i - cur) / ys;
+						const double u2 = X * X + Y * Y, u4 = u2 * u2;
+						const double gamma = c.K1 * (c.Axx * X * X + 2.0 * c.Axy * X * Y + c.Ayy * Y * Y) + c.K2 * u4 - c.K5 - c.K3 + 0.0;
+						double v = (intact && fabs(gamma) < M_PI / 2.) ? 1. : -sin(gamma);
+						if (damping) v *= exp(c.K4 * u2);
+						if (do_abs) v = fabs(v); else if (flip) v = (v < 0.) ? -1. : 1.;
+						v *= c.scale;
+						if (fabs(v) < 1e-8) v = (v >= 0 ? 1 : -1) * 1e-8;
+						A[(size_t)i * ox + j] = v;
+					}
+			double b = now(); ta = std::min(ta, b - a);
+			for (int r = 0; r < reps / 4; r++)
+				TTPrep::ctf(c, xs, ys, do_abs, flip, intact, damping, cur, ox, B.data());
+			tb = std::min(tb, now() - b);
+		}
+		for (size_t i = 0; i < A.size(); i++) worst = std::max(worst, fabs(A[i] - B[i]));
+		printf("CTF image %d x %d: per pixel through libm %.3f ms, TTPrep::ctf %.3f ms, largest difference %.1e\n",
+		       cur, ox, 1e3 * ta / (reps / 4), 1e3 * tb / (reps / 4), worst);
+	}
 	for (int mode = 0; mode < 2; mode++)
 	{
 		double best[7], sink = 0;
