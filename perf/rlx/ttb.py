@@ -2,7 +2,10 @@
 (TT_RELION_BATCHLOG=1: "TTB start wall host_s dev_s N R O P", one per chip call, all chips in one log; R = the
 batch's (particle, translation) rows). Prints, per image size and pass (shared orientation set = coarse, own sets =
 fine), the batches, mean particles, rows, how full the 512-row tiles were and seconds, then the busy share of the
-chips over the logged span.
+chips over the logged span, and the same per E-step: the span also holds the M-steps between iterations and whatever
+of the next iteration ran before the job was stopped, so a window of more than 2 s with no chip in a batch ends an
+E-step here. idle_ms_per_batch is the chips' idle time in the middle of the E-step (5 % to 90 % of it) over its
+batches there; tail_idle_s is the idle chip time of its last tenth, where the ranks run out of particles.
 usage: ttb.py refine.log <chips> [T]     T: a log from before the flat rows, whose sixth field is translations per particle"""
 import sys
 from collections import defaultdict
@@ -26,3 +29,27 @@ for (P, kind), v in sorted(g.items()):
           f"O {sum(x[3] for x in v) / n:.0f} s/batch {sum(x[0] for x in v) / n:.3f} total_s {sum(x[0] for x in v):.1f} "
           f"particles/s/chip-busy {sum(x[1] for x in v) / sum(x[0] for x in v):.1f}")
 print(f"span_s {span:.1f} chips {chips} busy_s {busy:.1f} busy_share {busy / (span * chips):.3f}")
+# per E-step
+ev = sorted([(r[0], 1) for r in rows] + [(r[0] + r[1], -1) for r in rows])
+cuts, act, last = [ev[0][0]], 0, ev[0][0]
+for t, d in ev:
+    if act == 0 and t - last > 2.0:
+        cuts += [last, t]
+    act, last = act + d, t
+cuts.append(ev[-1][0])
+for n, (a, b) in enumerate(zip(cuts[0::2], cuts[1::2]), 1):
+    seg = [r for r in rows if a - 0.01 <= r[0] < b]
+    if not seg:
+        continue
+    wall, sbusy = b - a, sum(r[1] for r in seg)
+    act, last, mid, tail = 0, a, 0.0, 0.0
+    for t, d in sorted([(r[0], 1) for r in seg] + [(r[0] + r[1], -1) for r in seg]):
+        f = (last - a) / wall
+        if 0.05 <= f < 0.9:
+            mid += (t - last) * (chips - act)
+        elif f >= 0.9:
+            tail += (t - last) * (chips - act)
+        act, last = act + d, t
+    nmid = sum(1 for r in seg if 0.05 <= (r[0] - a) / wall < 0.9)
+    print(f"estep {n}: wall_s {wall:.1f} batches {len(seg)} busy_s {sbusy:.1f} busy_share {sbusy / (wall * chips):.3f} "
+          f"idle_ms_per_batch {1e3 * mid / max(nmid, 1):.0f} tail_idle_s {tail:.1f}")
