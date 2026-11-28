@@ -4,7 +4,7 @@
 # Env: SRC (source tree under $R, required: a default would silently run an old tree), TAG (run name, default dc2), ARMS, TT_RELION_RESIDENT=1 for arm T,
 # RANKS (default 9), RLX_CHIP_LIST (explicit chips), J (threads per rank, default 8) and BATCH (TT_RELION_BATCH of arm T, default 8).
 # FROM (optimiser.star to continue, default the CPU reference run's it015) and IT (the iteration to run, default 16),
-# RLX_CHIPS_PER_RANK (default 1).
+# RLX_CHIPS_PER_RANK (default 1). PREREAD=0 drops --preread_images (the full job reads its stacks from tmpfs).
 # END_BY (epoch): the arm is stopped then, for a booked window that opens after it (default 45 min from its start).
 R=${R:-$HOME/rlx-e2e}; : ${SRC:?name the source tree under $R}; TAG=${TAG:-dc2}
 FROM=${FROM:-$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star}; IT=${IT:-16}; it=$(printf %03d $IT)
@@ -21,12 +21,13 @@ ok=0; while [ $ok -lt 3 ]; do
 done
 echo "start $(date -u +%FT%TZ) load: $(cat /proc/loadavg)" >> $S
 cd $HOME/rlx/data
+pre=--preread_images; [ "${PREREAD:-1}" = 0 ] && pre=
 for arm in ${ARMS:-T N}; do
   [ -e $HOME/fleet/HANDBACK ] && { echo HANDBACK >> $S; exit 0; }
   if [ $arm = N ]; then export TT_RELION_BACKEND=nullbase; unset TT_RELION_BATCH TT_RELION_RESIDENT
   else export TT_RELION_BACKEND=ttnn TT_RELION_BATCH=${BATCH:-8} TT_RELION_BATCH_WAIT_MS=50; fi
   o=$R/runs/${TAG}_$arm; rm -rf $o; mkdir -p $o
-  setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 2700} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o ${RANKS:-9} ${J:-8} --continue $FROM --iter $IT --dont_combine_weights_via_disc --preread_images --pool 3 --o $o/run &
+  setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 2700} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o ${RANKS:-9} ${J:-8} --continue $FROM --iter $IT --dont_combine_weights_via_disc $pre --pool 3 --o $o/run &
   p=$!
   ( while kill -0 $p 2>/dev/null; do sleep 15; [ -e $o/run_it${it}_data.star ] && { sleep 90; kill -INT -- -$p 2>/dev/null; break; }; done ) &
   wait $p; rc=$?; grep -q "TTBridge: .* raised" $o/refine.log && rc=FALLBACK
