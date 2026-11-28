@@ -23,6 +23,7 @@ ap.add_argument("--T", type=int, default=21)
 ap.add_argument("--pf", type=int, default=2)
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--digits", type=int, default=13, help="base-4 digits, the device server's default")
+ap.add_argument("--P", type=int, default=0, help="keep only the P pixels of lowest frequency, as RELION does below its resolution limit")
 ap.add_argument("--out", required=True)
 ap.add_argument("--cand", type=float, default=0, help="also grade the candidate form: samples within this window of each particle's best")
 ap.add_argument("--own", type=int, default=0, help="also grade d2_own: particle n scores its own orientations n*own .. (n+1)*own (needs O >= N*own)")
@@ -41,6 +42,9 @@ pix = np.arange(P)
 x = (pix % imgX).astype(np.float32)
 yi = pix // imgX
 y = np.where(yi > maxR, yi - imgY, yi).astype(np.float32)
+if 0 < a.P < P:
+    keep = np.sort(np.argsort(x * x + y * y, kind="stable")[:a.P])
+    x, y, P = x[keep], y[keep], a.P
 rp = pf * maxR
 X, Y, Z, initY, initZ, maxR2 = rp + 3, 2 * rp + 5, 2 * rp + 5, -(rp + 2), -(rp + 2), rp * rp
 zz, yy, xx = np.meshgrid(np.arange(Z) + initZ, np.arange(Y) + initY, np.arange(X), indexing="ij")
