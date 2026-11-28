@@ -165,7 +165,10 @@ An auto-refinement ends with one iteration at the full image size. For a 360-pix
 image, and the model's table on the chip is 12 GB of its 34 GB. Two things follow.
 
 A reference set that would not fit beside the table is scored a piece at a time, about 1,000 orientations a piece at
-this size, each piece with its own balance. The products stay exact. Sets that fit run as before.
+this size, each piece with its own balance. The products stay exact. Sets that fit run as before. On one chip against
+float64 at this size (`perf/rlx/resident/d2_parity.py --size 360`, `results/e2e_fs1`): 12 particles against 2,304
+orientations, the best pose agrees for all 12, and the squared difference is off by 0.014 at a value of 100,355,
+where float32 resolves 0.008. A batch takes 3.7 s, 0.31 s per particle.
 
 The table passes through host memory on its way to the chip, about 26 GB per chip while it does, and every chip
 wants it at the start of that iteration. `TT_RELION_TABLE_TURNS=<n>` (default 4) is how many chips of a host upload at
