@@ -34,7 +34,7 @@ for arm in ${ARMS:-C}; do
   if [ $arm = C ]; then export TT_RELION_CAND_WINDOW=${WINDOW:-40}; else unset TT_RELION_CAND_WINDOW; fi
   o=$R/runs/${TAG}_$arm; rm -rf $o; mkdir -p $o
   setsid timeout -s INT $(( ${END_BY:-$(date +%s) + 3000} - $(date +%s) )) $R/$SRC/perf/rlx/run.sh $o $((NC + 1)) ${J:-40} \
-    --continue $FROM --iter $IT --dont_combine_weights_via_disc --preread_images --pool 3 --o $o/run &
+    --continue $FROM --iter $IT --dont_combine_weights_via_disc --preread_images --pool ${POOL:-3} --o $o/run &
   p=$!
   ( while kill -0 $p 2>/dev/null; do sleep 15; [ -e $o/run_it${it}_data.star ] && { sleep 90; kill -INT -- -$p 2>/dev/null; break; }; done ) &
   wait $p; rc=$?; grep -q "TTBridge: .* raised" $o/refine.log && rc=FALLBACK
