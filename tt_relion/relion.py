@@ -218,17 +218,24 @@ class _Server:
         return out
 
 
-    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, ref_key):
+    def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, ref_key, prior=None):
         """Resident diff2 on this chip (device_server "d2"): float32 [R, O], row r = particle pn[r] at translation
         (tx[r], ty[r]). model = [key, X, Y, Z, initY, initZ, maxR2, pf, nvox]; the volume is shipped only when this
-        chip does not hold that key."""
+        chip does not hold that key.
+
+        prior = (lo [O], lt [R], window, cap), float32 -log priors: the candidate form. Returns (row int32,
+        orientation int32, delta float32, best float64 [N]) for the samples within window of each particle's best,
+        or None when there are more than cap of them (the caller asks for the dense matrix instead)."""
         from multiprocessing import shared_memory
         N, R = xr.shape[0], tx.size
         O, P = eul.shape[0], x.shape[0]
         with self.lock:
             send = model[0] != self.model_key
             parts = ([np.frombuffer(mdl_mv, dtype=np.float32)] if send else []) + [eul, x, y, xr, xi, w, tx, ty, pn]
-            need = 4 * (sum(a.size for a in parts) + R * O)
+            if prior is not None:
+                cap = int(prior[3])
+                parts += [np.asarray(prior[0], np.float32), np.asarray(prior[1], np.float32)]
+            need = 4 * (sum(a.size for a in parts) + (R * O if prior is None else 3 * cap + 2 * N))
             if self.shm is None or self.shm.size < need:
                 if self.shm is not None:
                     self.shm.close()
@@ -245,13 +252,23 @@ class _Server:
                    "client": self.c}
             if ref_key is not None:
                 req["ref_key"] = ref_key
+            if prior is not None:
+                req["prior"] = [float(prior[2]), cap]
             self.p.stdin.write(json.dumps(req, separators=(",", ":")) + "\n")
             self.p.stdin.flush()
-            if self.p.stdout.readline().strip() != "ok":
+            ans = self.p.stdout.readline().split()
+            if ans[:1] != ["ok"]:
                 raise RuntimeError("device server died, rc=%s" % self.p.poll())
             t2 = time.time()
             self.model_key = model[0]
-            out = buf[o:o + R * O].reshape(R, O).copy()
+            if prior is None:
+                out = buf[o:o + R * O].reshape(R, O).copy()
+            elif int(ans[1]) < 0:
+                out = None
+            else:
+                n = int(ans[1])
+                out = (buf[o:o + n].view(np.int32).copy(), buf[o + cap:o + cap + n].view(np.int32).copy(),
+                       buf[o + 2 * cap:o + 2 * cap + n].copy(), buf[o + 3 * cap:o + 3 * cap + 2 * N].view(np.float64).copy())
             del buf
             c = self.c
             c["calls"] += 1
@@ -347,7 +364,22 @@ def _device_cross(t, ref, shw, ref_key=None):
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 
-def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared):
+def _window(d2, lo, lt, pn, n, window):
+    """The candidate form from a dense diff2 [R, O] (backends that hold the matrix on the host): the samples whose
+    d2 + lo[o] + lt[r] lies within window of their particle's best, as (row int32, orientation int32, delta float32,
+    best float64 [n]) in row order. Same contract as the chip's Resident.d2(prior=)."""
+    e = d2.astype(np.float64) + np.asarray(lo, np.float64)[None, :] + np.asarray(lt, np.float64)[:, None]
+    best = np.full(n, np.inf)
+    np.minimum.at(best, pn, e.min(1))
+    dl = e - best[pn][:, None]
+    r, o = np.nonzero(dl < window)
+    return r.astype(np.int32), o.astype(np.int32), dl[r, o].astype(np.float32), best
+
+
+_CAND_CAP = int(os.environ.get("TT_RELION_CAND_CAP", str(1 << 20)))     # candidates a batch may return before it falls back
+
+
+def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared, prior=None):
     """diff2 [R, O] from the resident chip op, row r = particle pn[r] at (tx[r], ty[r]). shared: the orientation set
     is the iteration's (a global coarse pass), so the chip keeps its projections; otherwise it is this call's own and
     is used once."""
@@ -358,7 +390,8 @@ def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared
     s = _server()
     try:
         return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty), f32(pn),
-                    "%s.%s.%d.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size, geom[5]) if shared else None)
+                    "%s.%s.%d.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size, geom[5]) if shared else None,
+                    None if prior is None else (f32(prior[0]), f32(prior[1]), float(prior[2]), _CAND_CAP))
     finally:
         _free.put(s)
 
@@ -527,6 +560,60 @@ def diff2_coarse(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, out_mv,
         return False
 
 
+# TT_RELION_CAND_WINDOW=<w>: the coarse pass hands RELION its candidates instead of the dense [O, T] block: the
+# samples whose diff2 - log(pdf_orientation) - log(pdf_offset) lies within w of the particle's best. A sample
+# outside the window weighs under exp(-w) of the best one, so with w = 40 it cannot reach RELION's significant
+# set or move its sums at fp32. 0 (the default) declines, and RELION asks for the dense block.
+_CAND_WINDOW = float(os.environ.get("TT_RELION_CAND_WINDOW", "0"))
+
+
+def diff2_coarse_cand(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, lo_mv, lt_mv, idx_mv, val_mv,
+                      mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
+                      padding_factor, imgX, imgY,
+                      orientation_num, translation_num, image_size):
+    """The coarse pass in candidate form. lo [orientation_num] and lt [translation_num] are float32 -log priors
+    (inf = excluded). Writes idx (uint64, orientation * translation_num + translation, ascending) and val (float32,
+    diff2 + lo + lt minus the particle's best) for the samples within the window and returns (n, best), with best
+    the float64 minimum of diff2 + lo + lt. Returns None when it declines (off, an unbatched backend, or more
+    candidates than idx holds); RELION then runs the dense pass."""
+    if _CAND_WINDOW <= 0 or _BATCH <= 1 or _BACKEND in ("nullbase", "null"):
+        return None
+    if _small(orientation_num):
+        return None
+    try:
+        t0, c0 = time.time(), time.thread_time()
+        geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
+        lo = np.frombuffer(lo_mv, dtype=np.float32)
+        lt = np.frombuffer(lt_mv, dtype=np.float32)
+        o, tr, dl, best = _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num,
+                                   prior=(lo, lt, _CAND_WINDOW))
+        _book("C_s", time.time() - t0)
+        idx = np.frombuffer(idx_mv, dtype=np.uint64)
+        if len(o) > len(idx) or not np.isfinite(best):
+            _book_cpu("C", c0)
+            _stats["cand_declined"] = _stats.get("cand_declined", 0) + 1
+            return None
+        flat = o.astype(np.uint64) * np.uint64(translation_num) + tr.astype(np.uint64)
+        k = np.argsort(flat, kind="stable")
+        idx[:len(k)] = flat[k]
+        np.frombuffer(val_mv, dtype=np.float32)[:len(k)] = dl[k]
+        _book_cpu("C", c0)
+        _stats["handled"] += 1
+        _stats["cand"] = _stats.get("cand", 0) + len(k)
+        _stats["cand_calls"] = c = _stats.get("cand_calls", 0) + 1
+        if c % 1024 == 0:           # a run stopped from outside never prints the exit report
+            print("tt_relion.relion: candidates pid %d calls %d declined %d mean %.1f of %d"
+                  % (os.getpid(), c, _stats.get("cand_declined", 0), _stats["cand"] / c,
+                     orientation_num * translation_num), flush=True)
+        return len(k), float(best)
+    except Exception as exc:                        # declining beats killing the refinement
+        import traceback
+        traceback.print_exc()
+        print("tt_relion.relion: diff2_coarse_cand declined: %r" % (exc,))
+        _stats["declined"] += 1
+        return None
+
+
 def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
                rot_idx_mv, trans_idx_mv, out_mv,
                mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
@@ -621,8 +708,11 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom, keep=True):
 
 def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
                        mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-                       padding_factor, imgX, imgY, shared=True):
+                       padding_factor, imgX, imgY, shared=True, prior=None):
     """diff2 for N particles over one orientation set: float32 [R, O], one row per (particle, translation).
+
+    prior = (lo [O], lt [R], window), -log of RELION's orientation and offset priors: the candidate form instead,
+    (row, orientation, delta, best) for the samples within window of each particle's best (see _window).
 
     shared: the set is the iteration's (a global coarse pass), so its projections are kept for the next
     batch. A batch of particles with their own orientations passes the union of them and shared=False.
@@ -640,9 +730,14 @@ def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
     x = (pix % imgX).to(t.float32)
     yi = pix // imgX
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
+    rows_of = pn
     if _RESIDENT and _BACKEND == "ttnn":
-        return _resident_d2(mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty, pn,
-                            (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared=shared)
+        args = (mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty, pn,
+                (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
+        got = _resident_d2(*args, shared=shared, prior=prior)
+        if got is None:                         # more candidates than the segment holds: the dense matrix, cut here
+            got = _window(_resident_d2(*args, shared=shared), prior[0], prior[1], pn, len(img_r), prior[2])
+        return got
     ref_r, ref_i, ref_a2, ref_key = _shared_refs(t, mdl, eul, x, y,
                                 (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared)
     pn = t.from_numpy(pn)
@@ -662,7 +757,8 @@ def diff2_coarse_batch(mdl, eul, tx, ty, pn, img_r, img_i, corr,
         cross = _device_cross(t, refc, shw, ref_key).double()                         # [O, R]
     else:
         cross = (refc.double() @ shw.double().T)
-    return (ref2 + sh2[:, None] - 2.0 * cross.T).float().numpy()
+    d = (ref2 + sh2[:, None] - 2.0 * cross.T).float().numpy()
+    return d if prior is None else _window(d, prior[0], prior[1], rows_of, len(img_r), prior[2])
 
 
 # TT_RELION_BATCH=<n>: coarse and fine calls from RELION's --j threads on the same model and image size are
@@ -677,18 +773,36 @@ _BATCH = int(os.environ.get("TT_RELION_BATCH", "0"))
 _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
 # TT_RELION_BATCH_ROWS=<n>: also cut a batch once its particles bring n (particle, translation) rows. The chip
 # scores rows in tiles of 512, so 512 (or a multiple) fills the tile whatever each particle's translation count is.
+# A batch that would open another tile and leave it more than a quarter of the batch empty is trimmed to whole
+# tiles: 14 particles of 37 rows are 518 rows, two tiles for the price of one particle; 13 go now, one waits.
+# TT_RELION_OWN_ROWS=<n>: the rows cut for particles that bring their own orientation sets (the fine pass, local
+# searches). Such a batch scores the union of its sets for every row, so its product grows with the square of the
+# batch while a shared set grows linearly. Unset or 0: the same cut as TT_RELION_BATCH_ROWS.
 _BATCH_ROWS = int(os.environ.get("TT_RELION_BATCH_ROWS", "0"))
+_OWN_ROWS = int(os.environ.get("TT_RELION_OWN_ROWS", "0"))
+_TILE_ROWS = 512
 
 
 def _take(q):
     """How many particles from the head of the queue make the next batch, and whether that batch is full."""
-    n = rows = 0
+    n, rows, cum, full = 0, 0, [], False
+    own = _OWN_ROWS and len(q) > 1 and q[0].get("eh") != q[1].get("eh")
+    cap = _OWN_ROWS if own else _BATCH_ROWS
     for it in q[:_BATCH]:
+        if n and cap and rows + it["tx"].size > cap:
+            full = True
+            break
         rows += it["tx"].size
-        if n and _BATCH_ROWS and rows > _BATCH_ROWS:
-            return n, True
         n += 1
-    return n, n >= _BATCH or bool(_BATCH_ROWS) and rows >= _BATCH_ROWS
+        cum.append(rows)
+    full = full or n >= _BATCH or bool(cap) and rows >= cap
+    if cap and rows > _TILE_ROWS:
+        whole = rows // _TILE_ROWS * _TILE_ROWS
+        if rows < 0.75 * (whole + _TILE_ROWS):
+            m = sum(1 for c in cum if c <= whole)
+            if m:
+                return m, True
+    return n, full
 _groups = {}
 _gcv = threading.Condition()
 _cpu = {"C": 0.0, "F": 0.0}         # CPU seconds this rank's threads spent inside the bridge, by pass
@@ -700,13 +814,18 @@ def _book_cpu(k, c0):
         _cpu[k] += time.thread_time() - c0
 
 
-def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num):
+def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num, prior=None):
     """Queue this particle with its group. One waiter at a time collects a batch; it hands the lead on when it
-    cuts the batch, so batches run side by side on a rank's chips and the queue fills behind a busy chip."""
+    cuts the batch, so batches run side by side on a rank's chips and the queue fills behind a busy chip.
+
+    prior = (lo [O], lt [T], window): the candidate form. The particle then gets (orientation int32, translation
+    int32, delta float32, best) for its samples within window of its best instead of its [T, O] rows."""
     import hashlib
     eul = np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9).copy()
-    key = (_model_key(mdl_mv), geom)
-    item = {"eul": eul, "eh": hashlib.sha256(eul.tobytes()).digest(),
+    key = (_model_key(mdl_mv), geom, None if prior is None else float(prior[2]))
+    lo, lt = (None, None) if prior is None else (np.array(prior[0], np.float32), np.array(prior[1], np.float32))
+    item = {"eul": eul, "eh": hashlib.sha256(eul.tobytes() + (b"" if lo is None else lo.tobytes())).digest(),
+            "lo": lo, "lt": lt,
             "tx": np.frombuffer(tx_mv, dtype=np.float32).copy(),
             "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
             "ir": np.frombuffer(re_mv, dtype=np.float32).copy(),
@@ -739,28 +858,48 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                 _gcv.notify_all()
                 _gcv.release()
                 try:
+                    t_lead = time.time()
                     same = all(b["eh"] == batch[0]["eh"] for b in batch)
                     st = lambda k: np.stack([b[k] for b in batch])  # noqa: E731
                     cat = lambda k: np.concatenate([b[k] for b in batch])  # noqa: E731
+                    cand = prior is not None and same        # own orientation sets: the window is cut per block here
                     res = diff2_coarse_batch(mdl_mv, batch[0]["eul"] if same else cat("eul"), cat("tx"), cat("ty"),
                                              np.repeat(np.arange(len(batch)), [b["tx"].size for b in batch]),
-                                             st("ir"), st("ii"), st("w"), *geom, shared=same)        # [R, O]
+                                             st("ir"), st("ii"), st("w"), *geom, shared=same,
+                                             prior=(batch[0]["lo"], cat("lt"), prior[2]) if cand else None)
+                    t_back = time.time()
                     r0 = o = 0
-                    for b in batch:
+                    for i, b in enumerate(batch):
                         n_t, n_o = b["tx"].size, len(b["eul"])
-                        r = res[r0:r0 + n_t]
-                        b["out"] = r if same else r[:, o:o + n_o]   # [T, O] view; its thread adds it in
+                        if cand:                # rows come back in order: this particle's are one run
+                            k0, k1 = np.searchsorted(res[0], [r0, r0 + n_t])
+                            b["out"] = (res[1][k0:k1], res[0][k0:k1] - r0, res[2][k0:k1], float(res[3][i]))
+                        else:
+                            r = res[r0:r0 + n_t]
+                            r = r if same else r[:, o:o + n_o]      # [T, O] view; its thread adds it in
+                            if prior is not None:
+                                w_ = _window(r, b["lo"], b["lt"], np.zeros(n_t, np.int64), 1, prior[2])
+                                r = (w_[1], w_[0], w_[2], float(w_[3][0]))
+                            b["out"] = r
                         r0, o = r0 + n_t, o + n_o
                     _stats["batches"] = _stats.get("batches", 0) + 1
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
+                    _stats["lead_s"] = _stats.get("lead_s", 0.0) + t_back - t_lead
+                    _stats["share_s"] = _stats.get("share_s", 0.0) + time.time() - t_back
                     n = _stats["batches"]
                     if n % 50 == 0 or n & (n - 1) == 0:     # 1, 2, 4, ... then every 50
                         # rank_cpu_s is the whole rank process (RELION's own per-particle work + the bridge),
-                        # bridge_cpu_s the part spent in here; calls counts coarse and fine calls done so far
+                        # bridge_cpu_s the part spent in here; calls counts coarse and fine calls done so far.
+                        # A chip waits for its next batch through lead_s - rt_s (the leader stacking the batch and
+                        # copying it to the server, copy_s of it) and share_s (handing the results out); rt_s is
+                        # the server's own time.
                         print(f"tt_relion: batches={_stats['batches']} particles="
                               f"{_stats['batched']} mean={_stats['batched'] / _stats['batches']:.2f} "
                               f"calls={_stats['handled']}+{_stats['fine_handled']} "
-                              f"rank_cpu_s={time.process_time():.1f} bridge_cpu_s={_cpu['C']:.1f}+{_cpu['F']:.1f}",
+                              f"rank_cpu_s={time.process_time():.1f} bridge_cpu_s={_cpu['C']:.1f}+{_cpu['F']:.1f} "
+                              f"lead_s={_stats['lead_s']:.1f} share_s={_stats['share_s']:.1f} "
+                              f"copy_s={sum(s_.c.get('copy_s', 0) for s_ in _srv):.1f} "
+                              f"rt_s={sum(s_.c.get('rt_s', 0) for s_ in _srv):.1f}",
                               file=sys.stderr, flush=True)
                 except Exception as exc:            # every particle of the batch declines
                     for b in batch:

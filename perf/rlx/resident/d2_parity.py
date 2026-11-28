@@ -24,6 +24,7 @@ ap.add_argument("--pf", type=int, default=2)
 ap.add_argument("--reps", type=int, default=3)
 ap.add_argument("--digits", type=int, default=16, help="base-4 digits, the device server's default")
 ap.add_argument("--out", required=True)
+ap.add_argument("--cand", type=float, default=0, help="also grade the candidate form: samples within this window of each particle's best")
 a = ap.parse_args()
 
 from _tt import Clock, open_dev  # noqa: E402
@@ -126,5 +127,40 @@ rec["load1"] = float(open("/proc/loadavg").read().split()[0])
 grade("held_again", again)
 rec["held_same"] = bool((again == held).all())
 rec["batch_s"] = ts
+if a.cand:      # the candidate form against float64 with the same priors and window, and RELION's rule on both
+    lo = rng.uniform(0, 4, a.O)
+    lo[rng.random(a.O) < 0.03] = np.inf                                        # orientations the prior excludes
+    lt = rng.uniform(0, 6, (a.N, a.T))
+    pnr = np.repeat(np.arange(a.N), a.T)
+    E = d64.transpose(0, 2, 1) + lo[None, None, :] + lt[:, :, None]            # [N, T, O]
+
+    def rule(flat, delta):                      # the largest weights that hold 99.9 % of the weight sum
+        o = np.argsort(delta, kind="stable")
+        cs = np.cumsum(np.exp(-delta[o]))
+        return set(flat[o[:int(np.searchsorted(cs, 0.999 * cs[-1]) + 1)]].tolist())
+
+    c0, ts = dict(res.c), []
+    for _ in range(a.reps):
+        t0 = time.perf_counter()
+        rr, oo, dl, best = res.d2(eul, xr, xi, w, tx.ravel(), ty.ravel(), pnr, x, y, ref_key="it",
+                                  prior=(lo, lt.ravel(), a.cand))
+        ts.append(time.perf_counter() - t0)
+    same = missed = 0
+    err = errb = 0.0
+    for n in range(a.N):
+        refd = (E[n] - E[n].min()).ravel()
+        k = rr // a.T == n
+        fl, dv = (rr[k].astype(np.int64) % a.T) * a.O + oo[k], dl[k].astype(np.float64)
+        got = np.full(refd.size, np.nan)
+        got[fl] = dv
+        want = np.flatnonzero(refd < a.cand - 1.0)                              # a unit inside the window: all must be there
+        missed += int(np.isnan(got[want]).sum())
+        err = max(err, float(np.nanmax(np.abs(got[want] - refd[want]))))
+        errb = max(errb, abs(float(best[n] - E[n].min())))
+        inw = np.flatnonzero(refd < a.cand)
+        same += rule(fl, dv) == rule(inw, refd[inw])
+    rec["cand"] = dict(window=a.cand, n=int(len(rr)), per_particle=len(rr) / a.N, missed=missed, same_sig=f"{same}/{a.N}",
+                       err_delta=err, err_best=errb, batch_s=ts, phases=phases(c0, a.reps),
+                       counters={k: res.c.get(k) for k in ("cand", "cand_dense")})
 print(json.dumps(rec))
 open(a.out, "a").write(json.dumps(rec) + "\n")

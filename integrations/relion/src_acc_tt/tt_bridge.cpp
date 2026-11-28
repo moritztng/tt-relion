@@ -27,6 +27,10 @@ namespace
 	                                        // the coarse arm back to CPU mid-refinement
 	PyObject *g_diff2 = nullptr;            // set once under g_init_mutex, read-only after
 	PyObject *g_diff2f = nullptr;
+	std::atomic<PyObject*> g_cand{nullptr}; // diff2_coarse_cand, null when the window is off or the entry is absent
+	std::atomic<long> g_cand_handled{0};
+	std::atomic<long> g_cand_declined{0};
+	std::atomic<long> g_cand_n{0};
 	std::atomic<long> g_handled{0};
 	std::atomic<long> g_declined{0};
 	std::atomic<long> g_fine_handled{0};
@@ -94,6 +98,9 @@ namespace
 		PyObject *fn = PyObject_GetAttrString(mod, "diff2_coarse");
 		PyObject *fnf = PyObject_GetAttrString(mod, "diff2_fine");
 		PyErr_Clear();                   // a tt_bio without the fine entry point is not an error
+		const char *win = std::getenv("TT_RELION_CAND_WINDOW");
+		PyObject *fnc = (win != nullptr && std::atof(win) > 0.) ? PyObject_GetAttrString(mod, "diff2_coarse_cand") : nullptr;
+		PyErr_Clear();                   // nor is one without the candidate entry point
 		Py_DECREF(mod);
 		if (fn == nullptr || !PyCallable_Check(fn))
 		{
@@ -101,11 +108,18 @@ namespace
 			PyErr_Print();
 			Py_XDECREF(fn);
 			Py_XDECREF(fnf);
+			Py_XDECREF(fnc);
 			PyGILState_Release(gil);
 			return false;
 		}
+		if (fnc != nullptr && !PyCallable_Check(fnc))
+		{
+			Py_DECREF(fnc);
+			fnc = nullptr;
+		}
 		PyGILState_Release(gil);
 		g_diff2 = fn;
+		g_cand.store(fnc, std::memory_order_release);
 		g_usable.store(true, std::memory_order_release);
 		if (fnf != nullptr && PyCallable_Check(fnf))
 		{
@@ -118,8 +132,8 @@ namespace
 			std::fprintf(stderr, "TTBridge: tt_relion.relion.diff2_fine missing, "
 			                     "the fine pass stays on RELION's own kernel\n");
 		}
-		std::fprintf(stderr, "TTBridge: tt_relion.relion loaded (fine=%s check=%s)\n",
-		             g_fine_usable.load() ? "yes" : "no", g_check ? "yes" : "no");
+		std::fprintf(stderr, "TTBridge: tt_relion.relion loaded (fine=%s check=%s candidates=%s)\n",
+		             g_fine_usable.load() ? "yes" : "no", g_check ? "yes" : "no", fnc ? "yes" : "no");
 		std::atexit(&TTBridge::report);  // nothing else calls it, and the no-op trap needs the line
 		return true;
 	}
@@ -189,6 +203,78 @@ bool diff2Coarse(
 
 	if (handled) g_handled.fetch_add(1); else g_declined.fetch_add(1);
 	return handled;
+}
+
+bool candOn()
+{
+	return ensureReady() && g_cand.load(std::memory_order_acquire) != nullptr && !g_check;
+}
+
+long diff2CoarseCand(
+		const float *mdlComplex,
+		int mdlX, int mdlY, int mdlZ, int mdlInitY, int mdlInitZ,
+		int maxR, int maxR2_padded, float padding_factor,
+		int imgX, int imgY,
+		const float *eulers,
+		const float *trans_x, const float *trans_y,
+		const float *Fimg_real, const float *Fimg_imag, const float *corr_img,
+		const float *lo, const float *lt,
+		unsigned long *idx, float *val, long cap, double *best,
+		long orientation_num, long translation_num, long image_size)
+{
+	PyObject *fn = ensureReady() && !g_check ? g_cand.load(std::memory_order_acquire) : nullptr;
+	if (fn == nullptr || !g_usable.load(std::memory_order_acquire))
+		return -1;
+
+	PyGILState_STATE gil = PyGILState_Ensure();
+
+	const long nvox = (long)mdlX * (long)mdlY * (long)mdlZ;
+	const Py_ssize_t f = (Py_ssize_t)sizeof(float);
+
+	PyObject *a_mdl  = PyMemoryView_FromMemory((char*)mdlComplex, nvox * 2 * f, PyBUF_READ);
+	PyObject *a_eul  = PyMemoryView_FromMemory((char*)eulers,     orientation_num * 9 * f, PyBUF_READ);
+	PyObject *a_tx   = PyMemoryView_FromMemory((char*)trans_x,    translation_num * f, PyBUF_READ);
+	PyObject *a_ty   = PyMemoryView_FromMemory((char*)trans_y,    translation_num * f, PyBUF_READ);
+	PyObject *a_re   = PyMemoryView_FromMemory((char*)Fimg_real,  image_size * f, PyBUF_READ);
+	PyObject *a_im   = PyMemoryView_FromMemory((char*)Fimg_imag,  image_size * f, PyBUF_READ);
+	PyObject *a_corr = PyMemoryView_FromMemory((char*)corr_img,   image_size * f, PyBUF_READ);
+	PyObject *a_lo   = PyMemoryView_FromMemory((char*)lo,         orientation_num * f, PyBUF_READ);
+	PyObject *a_lt   = PyMemoryView_FromMemory((char*)lt,         translation_num * f, PyBUF_READ);
+	PyObject *a_idx  = PyMemoryView_FromMemory((char*)idx, cap * (Py_ssize_t)sizeof(unsigned long), PyBUF_WRITE);
+	PyObject *a_val  = PyMemoryView_FromMemory((char*)val, cap * f, PyBUF_WRITE);
+
+	PyObject *res = nullptr;
+	if (a_mdl && a_eul && a_tx && a_ty && a_re && a_im && a_corr && a_lo && a_lt && a_idx && a_val)
+		res = PyObject_CallFunction(fn, "OOOOOOOOOOOiiiiiiifiilll",
+				a_mdl, a_eul, a_tx, a_ty, a_re, a_im, a_corr, a_lo, a_lt, a_idx, a_val,
+				mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
+				(double)padding_factor, imgX, imgY,
+				orientation_num, translation_num, image_size);
+
+	Py_XDECREF(a_mdl); Py_XDECREF(a_eul); Py_XDECREF(a_tx); Py_XDECREF(a_ty);
+	Py_XDECREF(a_re);  Py_XDECREF(a_im);  Py_XDECREF(a_corr);
+	Py_XDECREF(a_lo);  Py_XDECREF(a_lt);  Py_XDECREF(a_idx); Py_XDECREF(a_val);
+
+	long n = -1;
+	if (res == nullptr)
+	{
+		PyErr_Print();
+		std::fprintf(stderr, "TTBridge: diff2_coarse_cand raised, the coarse pass goes back to the dense block\n");
+		g_cand.store(nullptr, std::memory_order_release);
+	}
+	else
+	{
+		if (res != Py_None && !PyArg_ParseTuple(res, "ld", &n, best))
+		{
+			PyErr_Print();
+			n = -1;
+		}
+		Py_DECREF(res);
+	}
+	PyGILState_Release(gil);
+
+	if (n >= 0) { g_cand_handled.fetch_add(1); g_cand_n.fetch_add(n); } else g_cand_declined.fetch_add(1);
+	return n;
 }
 
 bool diff2Fine(
@@ -315,6 +401,9 @@ void report()
 	             g_handled.load(), g_declined.load());
 	std::fprintf(stderr, "TTBridge: diff2Fine   handled=%ld declined=%ld\n",
 	             g_fine_handled.load(), g_fine_declined.load());
+	if (g_cand_handled.load() + g_cand_declined.load() > 0)
+		std::fprintf(stderr, "TTBridge: diff2CoarseCand handled=%ld declined=%ld candidates=%ld\n",
+		             g_cand_handled.load(), g_cand_declined.load(), g_cand_n.load());
 	if (g_check && g_res_n > 0)
 	{
 		std::lock_guard<std::mutex> lock(g_res_mutex);
