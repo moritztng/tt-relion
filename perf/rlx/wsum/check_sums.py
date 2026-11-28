@@ -31,6 +31,9 @@ def main():
             row["shells"] = rel(shells, r["wsum_sigma2_noise"][:n])
             row["scale_XA"] = abs(xa - r["wsum_scale_XA"]) / max(abs(r["wsum_scale_XA"]), 1e-300)
             row["scale_AA"] = abs(aa - r["wsum_scale_AA"]) / max(abs(r["wsum_scale_AA"]), 1e-300)
+            # the same four from the per-shell form against the per-pixel one
+            a, b = sums.post_shells(r, *sums.wavg_shells(r)), (shells, shells.sum(), xa, aa)
+            row["shell_form"] = max(rel(np.atleast_1d(u), np.atleast_1d(v)) for u, v in zip(a, b))
         if "bp_index" in r:
             ref, rec = sums.backproject(r), sums.recorded_backprojection(r)
             row["bp_data"] = rel(ref[0] + 1j * ref[1], rec[0] + 1j * rec[1])
@@ -42,7 +45,7 @@ def main():
         return
     for row in rows:
         print(" ".join(f"{k}={v:.2e}" if isinstance(v, float) else f"{k}={v}" for k, v in row.items()))
-    for k in ("parts", "XA", "AA", "shells", "scale_XA", "scale_AA", "bp_data", "bp_weight"):
+    for k in ("parts", "XA", "AA", "shells", "scale_XA", "scale_AA", "shell_form", "bp_data", "bp_weight"):
         v = [row[k] for row in rows if k in row]
         if v:
             print(f"worst {k} {max(v):.2e} over {len(v)} particles")

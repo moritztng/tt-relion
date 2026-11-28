@@ -85,8 +85,8 @@ def stats(r):
                 translations_significant=int((w > 0).any(0).sum()))
 
 
-def wavg(r):
-    """wavg_ref3D: (wdiff2s_parts, wdiff2s_XA, wdiff2s_AA), each [image_size] float64."""
+def _wavg_terms(r):
+    """(XA, AA, |X|^2 sum_ot w'), each [image_size] float64; parts = AA - 2 XA + the third."""
     import torch
     from .relion import _project
     nx, ny, maxR = r["imgX"], r["imgY"], r["maxR"]
@@ -110,8 +110,29 @@ def wavg(r):
     sw = w.sum(1)[:, None]
     XA = (ref * np.conj(Z * X)).real.sum(0)
     AA = (sw * np.abs(ref) ** 2).sum(0)
-    parts = AA - 2 * XA + np.abs(X) ** 2 * sw.sum()
-    return parts * walked, XA * walked, AA * walked
+    return XA * walked, AA * walked, np.abs(X) ** 2 * sw.sum() * walked
+
+
+def wavg(r):
+    """wavg_ref3D: (wdiff2s_parts, wdiff2s_XA, wdiff2s_AA), each [image_size] float64."""
+    XA, AA, X2 = _wavg_terms(r)
+    return AA - 2 * XA + X2, XA, AA
+
+
+def wavg_shells(r):
+    """The same sums folded into resolution shells, which is all RELION keeps of them: (XA, AA, X2), each
+    [shells below the current size] float64. A chip that holds R and the shifted images can return XA and AA
+    this way, 2 x shells numbers per particle; X2 needs only the image and the weights."""
+    ires = r["Mresol_fine"].astype(np.int64)
+    in_shell = ires > -1
+    return tuple(np.bincount(ires[in_shell], v[in_shell], r["image_current_size"] // 2 + 1) for v in _wavg_terms(r))
+
+
+def post_shells(r, XA, AA, X2):
+    """post() from the shell form."""
+    shells = AA - 2 * XA + X2
+    scaled = r["data_vs_prior"][:len(shells)] > 3
+    return shells, shells.sum(), XA[scaled].sum() / r["part_scale"], AA[scaled].sum() / r["part_scale"] ** 2
 
 
 def backproject(r):
