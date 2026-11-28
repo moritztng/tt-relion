@@ -5,7 +5,8 @@
 //           backproject builds the phase tables again, walks every orientation's rows and splats under row locks
 //   sparse  one pass per orientation that has a significant pair: phase tables for the translations in use only,
 //           Z = sum_t w' S_t once per row and shared by the three per-pixel sums and the back-projected image
-//   splat   the splat alone (the part that stays on the host when the chip returns per-orientation sums)
+//   splat   the splat alone (the part that stays on the host when the chip returns per-orientation sums), into
+//           RELION's three arrays with and without row locks, and into one interleaved (re, im, weight) array
 //
 // Each variant's sums are compared with what RELION recorded (relative L2), so a variant that does other work
 // shows. Build: g++ -O3 -march=native -std=c++17 kernel_bench.cpp -o kernel_bench
@@ -113,6 +114,30 @@ struct Vol
 	}
 };
 
+// The same splat into ONE array of (re, im, weight) per voxel: 4 cache lines per pixel instead of 12.
+struct Vol3
+{
+	long X, Y, Z, initY, initZ;
+	std::vector<float> v;
+	Vol3(long x, long y, long z, long iy, long iz) : X(x), Y(y), Z(z), initY(iy), initZ(iz), v(3 * x * y * z) {}
+	inline void add2(long i, float g0, float g1, float r, float m, float f)
+	{
+		float *q = &v[3 * i];
+		q[0] += g0 * r; q[1] += g0 * m; q[2] += g0 * f;
+		q[3] += g1 * r; q[4] += g1 * m; q[5] += g1 * f;
+	}
+	inline void splat(float xp, float yp, float zp, float r, float m, float f)
+	{
+		const int x0 = std::floor(xp), yy = std::floor(yp), zz = std::floor(zp);
+		const float fx = xp - x0, fy = yp - yy, fz = zp - zz, mfx = 1 - fx, mfy = 1 - fy, mfz = 1 - fz;
+		const long i = ((zz - initZ) * Y + yy - initY) * X + x0;
+		add2(i, mfz * mfy * mfx, mfz * mfy * fx, r, m, f);
+		add2(i + X, mfz * fy * mfx, mfz * fy * fx, r, m, f);
+		add2(i + X * Y, fz * mfy * mfx, fz * mfy * fx, r, m, f);
+		add2(i + X * Y + X, fz * fy * mfx, fz * fy * fx, r, m, f);
+	}
+};
+
 struct Particle
 {
 	Rec r;
@@ -149,8 +174,8 @@ static double rel(const std::vector<double> &a, const float *b, size_t n)
 int main(int argc, char **argv)
 {
 	std::printf("# particle O O_sig T T_sig pairs P | relion: tables project pairs bp(locks) bp(no locks) | sparse: all(locks) all(no locks) "
-	            "splat(locks) splat(no locks) | rel err vs record: relion parts XA AA, sparse parts XA AA, bp weight relion sparse\n");
-	double tot[9] = {0};
+	            "splat(locks) splat(no locks) splat(interleaved) | rel err vs record: relion parts XA AA, sparse parts XA AA, bp weight relion sparse interleaved\n");
+	double tot[10] = {0};
 	int count = 0;
 	for (int a = 1; a < argc; a++)
 	{
@@ -378,20 +403,50 @@ int main(int argc, char **argv)
 			}
 			s_ms[lock] = cpu_ms() - t0;
 		}
+		// ---- the splat alone into the interleaved volume
+		double s3_ms, wsum3 = 0;
+		{
+			Vol3 v3(vol.X, vol.Y, vol.Z, vol.initY, vol.initZ);
+			evict();
+			const double t3 = cpu_ms();
+			size_t ko = 0;
+			for (long o : sig_o)
+			{
+				const float *e = p.e + 9 * o;
+				for (int iy = 0; iy < ny; iy++)
+				{
+					const int y = iy > half ? iy - ny : iy;
+					const int xmax = std::sqrt((float)(half * half - y * y));
+					const float *k = &keep[(ko * P + iy * nx) * 3];
+					for (int x = 0; x < xmax; x++)
+					{
+						if (k[3 * x + 2] <= 0) continue;
+						float xp = (e[0] * x + e[1] * y) * p.pf_bp, yp = (e[3] * x + e[4] * y) * p.pf_bp, zp = (e[6] * x + e[7] * y) * p.pf_bp;
+						float bi = k[3 * x + 1];
+						if (xp < 0) { xp = -xp; yp = -yp; zp = -zp; bi = -bi; }
+						v3.splat(xp, yp, zp, k[3 * x], bi, k[3 * x + 2]);
+					}
+				}
+				ko++;
+			}
+			s3_ms = cpu_ms() - t3;
+			for (size_t i = 2; i < v3.v.size(); i += 3) wsum3 += v3.v[i];
+		}
 		double wsum_rec = 0;
 		const float *bw = F(r, "bp_weight");
 		for (size_t i = 0; i < r.at("bp_weight").size() / 4; i++) wsum_rec += bw[i];
-		std::printf("%ld %ld %zu %ld %zu %ld %ld | %.2f %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.1e %.1e %.1e, %.1e %.1e %.1e, %.1e %.1e\n",
+		std::printf("%ld %ld %zu %ld %zu %ld %ld | %.2f %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f %.2f | %.1e %.1e %.1e, %.1e %.1e %.1e, %.1e %.1e %.1e\n",
 		            I(r, "part_id"), O, sig_o.size(), T, sig_t.size(), pairs, P,
-		            a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0],
-		            ea[0], ea[1], ea[2], eb[0], eb[1], eb[2], std::fabs(wsum_relion / wsum_rec - 1), std::fabs(wsum_sparse / wsum_rec - 1));
-		const double v[9] = {a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0]};
-		for (int i = 0; i < 9; i++) tot[i] += v[i];
+		            a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0], s3_ms,
+		            ea[0], ea[1], ea[2], eb[0], eb[1], eb[2], std::fabs(wsum_relion / wsum_rec - 1), std::fabs(wsum_sparse / wsum_rec - 1),
+		            std::fabs(wsum3 / wsum_rec - 1));
+		const double v[10] = {a_tables, a_project, a_all - a_project, b_ms[1], b_ms[0], c_ms[1], c_ms[0], s_ms[1], s_ms[0], s3_ms};
+		for (int i = 0; i < 10; i++) tot[i] += v[i];
 		count++;
 	}
 	if (count)
-		std::printf("mean of %d: relion tables %.2f project %.2f pairs %.2f bp %.2f (no locks %.2f) = %.2f | sparse %.2f (no locks %.2f) | splat alone %.2f (no locks %.2f)\n",
+		std::printf("mean of %d: relion tables %.2f project %.2f pairs %.2f bp %.2f (no locks %.2f) = %.2f | sparse %.2f (no locks %.2f) | splat alone %.2f (no locks %.2f, one interleaved volume %.2f)\n",
 		            count, tot[0] / count, tot[1] / count, tot[2] / count, tot[3] / count, tot[4] / count, (tot[0] + tot[1] + tot[2] + tot[3]) / count,
-		            tot[5] / count, tot[6] / count, tot[7] / count, tot[8] / count);
+		            tot[5] / count, tot[6] / count, tot[7] / count, tot[8] / count, tot[9] / count);
 	return 0;
 }
