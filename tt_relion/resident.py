@@ -11,6 +11,7 @@ sends images, weights, translations and Euler matrices and reads back d2.
 One instance per chip, used by tt_relion.device_server. The steps are the ones perf/rlx/resident/global_pass.py
 measured against float64 on real particles; that script stays the precision reference.
 """
+import os
 import time
 
 import numpy as np
@@ -23,7 +24,8 @@ from .proj_lerp import proj_rot
 KC = 480        # K run of the digit product (oz_fused KR = 15 tiles)
 RBLK = 512      # oz_fused row block
 OBLK = 256      # oz_fused column block
-OCH = 4096      # orientations per product
+OCH = max(OBLK, int(os.environ.get("TT_RELION_OCH", "4096")) // OBLK * OBLK)     # orientations per product. Each chunk is
+                # its own run of programs, so a small batch (one 512-row tile) may be cheaper on fewer, wider chunks
 RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a new row count on every call, and
                 # each new shape costs seconds of program builds
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
