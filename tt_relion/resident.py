@@ -352,10 +352,11 @@ class Resident:
                 p = slice(c * 1024, min(c * 1024 + 1024, self.P))
                 z = ex[:, xj[p]] * ey[:, yj[p]] * xw[pn[a:b], p]
                 A[dr[a:b], c, 0, :p.stop - p.start], A[dr[a:b], c, 1, :p.stop - p.start] = z.real, z.imag
-        # The server is one thread and the chip waits while it builds this. Runs of 128 rows keep a run's complex
-        # temporaries (2 MB each) in cache, and OPT threads take the runs side by side.
+        # The server is one thread and the chip waits while it builds this. Runs of 32 rows keep a run's complex
+        # temporaries (0.5 MB each) in cache, and OPT threads take the runs side by side. A fine batch brings ~500
+        # rows: runs of 128 gave four threads five runs to share (45 ms for 537 rows x 9,922 pixels, 24 ms with 32).
         R = len(pn)
-        cuts = list(range(0, R, 128)) + [R]
+        cuts = list(range(0, R, 32)) + [R]
         list(_pool().map(rows, cuts[:-1], cuts[1:])) if OPT > 1 and len(cuts) > 2 else [rows(a, b) for a, b in zip(cuts[:-1], cuts[1:])]
         nx = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)
         return A.reshape(n, self.K), self._kchip(w, w)[sel], nx[sel]
