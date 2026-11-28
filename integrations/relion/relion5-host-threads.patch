@@ -1,165 +1,413 @@
-diff --git a/cmake/BuildFFTW.cmake b/cmake/BuildFFTW.cmake
-index f8e69ea..323acc3 100644
---- a/cmake/BuildFFTW.cmake
-+++ b/cmake/BuildFFTW.cmake
-@@ -8,8 +8,10 @@ endif()
- find_path(   OWN_FFTW_INCLUDES NAMES fftw3.h PATHS ${FFTW_EXTERNAL_PATH}/include NO_DEFAULT_PATH) 
- find_library(OWN_FFTW_SINGLE   NAMES fftw3f  PATHS ${FFTW_EXTERNAL_PATH}/lib     NO_DEFAULT_PATH)
- find_library(OWN_FFTW_DOUBLE   NAMES fftw3   PATHS ${FFTW_EXTERNAL_PATH}/lib     NO_DEFAULT_PATH)
-+find_library(OWN_FFTW_SINGLE_THREADS NAMES fftw3f_threads PATHS ${FFTW_EXTERNAL_PATH}/lib NO_DEFAULT_PATH)
-+find_library(OWN_FFTW_DOUBLE_THREADS NAMES fftw3_threads  PATHS ${FFTW_EXTERNAL_PATH}/lib NO_DEFAULT_PATH)
+diff --git a/src/backprojector.cpp b/src/backprojector.cpp
+index e76ff72..ad0e2ca 100644
+--- a/src/backprojector.cpp
++++ b/src/backprojector.cpp
+@@ -1465,7 +1465,7 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
+ 	if (do_map)
+ 	{
+ 		// Then, add the inverse of tau2-spectrum values to the weight
+-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Fconv)
++		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_PARALLEL(Fconv)
+  		{
+ 			int r2 = kp * kp + ip * ip + jp * jp;
+ 			if (r2 < max_r2)
+@@ -1551,7 +1551,7 @@ void BackProjector::reconstruct(MultidimArray<RFLOAT> &vol_out,
  
--if(OWN_FFTW_INCLUDES AND (OWN_FFTW_SINGLE OR NOT FFTW_SINGLE_REQUIRED) AND (OWN_FFTW_DOUBLE OR NOT FFTW_DOUBLE_REQUIRED))
-+if(OWN_FFTW_INCLUDES AND ((OWN_FFTW_SINGLE AND OWN_FFTW_SINGLE_THREADS) OR NOT FFTW_SINGLE_REQUIRED) AND ((OWN_FFTW_DOUBLE AND OWN_FFTW_DOUBLE_THREADS) OR NOT FFTW_DOUBLE_REQUIRED))
- 
- 	if (OWN_FFTW_SINGLE AND FFTW_SINGLE_REQUIRED)
- 		message(STATUS "Found previously built non-system single precision FFTW libraries that will be used.")
-@@ -37,7 +39,7 @@ else()
- 	
- 	set(FFTW_FOUND FALSE)
- 	
--	set(ext_conf_flags_fft --enable-shared --prefix=${FFTW_EXTERNAL_PATH})
-+	set(ext_conf_flags_fft --enable-shared --enable-threads --prefix=${FFTW_EXTERNAL_PATH})
- 	if(TARGET_X86)
- 		if (AMDFFTW)
- 			set(ext_conf_flags_fft ${ext_conf_flags_fft} --enable-sse2 --enable-avx --enable-avx2 --enable-amd-opt)
-@@ -49,6 +51,8 @@ else()
- 	set(OWN_FFTW_SINGLE ${FFTW_EXTERNAL_PATH}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}fftw3${CMAKE_SHARED_LIBRARY_SUFFIX})
- 	set(OWN_FFTW_DOUBLE ${FFTW_EXTERNAL_PATH}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}fftw3f${CMAKE_SHARED_LIBRARY_SUFFIX})
- 	set(OWN_FFTW_INCLUDES "${FFTW_EXTERNAL_PATH}/include" )
-+	set(OWN_FFTW_SINGLE_THREADS ${FFTW_EXTERNAL_PATH}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}fftw3f_threads${CMAKE_SHARED_LIBRARY_SUFFIX})
-+	set(OWN_FFTW_DOUBLE_THREADS ${FFTW_EXTERNAL_PATH}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}fftw3_threads${CMAKE_SHARED_LIBRARY_SUFFIX})
- 	
- 	set(FFTW_PATH ${FFTW_PATH} ${FFTW_EXTERNAL_PATH})
- 
-@@ -130,12 +134,13 @@ else()
- endif()
- 
- if (FFTW_SINGLE_REQUIRED)
--	set(FFTW_LIBRARIES ${OWN_FFTW_SINGLE} ${FFTW_LIBRARIES})
-+	set(FFTW_LIBRARIES ${OWN_FFTW_SINGLE_THREADS} ${OWN_FFTW_SINGLE} ${FFTW_LIBRARIES})
- endif()
- 
- if (FFTW_DOUBLE_REQUIRED)
--	set(FFTW_LIBRARIES ${OWN_FFTW_DOUBLE} ${FFTW_LIBRARIES})
-+	set(FFTW_LIBRARIES ${OWN_FFTW_DOUBLE_THREADS} ${OWN_FFTW_DOUBLE} ${FFTW_LIBRARIES})
- endif()
-+add_definitions(-DRELION_FFTW_THREADS)
- 
- if (FFTW_INCLUDES)
- 	set(FFTW_INCLUDES ${OWN_FFTW_INCLUDES} ${FFTW_INCLUDES})
+ 		bool have_warned = false;
+ 		// perform XMIPP_MAX on all weight elements, and do division of data/weight
+-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Fweight)
++		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_PARALLEL(Fweight)
+ 		{
+ 			const int r2 = kp * kp + ip * ip + jp * jp;
+ 			const int ires = FLOOR(sqrt((RFLOAT)r2) / padding_factor);
 diff --git a/src/fftw.cpp b/src/fftw.cpp
-index 1a7ce75..67ead59 100644
+index 1a7ce75..5531ca6 100644
 --- a/src/fftw.cpp
 +++ b/src/fftw.cpp
-@@ -45,6 +45,42 @@
+@@ -45,6 +45,17 @@
  
  #include "src/macros.h"
  #include "src/fftw.h"
 +
-+static int fftw_big_threads = 1;
-+static bool fftw_threads_initialised = false;
 +
-+void setFftwBigTransformThreads(int nr_threads)
-+{
-+#ifdef RELION_FFTW_THREADS
-+	#pragma omp critical(FourierTransformer_fftw_plan)
-+	{
-+		if (!fftw_threads_initialised)
-+		{
-+#ifdef RELION_SINGLE_PRECISION
-+			fftwf_init_threads();
-+#else
-+			fftw_init_threads();
-+#endif
-+			fftw_threads_initialised = true;
-+		}
-+		// FFTW_ESTIMATE plans for 720^3 stop scaling past ~4 threads (5.8 s at 1, 3.0 at 4, 7.8 at 8).
-+		fftw_big_threads = std::max(1, std::min(nr_threads, 4));
-+	}
-+#endif
-+}
++static int big_array_threads = 1;
++void setBigArrayThreads(int nr_threads) { big_array_threads = std::max(1, nr_threads); }
++int bigArrayThreads() { return big_array_threads; }
 +
-+// Called inside the plan critical section.
-+static void planThreadsFor(size_t nelem)
-+{
-+#ifdef RELION_FFTW_THREADS
-+	int n = (nelem >= ((size_t)1 << 22)) ? fftw_big_threads : 1;
 +#ifdef RELION_SINGLE_PRECISION
-+	fftwf_plan_with_nthreads(n);
++#define FFTW_(name) fftwf_ ## name
 +#else
-+	fftw_plan_with_nthreads(n);
++#define FFTW_(name) fftw_ ## name
 +#endif
-+#endif
-+}
  #include "src/args.h"
  #include <string.h>
  #include <math.h>
-@@ -120,6 +156,22 @@ void FourierTransformer::cleanup()
+@@ -68,7 +79,7 @@
+ 
+ // Constructors and destructors --------------------------------------------
+ FourierTransformer::FourierTransformer():
+-		plans_are_set(false)
++		plans_are_set(false), slabs(false)
+ {
+ 	init();
+ 
+@@ -86,7 +97,7 @@ FourierTransformer::~FourierTransformer()
+ }
+ 
+ FourierTransformer::FourierTransformer(const FourierTransformer& op) :
+-		plans_are_set(false)
++		plans_are_set(false), slabs(false)
+ {
+ 	// Clear current object
  	clear();
- 	// Then clean up all the junk fftw keeps lying around
- 	// SOMEHOW THE FOLLOWING IS NOT ALLOWED WHEN USING MULTPLE TRANSFORMER OBJECTS....
-+#ifdef RELION_FFTW_THREADS
-+	// fftw_init_threads() adds the threaded solvers only to the planner alive at that moment, and fftw_cleanup()
-+	// destroys it. A bare cleanup therefore leaves every later big plan threaded only deep inside its loops
-+	// (~500k thread spawns per 720^3 transform, 10x slower). Tear down and re-initialise the threads layer instead.
-+	if (fftw_threads_initialised)
-+	{
-+#ifdef RELION_SINGLE_PRECISION
-+		fftwf_cleanup_threads();
-+		fftwf_init_threads();
-+#else
-+		fftw_cleanup_threads();
-+		fftw_init_threads();
-+#endif
-+		return;
-+	}
-+#endif
- #ifdef RELION_SINGLE_PRECISION
- 	fftwf_cleanup();
- #else
-@@ -215,6 +267,7 @@ void FourierTransformer::setReal(MultidimArray<RFLOAT> &input, bool force_new_pl
+@@ -146,6 +157,12 @@ void FourierTransformer::destroyPlans()
+ 			fftw_destroy_plan(fPlanForward);
+ 			fftw_destroy_plan(fPlanBackward);
+ #endif
++			if (slabs)
++			{
++				FFTW_(destroy_plan)(fPlanSlabsZ[0]);
++				FFTW_(destroy_plan)(fPlanSlabsZ[1]);
++				slabs = false;
++			}
+ 			plans_are_set = false;
+ 		}
+ 	}
+@@ -215,19 +232,39 @@ void FourierTransformer::setReal(MultidimArray<RFLOAT> &input, bool force_new_pl
  
  		#pragma omp critical(FourierTransformer_fftw_plan)
  		{
-+			planThreadsFor(MULTIDIM_SIZE(*fReal));
++			FFTW_(complex) *fourier = (FFTW_(complex)*) MULTIDIM_ARRAY(fFourier);
++			RFLOAT *real = MULTIDIM_ARRAY(*fReal);
++			// Slabs need every z slice aligned like the first one, or FFTW's SIMD plans do not apply to it.
++			slabs = ndim == 3 && bigArrayThreads() > 1 && MULTIDIM_SIZE(input) >= ((size_t)1 << 22) &&
++			        FFTW_(alignment_of)(real + YXSIZE(input)) == FFTW_(alignment_of)(real) &&
++			        FFTW_(alignment_of)((RFLOAT*)(fourier + YXSIZE(fFourier))) == FFTW_(alignment_of)((RFLOAT*)fourier) &&
++			        FFTW_(alignment_of)((RFLOAT*)(fourier + XSIZE(fFourier))) == FFTW_(alignment_of)((RFLOAT*)fourier);
++			if (slabs)
++			{
++				FFTW_(iodim) z = {N[0], (int)YXSIZE(fFourier), (int)YXSIZE(fFourier)}, x = {(int)XSIZE(fFourier), 1, 1};
++				fPlanForward = FFTW_(plan_dft_r2c_2d)(N[1], N[2], real, fourier, FFTW_ESTIMATE);
++				fPlanBackward = FFTW_(plan_dft_c2r_2d)(N[1], N[2], fourier, real, FFTW_ESTIMATE);
++				fPlanSlabsZ[0] = FFTW_(plan_guru_dft)(1, &z, 1, &x, fourier, fourier, FFTW_FORWARD, FFTW_ESTIMATE);
++				fPlanSlabsZ[1] = FFTW_(plan_guru_dft)(1, &z, 1, &x, fourier, fourier, FFTW_BACKWARD, FFTW_ESTIMATE);
++				if (fPlanSlabsZ[0] == NULL || fPlanSlabsZ[1] == NULL)
++					REPORT_ERROR("FFTW plans cannot be created");
++			}
++			else
++			{
  #ifdef RELION_SINGLE_PRECISION
- 			fPlanForward = fftwf_plan_dft_r2c(ndim, N, MULTIDIM_ARRAY(*fReal),
- 							  (fftwf_complex*) MULTIDIM_ARRAY(fFourier), FFTW_ESTIMATE);
-@@ -292,6 +345,7 @@ void FourierTransformer::setReal(MultidimArray<Complex > &input, bool force_new_
- 		RCTIC(TIMING_FFTW_PLAN);
- 		#pragma omp critical(FourierTransformer_fftw_plan)
- 		{
-+			planThreadsFor(MULTIDIM_SIZE(*fComplex));
- #ifdef RELION_SINGLE_PRECISION
- 			fPlanForward = fftwf_plan_dft(ndim, N, (fftwf_complex*) MULTIDIM_ARRAY(*fComplex),
- 						      (fftwf_complex*) MULTIDIM_ARRAY(fFourier), FFTW_FORWARD, FFTW_ESTIMATE);
+-			fPlanForward = fftwf_plan_dft_r2c(ndim, N, MULTIDIM_ARRAY(*fReal),
+-							  (fftwf_complex*) MULTIDIM_ARRAY(fFourier), FFTW_ESTIMATE);
+-			fPlanBackward = fftwf_plan_dft_c2r(ndim, N,
+-							   (fftwf_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal),
+-							   FFTW_ESTIMATE);
++				fPlanForward = fftwf_plan_dft_r2c(ndim, N, MULTIDIM_ARRAY(*fReal),
++								  (fftwf_complex*) MULTIDIM_ARRAY(fFourier), FFTW_ESTIMATE);
++				fPlanBackward = fftwf_plan_dft_c2r(ndim, N,
++								   (fftwf_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal),
++								   FFTW_ESTIMATE);
+ #else
+-			fPlanForward = fftw_plan_dft_r2c(ndim, N, MULTIDIM_ARRAY(*fReal),
+-							 (fftw_complex*) MULTIDIM_ARRAY(fFourier), FFTW_ESTIMATE);
+-			fPlanBackward = fftw_plan_dft_c2r(ndim, N,
+-							  (fftw_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal),
+-							  FFTW_ESTIMATE);
++				fPlanForward = fftw_plan_dft_r2c(ndim, N, MULTIDIM_ARRAY(*fReal),
++								 (fftw_complex*) MULTIDIM_ARRAY(fFourier), FFTW_ESTIMATE);
++				fPlanBackward = fftw_plan_dft_c2r(ndim, N,
++								  (fftw_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal),
++								  FFTW_ESTIMATE);
+ #endif
++			}
+ 		}	
+ 		RCTOC(TIMING_FFTW_PLAN);
+ 
+@@ -335,13 +372,18 @@ void FourierTransformer::Transform(int sign)
+ 	if (sign == FFTW_FORWARD)
+ 	{
+ 		RCTIC(TIMING_FFTW_EXECUTE);
+-#ifdef RELION_SINGLE_PRECISION
+-		fftwf_execute_dft_r2c(fPlanForward,MULTIDIM_ARRAY(*fReal),
+-				(fftwf_complex*) MULTIDIM_ARRAY(fFourier));
+-#else
+-		fftw_execute_dft_r2c(fPlanForward,MULTIDIM_ARRAY(*fReal),
+-				(fftw_complex*) MULTIDIM_ARRAY(fFourier));
+-#endif
++		if (slabs)
++		{
++			FFTW_(complex) *fourier = (FFTW_(complex)*) MULTIDIM_ARRAY(fFourier);
++			#pragma omp parallel for num_threads(bigArrayThreads())
++			for (long int k = 0; k < ZSIZE(*fReal); k++)
++				FFTW_(execute_dft_r2c)(fPlanForward, MULTIDIM_ARRAY(*fReal) + k * YXSIZE(*fReal), fourier + k * YXSIZE(fFourier));
++			#pragma omp parallel for num_threads(bigArrayThreads())
++			for (long int i = 0; i < YSIZE(fFourier); i++)
++				FFTW_(execute_dft)(fPlanSlabsZ[0], fourier + i * XSIZE(fFourier), fourier + i * XSIZE(fFourier));
++		}
++		else
++			FFTW_(execute_dft_r2c)(fPlanForward, MULTIDIM_ARRAY(*fReal), (FFTW_(complex)*) MULTIDIM_ARRAY(fFourier));
+ 		RCTOC(TIMING_FFTW_EXECUTE);
+ 
+ 		// Normalisation of the transform
+@@ -354,6 +396,7 @@ void FourierTransformer::Transform(int sign)
+ 			REPORT_ERROR("No complex nor real data defined");
+ 
+ 		RCTIC(TIMING_FFTW_NORMALISE);
++		PARALLEL_IF_BIG(MULTIDIM_SIZE(fFourier))
+ 		FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(fFourier)
+ 			DIRECT_MULTIDIM_ELEM(fFourier,n) /= size;
+ 		RCTOC(TIMING_FFTW_NORMALISE);
+@@ -361,13 +404,18 @@ void FourierTransformer::Transform(int sign)
+ 	else if (sign == FFTW_BACKWARD)
+ 	{
+ 		RCTIC(TIMING_FFTW_EXECUTE);
+-#ifdef RELION_SINGLE_PRECISION
+-		fftwf_execute_dft_c2r(fPlanBackward,
+-				(fftwf_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal));
+-#else
+-		fftw_execute_dft_c2r(fPlanBackward,
+-				(fftw_complex*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal));
+-#endif
++		if (slabs)
++		{
++			FFTW_(complex) *fourier = (FFTW_(complex)*) MULTIDIM_ARRAY(fFourier);
++			#pragma omp parallel for num_threads(bigArrayThreads())
++			for (long int i = 0; i < YSIZE(fFourier); i++)
++				FFTW_(execute_dft)(fPlanSlabsZ[1], fourier + i * XSIZE(fFourier), fourier + i * XSIZE(fFourier));
++			#pragma omp parallel for num_threads(bigArrayThreads())
++			for (long int k = 0; k < ZSIZE(*fReal); k++)
++				FFTW_(execute_dft_c2r)(fPlanBackward, fourier + k * YXSIZE(fFourier), MULTIDIM_ARRAY(*fReal) + k * YXSIZE(*fReal));
++		}
++		else
++			FFTW_(execute_dft_c2r)(fPlanBackward, (FFTW_(complex)*) MULTIDIM_ARRAY(fFourier), MULTIDIM_ARRAY(*fReal));
+ 		RCTOC(TIMING_FFTW_EXECUTE);
+ 	}
+ }
 diff --git a/src/fftw.h b/src/fftw.h
-index b167742..019b2ac 100644
+index b167742..88a92e1 100644
 --- a/src/fftw.h
 +++ b/src/fftw.h
-@@ -148,6 +148,10 @@
+@@ -148,6 +148,22 @@
   *	Vmag(k,i,j)=20*log10(abs(Vfft(k,i,j)));
   * @endcode
   */
-+// Threads FFTW may use for one transform of at least 2^22 real elements (3D maps and volumes; the per-particle
-+// 2D transforms stay single-threaded). Set once from --j; a no-op unless FFTW was built with threads.
-+void setFftwBigTransformThreads(int nr_threads);
++// Threads for work on one array of at least 2^22 elements (3D maps and volumes), set once from --j.
++// Per-particle 2D transforms and loops stay single-threaded.
++void setBigArrayThreads(int nr_threads);
++int bigArrayThreads();
++
++// Placed before a loop over a 3D array of n elements whose iterations are independent.
++#define PARALLEL_IF_BIG_PRAGMA(x) _Pragma(#x)
++#define PARALLEL_IF_BIG(n) PARALLEL_IF_BIG_PRAGMA(omp parallel for num_threads(bigArrayThreads()) if((size_t)(n) >= ((size_t)1 << 22)))
++
++// FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM with the z slices shared between the big-array threads.
++#define FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_PARALLEL(V) \
++	PARALLEL_IF_BIG(MULTIDIM_SIZE(V)) \
++	for (long int k = 0; k<ZSIZE(V); k++) \
++		for (long int i = 0, ip = 0, kp = (k < XSIZE(V)) ? k : k - ZSIZE(V); i<YSIZE(V); i++, ip = (i < XSIZE(V)) ? i : i - YSIZE(V)) \
++			for (long int j = 0, jp = 0; j<XSIZE(V); j++, jp = j)
 +
  class FourierTransformer
  {
  public:
+@@ -176,6 +192,15 @@ public:
+ 
+ 	bool plans_are_set;
+ 
++	// A big 3D real transform runs as OpenMP slabs: fPlanForward/Backward transform one z slice (2D) and
++	// fPlanSlabsZ[0/1] transform along z, forward/backward, for one y row. Same result as the single 3D plan.
++	bool slabs;
++#ifdef RELION_SINGLE_PRECISION
++	fftwf_plan fPlanSlabsZ[2];
++#else
++	fftw_plan fPlanSlabsZ[2];
++#endif
++
+ // Public methods
+ public:
+ 	/** Default constructor */
+@@ -393,6 +418,7 @@ void CenterFFTbySign(MultidimArray <T> &v)
+     // Unfortunately, this cannot be checked within this function...
+     // Forward and backward shifts are equivalent.
+ 
++    PARALLEL_IF_BIG(MULTIDIM_SIZE(v))
+     FOR_ALL_ELEMENTS_IN_ARRAY3D(v)
+     {
+ 	// NOTE: != has higher precedence than & in C as pointed out in GitHub issue #637.
+diff --git a/src/mask.cpp b/src/mask.cpp
+index 5b273aa..f3b5cca 100644
+--- a/src/mask.cpp
++++ b/src/mask.cpp
+@@ -74,9 +74,10 @@ void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine
+ 	}
+ 
+ 	// Apply noisy or average background value
++	PARALLEL_IF_BIG(MULTIDIM_SIZE(vol))
+ 	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol)
+ 	{
+-		r = sqrt((RFLOAT)(k*k + i*i + j*j));
++		RFLOAT r = sqrt((RFLOAT)(k*k + i*i + j*j));
+ 		if (r < radius)
+ 		{
+ 			continue;
+@@ -87,7 +88,7 @@ void softMaskOutsideMap(MultidimArray<RFLOAT> &vol, RFLOAT radius, RFLOAT cosine
+ 		}
+ 		else
+ 		{
+-			raisedcos = 0.5 + 0.5 * cos(PI * (radius_p - r) / cosine_width );
++			RFLOAT raisedcos = 0.5 + 0.5 * cos(PI * (radius_p - r) / cosine_width );
+ 			RFLOAT add = (Mnoise == NULL) ?  sum_bg : A3D_ELEM(*Mnoise, k, i, j);
+ 			A3D_ELEM(vol, k, i, j) = (1 - raisedcos) * A3D_ELEM(vol, k, i, j) + raisedcos * add;
+ 		}
 diff --git a/src/ml_optimiser.cpp b/src/ml_optimiser.cpp
-index fb33d84..7ddcfcb 100644
+index fb33d84..8398ef4 100644
 --- a/src/ml_optimiser.cpp
 +++ b/src/ml_optimiser.cpp
 @@ -3229,6 +3229,9 @@ void MlOptimiser::initialLowPassFilterReferences()
  
  void MlOptimiser::iterateSetup()
  {
-+	// Large 3D transforms (reference FT, reconstruction) use the --j threads.
-+	setFftwBigTransformThreads(nr_threads);
++	// Work on whole 3D maps (reference transform, reconstruction) uses the --j threads.
++	setBigArrayThreads(nr_threads);
 +
      // Set up the thread task distributors for the particles and the orientations (will be resized later on)
      exp_ipart_ThreadTaskDistributor = new ThreadTaskDistributor(nr_threads, 1);
  
+@@ -9301,6 +9304,17 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
+     std::cout << " Estimating accuracies in the orientational assignment ... " << std::endl;
+     int nr_particles = (my_last_part_id - my_first_part_id + 1);
+     init_progress_bar( nr_particles * mymodel.nr_classes * mymodel.nr_bodies);
++
++    // The particles are independent, so they share the threads. Each one perturbs with the random numbers that
++    // follow its own seed (part_id to keep exactly the same as in relion-3.0....): draw them here, in order.
++    std::vector<std::vector<RFLOAT> > ran(nr_particles);
++    for (long int ipart = 0; ipart < nr_particles; ipart++)
++    {
++        long int part_id = mydata.sorted_idx[my_first_part_id + ipart];
++        init_random_generator(random_seed + part_id);
++        for (int img_id = 0; img_id < mydata.numberOfImagesInParticle(part_id); img_id++)
++            ran[ipart].push_back(rnd_unif());
++    }
+     for (int iclass = 0; iclass < mymodel.nr_classes * mymodel.nr_bodies; iclass++)
+     {
+ 
+@@ -9323,15 +9337,19 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
+ #endif
+         (mymodel.orientability_contrib)[iclass].initZeros(mymodel.ori_size/2 + 1);
+ 
+-        RFLOAT acc_rot_class = 0.;
+-        RFLOAT acc_trans_class = 0.;
++        // Per-particle results, summed in particle order below
++        std::vector<RFLOAT> acc_rot_part(nr_particles, 0.), acc_trans_part(nr_particles, 0.);
++        std::vector<MultidimArray<RFLOAT> > orientability_part(nr_particles);
+         // Particles are already in random order, so just move from 0 to n_trials
+-        long int sum_nr_images = 0;
+-        for (long int part_id_sorted = my_first_part_id, metadata_offset = 0; part_id_sorted <= my_last_part_id; part_id_sorted++, metadata_offset++)
++        #pragma omp parallel for num_threads(nr_threads) schedule(dynamic)
++        for (long int part_id_sorted = my_first_part_id; part_id_sorted <= my_last_part_id; part_id_sorted++)
+         {
++            long int metadata_offset = part_id_sorted - my_first_part_id;
++            orientability_part[metadata_offset].initZeros(mymodel.ori_size/2 + 1);
+ 
+             std::vector<MultidimArray<RFLOAT> > Fctfs;
+             long int part_id = mydata.sorted_idx[part_id_sorted];
++            const std::vector<RFLOAT> &ran_part = ran[metadata_offset];
+ 
+             int group_id = mydata.getGroupId(part_id);
+             RFLOAT my_pixel_size = mydata.getImagePixelSize(part_id);
+@@ -9496,9 +9514,6 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
+                     if ( (imode == 0 && ang_error > 30.) || (imode == 1 && sh_error > 10.) )
+                         break;
+ 
+-                    // part_id to keep exactly the same as in relion-3.0....
+-                    init_random_generator(random_seed + part_id);
+-
+                     MultidimArray<Complex > F1, F2;
+                     Matrix2D<RFLOAT> A1, A2;
+ 
+@@ -9541,7 +9556,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
+                             if (mymodel.ref_dim == 3)
+                             {
+                                 // Randomly change rot, tilt or psi
+-                                RFLOAT ran = rnd_unif();
++                                RFLOAT ran = ran_part[img_id];
+                                 if (ran < 0.3333)
+                                     rot2 = rot1 + ang_error;
+                                 else if (ran < 0.6667)
+@@ -9557,7 +9572,7 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
+                         else
+                         {
+                             // Randomly change xoff or yoff
+-                            RFLOAT ran = rnd_unif();
++                            RFLOAT ran = ran_part[img_id];
+                             if (mymodel.data_dim == 3 || mydata.is_tomo)
+                             {
+                                 if (ran < 0.3333)
+@@ -9633,21 +9648,30 @@ void MlOptimiser::calculateExpectedAngularErrors(long int my_first_part_id, long
+                             int ires = DIRECT_MULTIDIM_ELEM(*myMresol, n);
+                             int ires_remapped = ROUND(remap_image_sizes * ires);
+                             if (ires > 0 && ires_remapped < XSIZE(mymodel.sigma2_noise[optics_group]))
+-                                mymodel.orientability_contrib[iclass](ires_remapped) +=
++                                orientability_part[metadata_offset](ires_remapped) +=
+                                         norm(DIRECT_MULTIDIM_ELEM(F1, n) - DIRECT_MULTIDIM_ELEM(F2, n)) / ( (2 * sigma2_fudge * mymodel.sigma2_noise[optics_group](ires_remapped) ) );
+                         }
+                     }
+ 
+                 } // end while my_snr >= pvalue
+                 if (imode == 0)
+-                    acc_rot_class += ang_error;
++                    acc_rot_part[metadata_offset] = ang_error;
+                 else if (imode == 1)
+-                    acc_trans_class += my_pixel_size * sh_error; // now in Angstroms!
++                    acc_trans_part[metadata_offset] = my_pixel_size * sh_error; // now in Angstroms!
+             } // end for imode
+ 
+-            progress_bar(nr_particles*iclass + metadata_offset);
+         } // end for part_id
+ 
++        RFLOAT acc_rot_class = 0.;
++        RFLOAT acc_trans_class = 0.;
++        for (long int ipart = 0; ipart < nr_particles; ipart++)
++        {
++            acc_rot_class += acc_rot_part[ipart];
++            acc_trans_class += acc_trans_part[ipart];
++            mymodel.orientability_contrib[iclass] += orientability_part[ipart];
++        }
++        progress_bar(nr_particles * (iclass + 1));
++
+         mymodel.acc_rot[iclass]   = acc_rot_class / (RFLOAT)nr_particles;
+         mymodel.acc_trans[iclass] = acc_trans_class / (RFLOAT)nr_particles;
+ 
+diff --git a/src/projector.cpp b/src/projector.cpp
+index c35691a..8b9a25f 100644
+--- a/src/projector.cpp
++++ b/src/projector.cpp
+@@ -335,6 +335,7 @@ void Projector::computeFourierTransformMap(
+ 		}
+ 		else
+ #endif
++		PARALLEL_IF_BIG(MULTIDIM_SIZE(vol_in))
+ 		FOR_ALL_ELEMENTS_IN_ARRAY3D(vol_in) // This will also work for 2D
+ 			A3D_ELEM(Mpad, k, i, j) = A3D_ELEM(vol_in, k, i, j);
+ 	}
+@@ -596,6 +597,7 @@ void Projector::griddingCorrect(MultidimArray<RFLOAT> &vol_in)
+ {
+ 	// Correct real-space map by dividing it by the Fourier transform of the interpolator(s)
+ 	vol_in.setXmippOrigin();
++	PARALLEL_IF_BIG(MULTIDIM_SIZE(vol_in))
+ 	FOR_ALL_ELEMENTS_IN_ARRAY3D(vol_in)
+ 	{
+ 		RFLOAT r = sqrt((RFLOAT)(k*k+i*i+j*j));
+diff --git a/src/projector.h b/src/projector.h
+index 172839f..a574bb3 100644
+--- a/src/projector.h
++++ b/src/projector.h
+@@ -252,7 +252,7 @@ public:
+ 		// Mout should already have the right size
+ 		// Initialize to zero
+ 		Mout.initZeros();
+-		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM(Mout)
++		FOR_ALL_ELEMENTS_IN_FFTW_TRANSFORM_PARALLEL(Mout)
+ 		{
+ 			if (kp*kp + ip*ip + jp*jp <= my_rmax2)
+ 				DIRECT_A3D_ELEM(Mout, k, i, j) = A3D_ELEM(Min, kp, ip, jp);
