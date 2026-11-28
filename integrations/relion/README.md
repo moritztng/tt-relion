@@ -40,6 +40,11 @@ on that list instead of on the dense orientation x translation block. It applies
 particle with a fine pass to follow (`--oversampling` above 0) and no first-iteration cross-correlation;
 every other case, and any call the bridge declines, takes the dense path unchanged.
 
+`relion5-particle-arena.patch` (optional) lets `--j` exceed the number of cores. RELION's `--cpu` path
+runs its particle loop in TBB's default arena, which stops at the core count whatever `--j` says. With
+the expectation step on a card a particle thread mostly waits for its batch, and the number of waiting
+threads is what fills a batch, so the patch gives the loop an arena of `--j` slots.
+
 `TT=ON` requires `ALTCPU=ON`: the kernels that are not offloaded yet compile from `src/acc/cpu`, and
 `ALTCPU` is also what defines `PROJECTOR_NO_TEXTURES`, which makes the padded Fourier reference a plain
 array instead of a texture object. `TT=ON` without `ALTCPU=ON` is a configure-time error.
