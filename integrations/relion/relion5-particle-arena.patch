@@ -1,0 +1,33 @@
+diff --git a/src/ml_optimiser.cpp b/src/ml_optimiser.cpp
+index fb33d84f..1a69ed39 100644
+--- a/src/ml_optimiser.cpp
++++ b/src/ml_optimiser.cpp
+@@ -64,6 +64,7 @@
+     #include <tbb/parallel_for.h>
+     #define TBB_PREVIEW_GLOBAL_CONTROL 1
+     #include <tbb/global_control.h>
++    #include <tbb/task_arena.h>
+     #include "src/acc/cpu/cpu_ml_optimiser.h"
+ #endif
+ 
+@@ -4292,8 +4293,12 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
+ 
+         // Set the size of the TBB thread pool for these particles
+         tbb::global_control gc(tbb::global_control::max_allowed_parallelism, nr_threads);
++        // TBB's default arena stops at the number of cores whatever --j says. A thread that waits on an
++        // accelerator needs no core, so the loop gets an arena of its own with nr_threads slots.
++        tbb::task_arena particle_arena(nr_threads);
+         // process all passed particles in parallel
+         //for(unsigned long i=my_first_part_id; i<=my_last_part_id; i++) {
++        particle_arena.execute([&]{
+         tbb::parallel_for(my_first_part_id, my_last_part_id+1, [&](long int i) {
+             CpuOptimiserType::reference ref = tbbCpuOptimiser.local();
+             MlOptimiserCpu *cpuOptimiser = (MlOptimiserCpu *)ref;
+@@ -4307,6 +4312,7 @@ void MlOptimiser::expectationSomeParticles(long int my_first_part_id, long int m
+ 
+             cpuOptimiser->expectationOneParticle(i, cpuOptimiser->thread_id);
+         });
++        });
+         //}
+     }  // do_cpu
+ #endif  // ifdef ALTCPU

@@ -16,12 +16,16 @@ void kernel_main() {
     constexpr uint32_t NRB = get_compile_time_arg_val(4), NCB = get_compile_time_arg_val(5);
     constexpr bool BT = get_compile_time_arg_val(6);
     constexpr uint32_t NB_K = get_compile_time_arg_val(7);   // the unpacker transposes each B tile
+    constexpr bool ZIG = get_compile_time_arg_val(8);
     constexpr uint32_t OG = 2;   // output tiles per dest pass: OG matmul slots + OG accumulator slots <= 4 fp32
     constexpr uint32_t cb_a = 0, cb_b = 1, cb_acc = 24, cb_done = 25;
     const uint32_t u0 = get_arg_val<uint32_t>(0), nu = get_arg_val<uint32_t>(1);
     if (nu == 0) return;
     mm_block_init(cb_a, cb_b, cb_acc, BT, OG, 1, KR);
-    for (uint32_t u = u0; u < u0 + nu; ++u) {
+    for (uint32_t v = u0; v < u0 + nu; ++v) {
+        // the reader's unit order (see reader.cpp)
+        const uint32_t zz = v % NB_K, kz = (zz & 1) ? NB_K - 1 - (zz >> 1) : (zz >> 1), blk = v / NB_K;
+        const uint32_t u = ZIG ? ((blk / (NRB * NCB)) * NB_K + kz) * (NRB * NCB) + blk % (NRB * NCB) : v;
         const uint32_t k = (u / (NRB * NCB)) % NB_K;
         cb_wait_front(cb_acc, RB * NB);
         for (uint32_t i = 0; i <= k; ++i) {

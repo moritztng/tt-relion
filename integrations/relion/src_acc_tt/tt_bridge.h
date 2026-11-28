@@ -24,6 +24,27 @@ namespace TTBridge
 			float *diff2s,
 			long orientation_num, long translation_num, long image_size);
 
+	// Whether the coarse pass can come back in candidate form (TT_RELION_CAND_WINDOW > 0 and the entry exists).
+	bool candOn();
+
+	// The coarse pass in candidate form. lo [orientation_num] and lt [translation_num] are -log priors of the
+	// orientations and translations (inf = excluded). On success fills idx (orientation * translation_num +
+	// translation, ascending) and val (diff2 + lo + lt minus the particle's minimum of it) for every sample
+	// within the window of that minimum, sets *best to the minimum and returns the count. A sample left out
+	// weighs under exp(-window) of the best one. Returns -1 when declined (off, over cap, a failure): the
+	// caller then runs the dense pass.
+	long diff2CoarseCand(
+			const float *mdlComplex,
+			int mdlX, int mdlY, int mdlZ, int mdlInitY, int mdlInitZ,
+			int maxR, int maxR2_padded, float padding_factor,
+			int imgX, int imgY,
+			const float *eulers,
+			const float *trans_x, const float *trans_y,
+			const float *Fimg_real, const float *Fimg_imag, const float *corr_img,
+			const float *lo, const float *lt,
+			unsigned long *idx, float *val, long cap, double *best,
+			long orientation_num, long translation_num, long image_size);
+
 	// Fine squared-difference kernel, 3D reference and 2D data. Same computation as the coarse
 	// pass over a different, data-dependent orientation set; RELION asks for significant_num
 	// entries of the orientation x translation matrix, named by rot_idx/trans_idx, and adds

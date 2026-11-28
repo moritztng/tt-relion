@@ -1,12 +1,12 @@
 #!/bin/bash
 # One heavy late iteration of the dev cell (it016: healpix 3, global finer pass), continued from the CPU reference
 # run's it015 state. Arm N: RELION CPU kernels (nullbase). Arm T: ttnn hook + TT_RELION_BATCH=8. Chips 16-23, 9 ranks x --j 8.
-# Env: SRC (source tree under ~/rlx-e2e, default src-b), TAG (run name, default dc2), ARMS, TT_RELION_RESIDENT=1 for arm T,
+# Env: SRC (source tree under $R, required: a default would silently run an old tree), TAG (run name, default dc2), ARMS, TT_RELION_RESIDENT=1 for arm T,
 # RANKS (default 9), RLX_CHIP_LIST (explicit chips), J (threads per rank, default 8) and BATCH (TT_RELION_BATCH of arm T, default 8).
 # FROM (optimiser.star to continue, default the CPU reference run's it015) and IT (the iteration to run, default 16),
 # RLX_CHIPS_PER_RANK (default 1). R (run root holding $SRC and runs/, default ~/rlx-e2e).
 # END_BY (epoch): the arm is stopped then, for a booked window that opens after it (default 45 min from its start).
-R=${R:-$HOME/rlx-e2e}; SRC=${SRC:-src-b}; TAG=${TAG:-dc2}
+R=${R:-$HOME/rlx-e2e}; : ${SRC:?name the source tree under $R}; TAG=${TAG:-dc2}
 FROM=${FROM:-$HOME/rlx/runs/dev_ref_bh/run_it015_optimiser.star}; IT=${IT:-16}; it=$(printf %03d $IT)
 export RELION_BIN=${RELION_BIN:-$R/relion/build/bin/relion_refine_mpi}
 export PYTHONPATH=$R/$SRC:$HOME/fleet/env/lib/python3.10/site-packages TT_RELION_PYTHON=$HOME/fleet/env/bin/python

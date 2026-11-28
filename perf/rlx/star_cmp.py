@@ -5,7 +5,7 @@ import sys
 import numpy as np
 
 COLS = ["_rlnAngleRot", "_rlnAngleTilt", "_rlnAnglePsi", "_rlnOriginXAngst", "_rlnOriginYAngst",
-        "_rlnMaxValueProbDistribution", "_rlnLogLikeliContribution"]
+        "_rlnMaxValueProbDistribution", "_rlnLogLikeliContribution", "_rlnNrOfSignificantSamples"]
 
 
 def rows(path):
@@ -19,6 +19,8 @@ ca, a = rows(sys.argv[1])
 cb, b = rows(sys.argv[2])
 print(f"rows {len(a)} vs {len(b)}")
 for k in COLS:
+    if k not in ca or k not in cb:
+        continue
     x = np.array([float(r[ca.index(k)]) for r in a])
     y = np.array([float(r[cb.index(k)]) for r in b])
     print(f"{k} differ {int((x != y).sum())} max {float(np.abs(x - y).max()):.6g}")

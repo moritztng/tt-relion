@@ -15,8 +15,9 @@ TT_RELION_RECORD_PREP=<dir> writes a particle's inputs and the five outputs of e
 diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
 --- a/src/acc/acc_ml_optimiser_impl.h
 +++ b/src/acc/acc_ml_optimiser_impl.h
-@@ -1,5 +1,16 @@
- static omp_lock_t global_mutex;
+@@ -13,6 +13,17 @@ static omp_lock_t global_mutex;
+ using deviceStream_t = virtualSYCL*;
+ #endif
  
 +#ifdef _TT_ENABLED
 +#include "src/acc/tt/tt_prep.h"
@@ -29,10 +30,10 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
 +};
 +#endif
 +
- #ifdef _SYCL_ENABLED
- #include "src/acc/sycl/sycl_virtual_dev.h"
- using deviceStream_t = virtualSYCL*;
-@@ -249,6 +260,25 @@
+ // ----------------------------------------------------------------------------
+ // -------------------- getFourierTransformsAndCtfs ---------------------------
+ // ----------------------------------------------------------------------------
+@@ -257,6 +268,25 @@ void getFourierTransformsAndCtfs(long int part_id,
      }
      sp.current_img = fn_img;
  
@@ -58,7 +59,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
      CTIC(accMLO->timer,"readData");
      // Get the image and recimg data
      if (baseMLO->do_parallel_disc_io)
-@@ -258,6 +288,10 @@
+@@ -266,6 +296,10 @@ void getFourierTransformsAndCtfs(long int part_id,
          if (baseMLO->do_preread_images)
          {
  
@@ -69,7 +70,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
              img().reshape(baseMLO->mydata.particles[part_id].img);
              CTIC(accMLO->timer,"ParaReadPrereadImages");
              FOR_ALL_DIRECT_ELEMENTS_IN_MULTIDIMARRAY(baseMLO->mydata.particles[part_id].img)
-@@ -265,6 +299,9 @@
+@@ -273,6 +307,9 @@ void getFourierTransformsAndCtfs(long int part_id,
                  DIRECT_MULTIDIM_ELEM(img(), n) = (RFLOAT)DIRECT_MULTIDIM_ELEM(baseMLO->mydata.particles[part_id].img, n);
              }
              CTOC(accMLO->timer,"ParaReadPrereadImages");
@@ -79,7 +80,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
          }
          else
          {
-@@ -347,10 +384,65 @@
+@@ -355,10 +392,65 @@ void getFourierTransformsAndCtfs(long int part_id,
  		size_t current_size_x = baseMLO->image_current_size[optics_group] / 2 + 1;
  		size_t current_size_y = baseMLO->image_current_size[optics_group];
  		size_t current_size_z = (accMLO->dataIs3D) ? baseMLO->image_current_size[optics_group] : 1;
@@ -145,7 +146,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
  #ifdef _HIP_ENABLED
          CTIC(hipMLO->timer,"makeNoiseMask");
  #else
-@@ -546,11 +638,6 @@
+@@ -554,11 +646,6 @@ void getFourierTransformsAndCtfs(long int part_id,
          MultidimArray<RFLOAT> Mnoise;
          bool is_helical_segment = (baseMLO->do_helical_refine) || ((baseMLO->mymodel.ref_dim == 2) && (baseMLO->helical_tube_outer_diameter > 0.));
  
@@ -157,7 +158,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
          // ------------------------------------------------------------------------------------------
          
          // We are now done with the unmasked image used for reconstruction.
-@@ -769,6 +856,9 @@
+@@ -777,6 +864,9 @@ void getFourierTransformsAndCtfs(long int part_id,
  			op.highres_Xi2_img.at(img_id) = 0.;
  		}
  		CTOC(accMLO->timer,"powerClass");
@@ -167,7 +168,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
  
  		Fctf.resize(Fimg);
  		// Now calculate the actual CTF
-@@ -811,7 +901,11 @@
+@@ -819,7 +909,11 @@ void getFourierTransformsAndCtfs(long int part_id,
  			else
  			{
  				CTIC(accMLO->timer,"CTFRead2D");
@@ -179,7 +180,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
  
                  if (op.is_tomo)
                      ctf.setValuesByGroup(
-@@ -834,6 +928,14 @@
+@@ -842,6 +936,14 @@ void getFourierTransformsAndCtfs(long int part_id,
                          DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_CTF_PHASE_SHIFT),
                          -1.);
  
@@ -194,7 +195,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
  				ctf.getFftwImage(Fctf, baseMLO->image_full_size[optics_group], baseMLO->image_full_size[optics_group], my_pixel_size,
                                                   baseMLO->ctf_phase_flipped, baseMLO->only_flip_phases, baseMLO->intact_ctf_first_peak, true, baseMLO->do_ctf_padding);
  
-@@ -864,6 +966,59 @@
+@@ -872,6 +974,59 @@ void getFourierTransformsAndCtfs(long int part_id,
  		op.Fimg.at(img_id) = Fimg;
  		op.Fctf.at(img_id) = Fctf;
  

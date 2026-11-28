@@ -16,6 +16,7 @@ void kernel_main() {
     constexpr bool ADM = get_compile_time_arg_val(base + 10);       // A digit-major [n, Q, RT, KT] (oz_cut's order)
     constexpr uint32_t QN = get_compile_time_arg_val(base + 11);    // batches Q (for ADM / BDM)
     constexpr bool BDM = get_compile_time_arg_val(base + 12);       // B digit-major [n, Q, OT, KT] (BT only)
+    constexpr bool ZIG = get_compile_time_arg_val(base + 13);       // balanced unit order, see below
     constexpr uint32_t KT = KR * NRUN;
     constexpr uint32_t cb_a = 0, cb_b = 1, cb_acc = 24, cb_tok = 26;
     constexpr uint32_t TB = 2048, TF = 4096;
@@ -23,11 +24,16 @@ void kernel_main() {
     const auto sb = TensorAccessor(b_args, get_common_arg_val<uint32_t>(1), TB);
     const uint32_t u0 = get_arg_val<uint32_t>(0), nu = get_arg_val<uint32_t>(1);
 
-    for (uint32_t u = u0; u < u0 + nu; ++u) {
+    for (uint32_t v = u0; v < u0 + nu; ++v) {
+        // ZIG: the assigned order v walks the digits fastest and in zigzag (0, n-1, 1, n-2, ..), so a core's
+        // consecutive units cost n + 1 digit pairs per two units whatever its place in the order. Unit k costs
+        // k + 1 pairs: in the plain k-major order the last cores carry about twice the mean and set the wall.
+        const uint32_t zz = v % NB_K, kz = (zz & 1) ? NB_K - 1 - (zz >> 1) : (zz >> 1), blk = v / NB_K;
+        const uint32_t u = ZIG ? ((blk / (NRB * NCB)) * NB_K + kz) * (NRB * NCB) + blk % (NRB * NCB) : v;
         // unit = ((batch q * n + k) * NRB + rb) * NCB + cbk; batch q has its own A [n, RT, KT] and B planes
         const uint32_t qk = u / (NRB * NCB), q = qk / NB_K, k = qk % NB_K, rb = (u / NCB) % NRB, cbk = u % NCB;
         const uint32_t a0 = q * NB_K * RT * KT, b0 = q * NB_K * OT * KT;
-        if (u != u0) {
+        if (v != u0) {
             cb_wait_front(cb_tok, 1);
             cb_pop_front(cb_tok, 1);
         }

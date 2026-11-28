@@ -1,0 +1,296 @@
+diff --git a/src/acc/acc_ml_optimiser.h b/src/acc/acc_ml_optimiser.h
+index 94888eee..1dab3c77 100644
+--- a/src/acc/acc_ml_optimiser.h
++++ b/src/acc/acc_ml_optimiser.h
+@@ -156,6 +156,16 @@ public:
+ 	std::vector<MultidimArray<RFLOAT> > power_img;
+ 	MultidimArray<XFLOAT> Mweight;
+ 	Indices max_index;
++#ifdef _TT_ENABLED
++	// The coarse pass in candidate form (TTBridge::diff2CoarseCand). When tt_cand is set the dense
++	// Mweight was not filled: tt_cand_idx holds the position in Mweight and tt_cand_e the value of
++	// diff2 - log(pdf_orientation) - log(pdf_offset) for every sample close enough to the best one
++	// to carry weight, and tt_min_diff2 is the smallest diff2 among them.
++	bool tt_cand;
++	std::vector<size_t> tt_cand_idx;
++	std::vector<double> tt_cand_e;
++	RFLOAT tt_min_diff2;
++#endif
+ 
+ 	OptimisationParamters (unsigned nr_images, unsigned long part_id, bool is_tomo):
+ 		metadata_offset(0),
+@@ -167,6 +177,10 @@ public:
+ 		Fimg.resize(nr_images);
+ 		Fimg_nomask.resize(nr_images);
+ 		Fctf.resize(nr_images);
++#ifdef _TT_ENABLED
++		tt_cand = false;
++		tt_min_diff2 = 0.;
++#endif
+ 	};
+ };
+ 
+diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
+index c29c2401..07ffc17b 100644
+--- a/src/acc/acc_ml_optimiser_impl.h
++++ b/src/acc/acc_ml_optimiser_impl.h
+@@ -1,5 +1,13 @@
+ static omp_lock_t global_mutex;
+ 
++#ifdef _TT_ENABLED
++#include <algorithm>
++#include <cstring>
++#include <limits>
++#include <vector>
++#include "src/acc/tt/tt_bridge.h"
++#endif
++
+ #ifdef _SYCL_ENABLED
+ #include "src/acc/sycl/sycl_virtual_dev.h"
+ using deviceStream_t = virtualSYCL*;
+@@ -1009,6 +1017,199 @@ void getFourierTransformsAndCtfs(long int part_id,
+ 	GATHERGPUTIMINGS(accMLO->timer);
+ }
+ 
++#if defined(_TT_ENABLED) && !defined(ACC_DOUBLE_PRECISION)
++// ----------------------------------------------------------------------------
++// ------------- the coarse pass in candidate form (Tenstorrent) --------------
++// ----------------------------------------------------------------------------
++// RELION's coarse pass fills a dense orientation x translation block of squared differences, turns
++// every entry into a weight and keeps the few that carry adaptive_fraction of the sum. Here the
++// device is handed the log priors with the particle and returns only the samples whose
++// diff2 - log(pdf_orientation) - log(pdf_offset) lies within a window of the particle's best. A
++// sample outside a window of 40 weighs under exp(-40) of the best one: it cannot be significant
++// and cannot move the fp32 sum. ttCandidatesToSignificant then runs RELION's own rule on the list.
++
++// Returns false with op.tt_cand unset when the bridge declines any class; the caller then runs
++// the dense kernels as before.
++template <class MlClass>
++bool ttCoarseCandidates(
++		OptimisationParamters &op,
++		SamplingParameters &sp,
++		MlOptimiser *baseMLO,
++		MlClass *accMLO,
++		std::vector< AccProjectorPlan > &projectorPlans,
++		XFLOAT *trans_x, XFLOAT *trans_y,
++		XFLOAT *Fimg_real, XFLOAT *Fimg_imag, XFLOAT *corr_img,
++		long unsigned translation_num, long unsigned image_size, unsigned long img_id)
++{
++	static thread_local std::vector<unsigned long> idx;
++	static thread_local std::vector<float> val, lo, lt;
++	const long cap = 1 << 18;
++	idx.resize(cap);
++	val.resize(cap);
++	lt.resize(translation_num);
++
++	// the offset prior, as convertAllSquaredDifferencesToWeights builds pdf_offset
++	RFLOAT sigma2_x, sigma2_y;
++	if (baseMLO->offset_range_x > 0.)
++	{
++		sigma2_x = (baseMLO->offset_range_x * baseMLO->offset_range_x) / 9.;
++		sigma2_y = (baseMLO->offset_range_y * baseMLO->offset_range_y) / 9.;
++	}
++	else
++		sigma2_x = sigma2_y = baseMLO->mymodel.sigma2_offset;
++	const RFLOAT my_pixel_size = baseMLO->mydata.getImagePixelSize(op.part_id);
++	const size_t nr_orient = sp.nr_dir * sp.nr_psi;
++
++	std::vector<size_t> c_idx;
++	std::vector<double> c_e;
++	double d2min = std::numeric_limits<double>::max();
++	for (unsigned long iclass = sp.iclass_min; iclass <= sp.iclass_max; iclass++)
++	{
++		AccProjectorPlan &plan = projectorPlans[iclass*sp.nr_images + img_id];
++		if (plan.orientation_num == 0)
++			continue;
++
++		RFLOAT myprior_x, myprior_y;
++		if (baseMLO->mymodel.ref_dim == 2)
++		{
++			myprior_x = XX(baseMLO->mymodel.prior_offset_class[iclass]);
++			myprior_y = YY(baseMLO->mymodel.prior_offset_class[iclass]);
++		}
++		else
++		{
++			myprior_x = XX(op.prior);
++			myprior_y = YY(op.prior);
++		}
++		for (unsigned long itrans = 0; itrans < translation_num; itrans++)
++		{
++			RFLOAT offset_x = XX(op.old_offset) + baseMLO->sampling.translations_x[itrans];
++			RFLOAT offset_y = YY(op.old_offset) + baseMLO->sampling.translations_y[itrans];
++			double tdiff2 = (offset_x - myprior_x) * (offset_x - myprior_x) / (-2. * sigma2_x);
++			tdiff2 += (offset_y - myprior_y) * (offset_y - myprior_y) / (-2. * sigma2_y);
++			tdiff2 *= my_pixel_size * my_pixel_size;
++			lt[itrans] = (sigma2_x < 0.0001) ? 0.f : (float)(-tdiff2);     // a flat prior when sigma is zero
++		}
++
++		// the orientation prior, as AccProjectorPlan::setup and the weight conversion read it
++		lo.resize(plan.orientation_num);
++		for (size_t i = 0; i < plan.orientation_num; i++)
++		{
++			size_t iorient = plan.iorientclasses[i] - iclass * nr_orient;
++			size_t idir = iorient / sp.nr_psi, ipsi = iorient % sp.nr_psi;
++			RFLOAT pdf;
++			if (baseMLO->do_skip_align || baseMLO->do_skip_rotate)
++				pdf = baseMLO->mymodel.pdf_class[iclass];
++			else if (baseMLO->mymodel.orientational_prior_mode == NOPRIOR)
++				pdf = DIRECT_MULTIDIM_ELEM(baseMLO->mymodel.pdf_direction[iclass], idir);
++			else
++				pdf = op.directions_prior[idir] * op.psi_prior[ipsi];
++			lo[i] = (pdf > 0.) ? (float)(-log(pdf)) : std::numeric_limits<float>::infinity();
++		}
++
++		AccProjectorKernel projKernel = AccProjectorKernel::makeKernel(
++				accMLO->bundle->projectors[iclass],
++				op.local_Minvsigma2.xdim,
++				op.local_Minvsigma2.ydim,
++				op.local_Minvsigma2.zdim,
++				op.local_Minvsigma2.xdim-1);
++		if (projKernel.mdlZ == 0)
++			return false;
++
++		double best = 0.;
++		long n = TTBridge::diff2CoarseCand(
++				(const float*)projKernel.mdlComplex,
++				projKernel.mdlX, projKernel.mdlXY / projKernel.mdlX, projKernel.mdlZ,
++				projKernel.mdlInitY, projKernel.mdlInitZ,
++				projKernel.maxR, projKernel.maxR2_padded, projKernel.padding_factor,
++				projKernel.imgX, projKernel.imgY,
++				~plan.eulers, trans_x, trans_y,
++				Fimg_real, Fimg_imag, corr_img,
++				lo.data(), lt.data(),
++				idx.data(), val.data(), cap, &best,
++				(long)plan.orientation_num, (long)translation_num, (long)image_size);
++		if (n < 0)
++			return false;
++		for (long k = 0; k < n; k++)
++		{
++			size_t i = idx[k] / translation_num, itrans = idx[k] % translation_num;
++			double e = (double)val[k] + best;
++			c_idx.push_back(plan.iorientclasses[i] * translation_num + itrans);
++			c_e.push_back(e);
++			d2min = std::min(d2min, e - (double)lo[i] - (double)lt[itrans]);
++		}
++	}
++	if (c_idx.empty())
++		return false;
++	op.tt_cand_idx.swap(c_idx);
++	op.tt_cand_e.swap(c_e);
++	op.tt_min_diff2 = d2min + op.highres_Xi2_img[img_id] / 2.;
++	op.tt_cand = true;
++	return true;
++}
++
++// Pass 0 of convertAllSquaredDifferencesToWeights on the candidate list: the same exponent, sort,
++// cumulative sum and threshold as the dense code, over the samples that can carry weight.
++inline void ttCandidatesToSignificant(
++		OptimisationParamters &op,
++		SamplingParameters &sp,
++		MlOptimiser *baseMLO)
++{
++	const size_t n = op.tt_cand_idx.size();
++	op.sum_weight = 1.;
++	op.max_weight = (RFLOAT)-1.;
++	op.significant_weight = 0.;
++	op.Mcoarse_significant.resizeNoCp(1,1,1, XSIZE(op.Mweight));
++	memset(op.Mcoarse_significant.data, 0, XSIZE(op.Mweight) * sizeof(bool));
++
++	size_t kbest = 0;
++	for (size_t k = 1; k < n; k++)
++		if (op.tt_cand_e[k] < op.tt_cand_e[kbest])
++			kbest = k;
++
++	// the best sample gets exp(50), as kernel_exponentiate( ..., 50 - weights_max) gives it
++	std::vector<XFLOAT> w(n), sorted;
++	sorted.reserve(n);
++	for (size_t k = 0; k < n; k++)
++	{
++		XFLOAT a = (XFLOAT)(50. - (op.tt_cand_e[k] - op.tt_cand_e[kbest]));
++		w[k] = (a < -88.f) ? 0.f : exp(a);
++		if (w[k] > 0.f)
++			sorted.push_back(w[k]);
++	}
++	std::sort(sorted.begin(), sorted.end());
++	const size_t filteredSize = sorted.size();
++	std::vector<XFLOAT> cumulative_sum(filteredSize);
++	XFLOAT sum = 0.f;
++	for (size_t i = 0; i < filteredSize; i++)
++	{
++		sum += sorted[i];
++		cumulative_sum[i] = sum;
++	}
++	op.sum_weight = cumulative_sum[filteredSize - 1];
++
++	const XFLOAT threshold = (XFLOAT)((1 - baseMLO->adaptive_fraction) * op.sum_weight);
++	size_t thresholdIdx = 0;
++	for (size_t i = 0; i + 1 < filteredSize; i++)
++		if (cumulative_sum[i] <= threshold && threshold < cumulative_sum[i+1])
++			thresholdIdx = i + 1;
++	long int my_nr_significant_coarse_samples = filteredSize - thresholdIdx;
++	if (baseMLO->maximum_significants > 0 &&
++			my_nr_significant_coarse_samples > baseMLO->maximum_significants)
++	{
++		my_nr_significant_coarse_samples = baseMLO->maximum_significants;
++		thresholdIdx = filteredSize - my_nr_significant_coarse_samples;
++	}
++	const XFLOAT significant_weight = sorted[thresholdIdx];
++
++	op.max_index.coarseIdx = op.tt_cand_idx[kbest] - sp.nr_dir * sp.nr_psi * sp.nr_trans * sp.iclass_min;
++	op.max_weight = w[kbest];
++	DIRECT_A2D_ELEM(baseMLO->exp_metadata, op.metadata_offset, METADATA_NR_SIGN) = (RFLOAT) my_nr_significant_coarse_samples;
++	for (size_t k = 0; k < n; k++)
++		if (w[k] >= significant_weight)
++			op.Mcoarse_significant.data[op.tt_cand_idx[k]] = true;
++}
++#endif
++
+ // ----------------------------------------------------------------------------
+ // ------------------ getAllSquaredDifferencesCoarse --------------------------
+ // ----------------------------------------------------------------------------
+@@ -1311,6 +1512,20 @@ void getAllSquaredDifferencesCoarse(
+ 		devAcc->waitAll();
+     #endif
+ 
++#if defined(_TT_ENABLED) && !defined(ACC_DOUBLE_PRECISION)
++		// Candidate form: the device applies the priors and returns the samples that can carry weight.
++		// Only where the dense block has no other reader: one image, a fine pass to follow, no CC.
++		op.tt_cand = false;
++		if (!do_CC && sp.nr_images == 1 && baseMLO->adaptive_oversampling > 0 && baseMLO->mymodel.nr_bodies == 1
++				&& !accMLO->dataIs3D && !accMLO->shiftsIs3D && !baseMLO->do_helical_refine && !op.is_tomo
++				&& sp.itrans_min == 0 && sp.idir_min == 0 && sp.ipsi_min == 0
++				&& translation_num == (long unsigned)sp.nr_trans && TTBridge::candOn())
++			ttCoarseCandidates<MlClass>(op, sp, baseMLO, accMLO, projectorPlans,
++					&(~trans_xyz)[trans_x_offset], &(~trans_xyz)[trans_y_offset],
++					&(~Fimg_)[img_re_offset], &(~Fimg_)[img_im_offset], ~corr_img,
++					translation_num, image_size, img_id);
++		if (!op.tt_cand)
++#endif
+ 		for (unsigned long iclass = sp.iclass_min, allWeights_pos=0; iclass <= sp.iclass_max; iclass++)
+ 		{
+ 			int iproj;
+@@ -1405,6 +1620,10 @@ void getAllSquaredDifferencesCoarse(
+ 	allWeights.setAccType(accCPU);
+ #endif
+     op.min_diff2 = AccUtilities::getMinOnDevice<XFLOAT>(allWeights);
++#if defined(_TT_ENABLED) && !defined(ACC_DOUBLE_PRECISION)
++    if (op.tt_cand)
++        op.min_diff2 = op.tt_min_diff2;
++#endif
+     //std::cerr << " min_diff2 coarse= " << op.min_diff2 << std::endl;
+ 
+ #ifdef TIMING
+@@ -1904,6 +2123,13 @@ void convertAllSquaredDifferencesToWeights(unsigned exp_ipass,
+ 											AccPtrFactory ptrFactory,
+ 											int ibody)
+ {
++#if defined(_TT_ENABLED) && !defined(ACC_DOUBLE_PRECISION)
++	if (exp_ipass == 0 && op.tt_cand)
++	{
++		ttCandidatesToSignificant(op, sp, baseMLO);
++		return;
++	}
++#endif
+ #ifdef TIMING
+ 	if (op.part_id == baseMLO->exp_my_first_part_id)
+ 	{

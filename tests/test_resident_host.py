@@ -7,7 +7,7 @@ import numpy as np
 
 sys.modules.setdefault("ttnn", types.SimpleNamespace(TILE_LAYOUT=0, ROW_MAJOR_LAYOUT=1, Tensor=object))
 for m in ("tt_relion.oz_fused", "tt_relion.proj_lerp"):
-    sys.modules.setdefault(m, types.SimpleNamespace(oz_combine=None, oz_cut=None, oz_fused=None, proj_rot=None))
+    sys.modules.setdefault(m, types.SimpleNamespace(cand_compact=None, oz_combine=None, oz_cut=None, oz_fused=None, proj_rot=None))
 from tt_relion.resident import Resident  # noqa: E402
 
 
@@ -63,3 +63,79 @@ def test_layout_spreads_the_particle_norm_over_its_rows():
         direct = (w[pn][:, None].astype(np.float64) * np.abs((pr + 1j * pi)[None] - sx[:, None]) ** 2).sum(-1)
         err = np.abs(d2 - direct).max() / np.abs(direct).max()
         assert err < 1e-6, (counts[:3], err)
+
+
+def test_corner_table_matches_the_direct_form():
+    from tt_relion.resident import TBLK, _corner_table
+    X, Y, Z = 20, 37, 37
+    nvox = X * Y * Z
+    assert nvox > TBLK and nvox % TBLK
+    mdl = np.random.default_rng(3).standard_normal((nvox, 2)).astype(np.float32)
+    mp = np.concatenate([mdl, np.zeros((X * Y + X + 2, 2), np.float32)])
+    ref = np.empty((nvox, 16), np.float32)
+    for dz in (0, 1):
+        for dy in (0, 1):
+            for dx in (0, 1):
+                o, c = dx + dy * X + dz * X * Y, 4 * dz + 2 * dy + dx
+                ref[:, 2 * c:2 * c + 2] = mp[o:o + nvox]
+    assert np.array_equal(_corner_table(mdl, X, Y), ref)
+
+
+def test_table_turns_are_host_wide_and_counted(monkeypatch, tmp_path):
+    import threading
+
+    from tt_relion import resident
+    monkeypatch.setattr(resident, "TURNS", 2)
+    monkeypatch.setattr(resident.tempfile, "gettempdir", lambda: str(tmp_path))
+    got = threading.Event()
+
+    def third():
+        with resident._turn():
+            got.set()
+    with resident._turn():
+        with resident._turn():
+            t = threading.Thread(target=third)
+            t.start()
+            assert not got.wait(0.5)        # both places taken
+        assert got.wait(5)                  # one given back
+    t.join()
+
+
+def test_candidates_are_the_window_of_each_particle():
+    """The candidate form on stand-in chip pieces: an inexact row minimum, a compaction that emits exactly the
+    elements under each row's threshold, device rows permuted. Every sample within the window of its particle's best
+    comes back with its distance, and nothing else."""
+    import tt_relion.resident as rs
+    rng = np.random.default_rng(3)
+    rs.ttnn.from_torch = lambda t, **k: t.numpy()
+    rs.ttnn.deallocate = lambda t: None
+    rs.ttnn.float32 = None
+
+    def compact(D, thr, rows, cols):
+        r, c = np.nonzero(D[:rows, :cols] < thr.reshape(-1)[:rows, None])
+        return r * cols + c, D[r, c]
+    rs.cand_compact = compact
+    r = Resident(None)
+    r.c = {}
+    for counts in ([37] * 24, [4, 16, 8, 1, 9] * 4, [37] * 3):
+        N = len(counts)
+        pn = np.repeat(np.arange(N), counts)
+        dr, sel, nb, rows = r._layout(pn, N)
+        plt = rng.uniform(0, 6, len(pn))
+        chunks, kept, rmin, o0 = [], [], [], 0
+        for O, Op in ((512, 512), (300, 512)):
+            half = (rng.gamma(2.0, 30.0, (len(pn), O)) + 500).astype(np.float32)     # d2 / 2 + orientation prior / 2
+            D = np.zeros((rows, Op), np.float32)
+            D[dr, :O] = half
+            D[:, O:] = 1e30
+            kept.append((D, o0, O))
+            chunks.append(half)
+            rmin.append(half.min(1).astype(np.float64) * (1 + rng.uniform(-1, 1, len(pn)) * 2.0 ** -8))
+            o0 += O
+        rr, oo, dl, best = r._candidates(kept, np.min(rmin, 0), plt, 40.0, dr, pn, N, rows)
+        E = 2.0 * np.concatenate(chunks, 1).astype(np.float64) + plt[:, None]
+        b = np.full(N, np.inf)
+        np.minimum.at(b, pn, E.min(1))
+        want_r, want_o = np.nonzero(E - b[pn][:, None] < 40.0)
+        assert np.array_equal(rr, want_r) and np.array_equal(oo, want_o) and np.array_equal(best, b)
+        assert np.abs(dl - (E - b[pn][:, None])[want_r, want_o]).max() < 1e-4

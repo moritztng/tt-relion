@@ -14,7 +14,9 @@ git checkout -q "$REV"
 # HOST_THREADS=0 leaves it out, for a binary to compare against. JOBS = make -j (default a quarter of the cores).
 # relion5-sums-sparse (rlx-wsum): the sums kernels skip samples below significance; SUMS_SPARSE=0 leaves it out.
 # relion5-prep (rlx-prep): particle prep on tables and its own FFT plans; TT_RELION_PREP=0 at run time takes RELION's code.
-for p in relion5-tt relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-prep relion5-sums-record $([ "${SUMS_SPARSE:-1}" = 1 ] && echo relion5-sums-sparse) $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads); do
+# relion5-tt-candidates (rlx-bridge): the coarse pass may hand back candidates instead of the dense matrix (used only
+# with TT_RELION_CAND_WINDOW). relion5-particle-arena: --j may exceed the core count. CANDIDATES=0 / ARENA=0 leave them out.
+for p in relion5-tt $([ "${CANDIDATES:-1}" = 1 ] && echo relion5-tt-candidates) relion5-coarse-blocking relion5-nonzeroprob relion5-estep-profile relion5-prep relion5-sums-record $([ "${SUMS_SPARSE:-1}" = 1 ] && echo relion5-sums-sparse) $([ "${HOST_THREADS:-1}" = 1 ] && echo relion5-host-threads) $([ "${ARENA:-1}" = 1 ] && echo relion5-particle-arena); do
   git apply "$HERE/$p.patch"
 done
 mkdir -p src/acc/tt build
