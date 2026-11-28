@@ -8,6 +8,13 @@
 #include <string>
 #include <unistd.h>
 
+#include <fftw3.h>
+#include <tbb/spin_mutex.h>
+
+// RELION's lock around the single-precision FFTW planner (src/acc/cpu/cpu_ml_optimiser.cpp). Every plan its
+// accelerated path makes is made under it, and so are the ones here.
+extern tbb::spin_mutex mkl_mutex;
+
 namespace TTPrep
 {
 
@@ -15,6 +22,41 @@ bool enabled()
 {
 	static const bool on = [] { const char *e = getenv("TT_RELION_PREP"); return !(e && e[0] == '0'); }();
 	return on;
+}
+
+// The plans of forward(): BLOCK rows, the n % BLOCK rows that remain, and k columns for k up to BLOCK. A
+// block of BLOCK rows or columns starts a multiple of 64 bytes into its buffer, so every call sees the
+// alignment its plan was made for. With FFTW_WISDOM_ONLY a plan the wisdom lacks is estimated instead.
+// Returns how many were not. Call under mkl_mutex.
+static int plan(Tables &t, unsigned flags)
+{
+	int n = t.n, ix = n / 2 + 1, made = 0;
+	const int B = Tables::BLOCK;
+	float *r = fftwf_alloc_real((size_t)n * n);
+	fftwf_complex *c = fftwf_alloc_complex((size_t)n * ix);
+	for (int i = 0; i < 2; i++)
+	{
+		const int k = i ? n % B : (n >= B ? B : 0);
+		t.rows[i] = k ? fftwf_plan_many_dft_r2c(1, &n, k, r, NULL, 1, n, c, NULL, 1, ix, flags) : NULL;
+		if (!k)
+			continue;
+		if (!t.rows[i])
+			t.rows[i] = fftwf_plan_many_dft_r2c(1, &n, k, r, NULL, 1, n, c, NULL, 1, ix, FFTW_ESTIMATE);
+		else
+			made++;
+	}
+	t.columns[0] = NULL;
+	for (int k = 1; k <= B; k++)
+	{
+		t.columns[k] = fftwf_plan_many_dft(1, &n, k, c, NULL, ix, 1, c, NULL, ix, 1, FFTW_FORWARD, flags);
+		if (!t.columns[k])
+			t.columns[k] = fftwf_plan_many_dft(1, &n, k, c, NULL, ix, 1, c, NULL, ix, 1, FFTW_FORWARD, FFTW_ESTIMATE);
+		else
+			made++;
+	}
+	fftwf_free(r);
+	fftwf_free(c);
+	return made;
 }
 
 // The expressions of CpuKernels::softMaskBackgroundValue / cosineFilter and CpuKernels::powerClass,
@@ -47,7 +89,32 @@ static std::unique_ptr<Tables> build(int n, float radius, float edge)
 		const size_t s = (size_t)(sqrtf((float)(x * x + y * y)) + 0.5f);
 		t->shell[v] = (s < (size_t)ix && !(x == 0 && y < 0)) ? s : ix;
 	}
+	const char *wisdom = getenv("TT_RELION_PREP_WISDOM");
+	tbb::spin_mutex::scoped_lock lock(mkl_mutex);
+	const bool have = wisdom && wisdom[0] && fftwf_import_wisdom_from_filename(wisdom);
+	t->from_wisdom = 0;
+	if (have)
+		t->from_wisdom = plan(*t, FFTW_MEASURE | FFTW_WISDOM_ONLY);
+	else
+		plan(*t, FFTW_ESTIMATE);
+	// The file is for these plans only: RELION's own keep planning as they did without it.
+	if (have) fftwf_forget_wisdom();
+	lock.release();
+	if (wisdom && wisdom[0])
+		fprintf(stderr, "TTPrep: box %d, %d of %d FFT plans from %s\n", n, t->from_wisdom, Tables::BLOCK + 2, wisdom);
 	return t;
+}
+
+bool write_wisdom(int n, const char *path)
+{
+	Tables t;
+	t.n = n;
+	tbb::spin_mutex::scoped_lock lock(mkl_mutex);
+	fftwf_forget_wisdom();
+	plan(t, FFTW_MEASURE);
+	const bool ok = fftwf_export_wisdom_to_filename(path);
+	fftwf_forget_wisdom();
+	return ok;
 }
 
 const Tables &tables(int n, float radius, float edge)
@@ -65,12 +132,45 @@ const Tables &tables(int n, float radius, float edge)
 	return *(last = all.back().get());
 }
 
-float *work(int n)
+namespace
 {
-	static thread_local std::vector<float> buf;
-	if (buf.size() < (size_t)n * n)
-		buf.resize((size_t)n * n);
-	return buf.data();
+struct Buffers : Work
+{
+	int n;
+	Buffers() : Work{nullptr, nullptr, nullptr}, n(0) {}
+	~Buffers() { release(); }
+	void release() { fftwf_free(shifted); fftwf_free(real); fftwf_free(freq); }
+};
+}
+
+Work &work(int n)
+{
+	static thread_local Buffers b;
+	if (b.n != n)
+	{
+		b.release();
+		b.shifted = fftwf_alloc_real((size_t)n * n);
+		b.real = fftwf_alloc_real((size_t)n * n);
+		b.freq = (float*) fftwf_alloc_complex((size_t)n * (n / 2 + 1));
+		b.n = n;
+	}
+	return b;
+}
+
+void forward(const Tables &t, const float *real, float *freq, int columns)
+{
+	const int n = t.n, ix = n / 2 + 1, B = Tables::BLOCK;
+	fftwf_complex *c = (fftwf_complex*) freq;
+	int y = 0;
+	for (; y + B <= n; y += B)
+		fftwf_execute_dft_r2c((fftwf_plan) t.rows[0], (float*) real + (size_t)y * n, c + (size_t)y * ix);
+	if (y < n)
+		fftwf_execute_dft_r2c((fftwf_plan) t.rows[1], (float*) real + (size_t)y * n, c + (size_t)y * ix);
+	int x = 0;
+	for (; x + B <= columns; x += B)
+		fftwf_execute_dft((fftwf_plan) t.columns[B], c + x, c + x);
+	if (x < columns)
+		fftwf_execute_dft((fftwf_plan) t.columns[columns - x], c + x, c + x);
 }
 
 void center(const float *in, int n, float *out)

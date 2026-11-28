@@ -2,9 +2,9 @@ Particle prep without the per-particle setup (src_acc_tt/tt_prep.h), and a recor
 
 Applies on top of relion5-tt.patch and relion5-estep-profile.patch. One file changes. In
 getFourierTransformsAndCtfs the common case (2D, even square box, --zero_mask, no helix, no separate
-reconstruction images) runs TTPrep: the same norm correction, whole-pixel shift, two FFTs on RELION's own
-plan, soft mask, window and power sums, with the mask weights and shell indices kept across particles
-and no per-particle allocation. Any other case runs RELION's code unchanged; TT_RELION_PREP=0 forces that.
+reconstruction images) runs TTPrep: the same norm correction, whole-pixel shift, two FFTs, soft mask,
+window and power sums, with the mask weights, shell indices and FFT plans kept across particles and no
+per-particle allocation. Any other case runs RELION's code unchanged; TT_RELION_PREP=0 forces that.
 The mask radius moves up a few lines so both paths and the multibody code after them see it.
 TT_RELION_RECORD_PREP=<dir> writes a particle's inputs and the five outputs of either path.
 
@@ -21,7 +21,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
  #ifdef _SYCL_ENABLED
  #include "src/acc/sycl/sycl_virtual_dev.h"
  using deviceStream_t = virtualSYCL*;
-@@ -351,6 +355,57 @@
+@@ -351,6 +355,58 @@
  		Fimg.initZeros(current_size_z, current_size_y, current_size_x);
  
  		// ------------------------------------------------------------------------------------------
@@ -47,14 +47,15 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
 +                radius = ((RFLOAT)img.data.xdim)/2.;
 +            const TTPrep::Tables &tables = TTPrep::tables(n, radius, (XFLOAT) baseMLO->width_mask_edge);
 +            const XFLOAT normcorr_val = baseMLO->do_norm_correction ? (XFLOAT)(baseMLO->mymodel.avg_norm_correction / normcorr) : 1;
-+            const XFLOAT scale = (XFLOAT)1/((XFLOAT)(accMLO->transformer1.reals.getSize()));
-+            const float *fouriers = (const float*) ~accMLO->transformer1.fouriers;
-+            float *shifted = TTPrep::work(n);
++            const XFLOAT scale = (XFLOAT)1/((XFLOAT)(n * n));
++            TTPrep::Work &work = TTPrep::work(n);
++            float *shifted = work.shifted;
++            const float *fouriers = work.freq;
 +            TTPrep::shift(img().data, n, normcorr_val, (int) XX(my_old_offset), (int) YY(my_old_offset), shifted);
 +
 +            // The unmasked transform, for the reconstruction
-+            TTPrep::center(shifted, n, ~accMLO->transformer1.reals);
-+            accMLO->transformer1.forward();
++            TTPrep::center(shifted, n, work.real);
++            TTPrep::forward(tables, work.real, work.freq, cur/2 + 1);
 +            MultidimArray<Complex> &Fnomask = op.Fimg_nomask.at(img_id);
 +            Fnomask.resize(current_size_z, current_size_y, current_size_x);
 +            TTPrep::window(fouriers, n, cur, scale, Fnomask.data);
@@ -62,8 +63,8 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
 +            baseMLO->mydata.obsModel.divideByMtf(optics_group, Fnomask);
 +
 +            // The masked transform, for alignment and classification, and its power per shell
-+            TTPrep::mask_center(tables, shifted, ~accMLO->transformer1.reals);
-+            accMLO->transformer1.forward();
++            TTPrep::mask_center(tables, shifted, work.real);
++            TTPrep::forward(tables, work.real, work.freq, n/2 + 1);
 +            TTPrep::window(fouriers, n, cur, scale, Fimg.data);
 +            op.highres_Xi2_img.at(img_id) = 0.;
 +            if (cur < n)
@@ -79,7 +80,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
  #ifdef _HIP_ENABLED
          CTIC(hipMLO->timer,"makeNoiseMask");
  #else
-@@ -546,11 +601,6 @@
+@@ -546,11 +602,6 @@
          MultidimArray<RFLOAT> Mnoise;
          bool is_helical_segment = (baseMLO->do_helical_refine) || ((baseMLO->mymodel.ref_dim == 2) && (baseMLO->helical_tube_outer_diameter > 0.));
  
@@ -91,7 +92,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
          // ------------------------------------------------------------------------------------------
          
          // We are now done with the unmasked image used for reconstruction.
-@@ -769,6 +819,9 @@
+@@ -769,6 +820,9 @@
  			op.highres_Xi2_img.at(img_id) = 0.;
  		}
  		CTOC(accMLO->timer,"powerClass");
@@ -101,7 +102,7 @@ diff --git a/src/acc/acc_ml_optimiser_impl.h b/src/acc/acc_ml_optimiser_impl.h
  
  		Fctf.resize(Fimg);
  		// Now calculate the actual CTF
-@@ -864,6 +917,56 @@
+@@ -864,6 +918,56 @@
  		op.Fimg.at(img_id) = Fimg;
  		op.Fctf.at(img_id) = Fctf;
  
