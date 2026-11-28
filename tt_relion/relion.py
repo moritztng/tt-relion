@@ -526,10 +526,13 @@ def diff2_fine(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
     try:
         t0 = time.time()                            # bridge wall per call, summed over threads
         t = _torch()
-        acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
-                           mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-                           padding_factor, imgX, imgY,
-                           orientation_num, translation_num, image_size, "F")
+        geom = (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded, padding_factor, imgX, imgY)
+        if _BATCH > 1:
+            acc = _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom,
+                           orientation_num).reshape(-1)
+        else:
+            acc = _dense_diff2(t, mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv,
+                               *geom, orientation_num, translation_num, image_size, "F")
         _book("F_s", time.time() - t0)
         rot_idx = np.frombuffer(rot_idx_mv, dtype=np.uint64)
         trans_idx = np.frombuffer(trans_idx_mv, dtype=np.uint64)
@@ -556,7 +559,7 @@ _lhscache = {}       # ref key -> the chip-layout split of that ref (_device_cro
 _refcache = {}       # (model key, euler hash) -> (ref_r, ref_i) for the shared coarse set
 
 
-def _shared_refs(t, mdl_mv, eul, x, y, geom):
+def _shared_refs(t, mdl_mv, eul, x, y, geom, keep=True):
     """Projections of the coarse orientation set, built once per iteration and reused by every batch.
 
     In a global pass every particle scores the same orientations against the same reference, so the
@@ -564,9 +567,8 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom):
     """
     import hashlib
     key = (_model_key(mdl_mv), hashlib.sha256(eul.numpy().tobytes()).digest(), x.shape[0])
-    hit = _refcache.get(key)
+    hit = _refcache.get(key) if keep else None      # a one-off set leaves the iteration's set in place
     if hit is None:
-        _refcache.clear()                           # one iteration's set at a time
         mdl = t.from_numpy(np.frombuffer(mdl_mv, dtype=np.float32).reshape(-1, 2).copy())
         rr, ri = [], []
         for o0 in range(0, eul.shape[0], _DEV_CHUNK):
@@ -574,14 +576,20 @@ def _shared_refs(t, mdl_mv, eul, x, y, geom):
             rr.append(a), ri.append(b)
         ref_r, ref_i = t.cat(rr), t.cat(ri)
         a2 = (ref_r.double() ** 2 + ref_i.double() ** 2).T.contiguous()               # [P, O], |ref|^2
-        hit = _refcache[key] = (ref_r, ref_i, a2, hashlib.sha256(repr(key).encode()).digest())
+        hit = (ref_r, ref_i, a2, hashlib.sha256(repr(key).encode()).digest() if keep else None)
+        if keep:
+            _refcache.clear()                       # one iteration's set at a time
+            _refcache[key] = hit
     return hit
 
 
 def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
                        mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR, maxR2_padded,
-                       padding_factor, imgX, imgY):
-    """diff2 for N particles over one shared orientation set: float32 [N, O, T].
+                       padding_factor, imgX, imgY, shared=True):
+    """diff2 for N particles over one orientation set: float32 [N, O, T].
+
+    shared: the set is the iteration's (a global coarse pass), so its projections are kept for the next
+    batch. A batch of particles with their own orientations passes the union of them and shared=False.
 
     img_r/img_i/corr are [N, image_size], tx/ty are [N, T] (each particle's own offsets), eul is
     [O, 9] and shared. The cross term is one product of [N*T, 2P] by [2P, O]; |ref|^2_w is one
@@ -598,9 +606,9 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     y = t.where(yi > maxR, yi - imgY, yi).to(t.float32)
     if _RESIDENT and _BACKEND == "ttnn":
         return _resident_d2(mdl, eul.numpy(), x.numpy(), y.numpy(), img_r, img_i, corr, tx, ty,
-                            (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared=True)
+                            (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared=shared)
     ref_r, ref_i, ref_a2, ref_key = _shared_refs(t, mdl, eul, x, y,
-                                (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor))
+                                (mdlX, mdlY, mdlZ, mdlInitY, mdlInitZ, maxR2_padded, padding_factor), shared)
     w = t.from_numpy(np.asarray(corr, np.float32)) * 0.5                      # [N, P]
     ir, ii = t.from_numpy(np.asarray(img_r, np.float32)), t.from_numpy(np.asarray(img_i, np.float32))
     ph = (x[None, None] * t.from_numpy(np.asarray(tx, np.float32))[..., None]
@@ -621,12 +629,13 @@ def diff2_coarse_batch(mdl, eul, tx, ty, img_r, img_i, corr,
     return (ref2[:, :, None] + sh2[:, None, :] - 2.0 * cross).float().numpy()
 
 
-# TT_RELION_BATCH=<n>: coarse calls from RELION's --j threads that share an orientation set are
-# grouped, up to n at a time, into one diff2_coarse_batch. A thread that finds no partner within
-# TT_RELION_BATCH_WAIT_MS runs the batch it has, so a lone particle (the last of a rank's range)
-# never stalls.
-# TT_RELION_RESIDENT=1: a coarse batch on ttnn goes to the chip as raw operands (tt_relion/resident.py) instead of
-# host-built split products. Off until its chip parity is recorded.
+# TT_RELION_BATCH=<n>: coarse and fine calls from RELION's --j threads on the same model and image size are
+# grouped, up to n at a time, into one diff2_coarse_batch. Particles that share an orientation set (a global
+# coarse pass) score it once; particles with their own sets (local searches, the fine pass) score the union and
+# each takes its own block. A thread that finds no partner within TT_RELION_BATCH_WAIT_MS runs the batch it
+# has, so a lone particle (the last of a rank's range) never stalls.
+# TT_RELION_RESIDENT=1: on ttnn a call or batch goes to the chip as raw operands (tt_relion/resident.py) instead
+# of host-built split products. Off until its chip parity is recorded.
 _RESIDENT = os.environ.get("TT_RELION_RESIDENT", "") not in ("", "0")
 _BATCH = int(os.environ.get("TT_RELION_BATCH", "0"))
 _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
@@ -637,10 +646,11 @@ _gcv = threading.Condition()
 def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientation_num):
     """Queue this particle with its group; the first waiter with no active leader leads a batch."""
     import hashlib
-    eul = np.frombuffer(eul_mv, dtype=np.float32)
-    tx = np.frombuffer(tx_mv, dtype=np.float32)
-    key = (_model_key(mdl_mv), hashlib.sha256(eul.tobytes()).digest(), tx.size, geom)
-    item = {"tx": tx.copy(), "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
+    eul = np.frombuffer(eul_mv, dtype=np.float32).reshape(orientation_num, 9).copy()
+    key = (_model_key(mdl_mv), geom)
+    item = {"eul": eul, "eh": hashlib.sha256(eul.tobytes()).digest(),
+            "tx": np.frombuffer(tx_mv, dtype=np.float32).copy(),
+            "ty": np.frombuffer(ty_mv, dtype=np.float32).copy(),
             "ir": np.frombuffer(re_mv, dtype=np.float32).copy(),
             "ii": np.frombuffer(im_mv, dtype=np.float32).copy(),
             "w": np.frombuffer(corr_mv, dtype=np.float32).copy(), "out": None, "err": None}
@@ -660,16 +670,22 @@ def _collect(mdl_mv, eul_mv, tx_mv, ty_mv, re_mv, im_mv, corr_mv, geom, orientat
                 del g["q"][:_BATCH]
                 _gcv.release()
                 try:
-                    st = lambda k: np.stack([b[k] for b in batch])
-                    res = diff2_coarse_batch(mdl_mv, eul.reshape(orientation_num, 9), st("tx"),
-                                             st("ty"), st("ir"), st("ii"), st("w"), *geom)
+                    same = all(b["eh"] == batch[0]["eh"] for b in batch)
+                    T = max(b["tx"].size for b in batch)
+                    st = lambda k: np.stack([b[k] for b in batch])  # noqa: E731
+                    sp = lambda k: np.stack([np.pad(b[k], (0, T - b[k].size)) for b in batch])  # noqa: E731
+                    res = diff2_coarse_batch(mdl_mv, batch[0]["eul"] if same else np.concatenate([b["eul"] for b in batch]),
+                                             sp("tx"), sp("ty"), st("ir"), st("ii"), st("w"), *geom, shared=same)
+                    o = 0
                     for b, r in zip(batch, res):
-                        b["out"] = r
+                        n_o = len(b["eul"])
+                        b["out"] = np.ascontiguousarray((r if same else r[o:o + n_o])[:, :b["tx"].size])
+                        o += n_o
                     _stats["batches"] = _stats.get("batches", 0) + 1
                     _stats["batched"] = _stats.get("batched", 0) + len(batch)
                     n = _stats["batches"]
                     if n % 50 == 0 or n & (n - 1) == 0:     # 1, 2, 4, ... then every 50
-                        print(f"tt_relion: coarse batches={_stats['batches']} particles="
+                        print(f"tt_relion: batches={_stats['batches']} particles="
                               f"{_stats['batched']} mean={_stats['batched'] / _stats['batches']:.2f}",
                               file=sys.stderr, flush=True)
                 except Exception as exc:            # every particle of the batch declines

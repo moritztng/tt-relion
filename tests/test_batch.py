@@ -74,3 +74,48 @@ def test_threads_collect_into_batches():
     for p in range(n):
         assert np.array_equal(outs[p].reshape(O, T), ref[p])
     assert relion._stats["batches"] - b0 <= 6      # 11 particles, groups of up to 4
+
+
+def test_threads_with_own_orientation_sets():
+    """Coarse and fine calls whose orientation and translation counts differ per particle (local searches, the
+    fine pass) are batched over the union of the sets and each gets its own block back."""
+    import threading
+    mdl, eul, tx, ty, ir, ii, corr, g, P = _case(seed=2, n=9, O=60)
+    n = tx.shape[0]
+    geo = (g["mdlX"], g["mdlY"], g["mdlZ"], g["mdlInitY"], g["mdlInitZ"], g["maxR"], g["maxR2_padded"],
+           g["padding_factor"], g["imgX"], g["imgY"])
+    own = [eul[3 * p:3 * p + 5 + p].copy() for p in range(n)]          # 5..13 orientations each, overlapping
+    nt = [3 + p % 4 for p in range(n)]                                  # 3..6 translations each
+
+    def call(p, out):
+        O, T = len(own[p]), nt[p]
+        if p % 2:                                                       # odd particles through the fine entry
+            rot = np.repeat(np.arange(O, dtype=np.uint64), T)
+            tr = np.tile(np.arange(T, dtype=np.uint64), O)
+            return relion.diff2_fine(memoryview(mdl), memoryview(own[p].ravel()), memoryview(tx[p, :T].copy()),
+                                     memoryview(ty[p, :T].copy()), memoryview(ir[p]), memoryview(ii[p]),
+                                     memoryview(corr[p]), memoryview(rot), memoryview(tr), memoryview(out),
+                                     *geo, 0.0, O, T, O * T, P, O)
+        return relion.diff2_coarse(memoryview(mdl), memoryview(own[p].ravel()), memoryview(tx[p, :T].copy()),
+                                   memoryview(ty[p, :T].copy()), memoryview(ir[p]), memoryview(ii[p]),
+                                   memoryview(corr[p]), memoryview(out), *geo, O, T, P)
+
+    ref = [np.zeros(len(own[p]) * nt[p], np.float32) for p in range(n)]
+    assert all(call(p, ref[p]) for p in range(n))
+    relion._BATCH, relion._BATCH_WAIT = 4, 0.2
+    outs = [np.zeros_like(r) for r in ref]
+    ok = [False] * n
+    b0 = relion._stats.get("batches", 0)
+
+    def run(p):
+        ok[p] = call(p, outs[p])
+    th = [threading.Thread(target=run, args=(p,)) for p in range(n)]
+    [x.start() for x in th]
+    [x.join(60) for x in th]
+    relion._BATCH = 0
+    assert all(ok)
+    assert 0 < relion._stats["batches"] - b0 <= 5
+    for p in range(n):
+        rel = np.abs(outs[p] - ref[p]).max() / np.abs(ref[p]).max()
+        assert rel < 1e-5, (p, rel)
+        assert outs[p].argmin() == ref[p].argmin()
