@@ -23,7 +23,7 @@ arm() { # arm <tag> <mode> <optimiser> <it> <n>
 }
 rec() { # rec <tag> <mode> <optimiser> <it>
   mkdir -p $R/runs/${P}_rec_$1; mode $2
-  TT_RELION_RECORD_PREP=$R/runs/${P}_rec_$1 TT_RELION_RECORD_PREP_N=16 RANKS=2 N=256 "$here/../wsum/prof_arm.sh" ${P}_$1 $3 $4
+  TT_RELION_RECORD_PREP=$R/runs/${P}_rec_$1 TT_RELION_RECORD_PREP_N=16 RANKS=3 N=256 "$here/../wsum/prof_arm.sh" ${P}_$1 $3 $4
   echo "$1 mode=$2 records $(ls $R/runs/${P}_rec_$1 | wc -l) wisdom: $(grep -m1 -h TTPrep: $R/runs/${P}_$1/*.log $R/runs/${P}_$1/run.* 2>/dev/null | head -1)" >> $S
 }
 check() { # check <it tag>: every mode against float64, and e and w against n

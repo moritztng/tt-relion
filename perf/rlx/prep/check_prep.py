@@ -25,17 +25,25 @@ def load(d):
 
 arms = [load(d) for d in sys.argv[1:3]]
 for d, recs in zip(sys.argv[1:], arms):
+    if not recs:
+        sys.exit(f"{d}: no records, nothing was checked")
     worst = dict.fromkeys(KEYS, 0.0)
+    graded = 0
     for part, r in recs.items():
         if not r.get("zero_mask"):
             print(f"{d} particle {part}: noise mask, no reference"); continue
         ref = reference(r)
         err = {k: rel(r[k], ref[k]) for k in KEYS}
         worst = {k: max(worst[k], err[k]) for k in KEYS}
+        graded += 1
         print(f"{d} particle {part} size {int(r['current_size'])} shift {int(r['dx'])},{int(r['dy'])}: "
               + " ".join(f"{k} {err[k]:.2e}" for k in KEYS))
-    print(f"{d} worst of {len(recs)} vs float64: " + " ".join(f"{k} {worst[k]:.2e}" for k in KEYS))
+    if not graded:
+        sys.exit(f"{d}: no particle with a reference, nothing was checked")
+    print(f"{d} worst of {graded} vs float64: " + " ".join(f"{k} {worst[k]:.2e}" for k in KEYS))
 if len(arms) == 2:
     both = sorted(set(arms[0]) & set(arms[1]))
+    if not both:
+        sys.exit("the two arms share no particle, nothing was compared")
     worst = {k: max([rel(arms[0][p][k], arms[1][p][k]) for p in both] or [0.0]) for k in KEYS}
     print(f"arm vs arm on {len(both)} shared particles: " + " ".join(f"{k} {v:.2e}" for k, v in worst.items()))
