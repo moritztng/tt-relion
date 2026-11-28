@@ -389,6 +389,28 @@ def _window(d2, lo, lt, pn, n, window):
 _CAND_CAP = int(os.environ.get("TT_RELION_CAND_CAP", str(1 << 20)))     # candidates a batch may return before it falls back
 
 
+# RELION hands over every pixel of the coarse or fine image and gives the ones it does not score (past the
+# resolution limit, and the origin) a weight of exactly zero: 21 % of the image in a 3D refinement. A pixel no
+# particle of the batch weights adds exactly nothing to any of the three sums, so the chip is not given it: 1300
+# points become 1021 on a 50-pixel coarse pass, one 1024-point chunk instead of two. TT_RELION_PIX_DROP=0: all.
+_PIX_DROP = os.environ.get("TT_RELION_PIX_DROP", "1") not in ("", "0")
+_support_of = {}        # pixel grid -> bool [P], the pixels some particle has weighted. It only grows.
+
+
+def _support(x, y, corr):
+    """-> the indices of the pixels to hand over (ascending), or None for all of them. One set per pixel grid: a
+    batch that weights a pixel outside it widens it, so the chip sees few distinct sets and never a wrong one."""
+    if not _PIX_DROP:
+        return None
+    nz = np.asarray(corr).reshape(-1, x.size).any(axis=0)
+    key = (x.size, hash(x.tobytes()), hash(y.tobytes()))
+    with _lock:
+        keep = _support_of.get(key)
+        if keep is None or nz[~keep].any():
+            keep = _support_of[key] = nz if keep is None else keep | nz
+    return None if keep.all() or not keep.any() else np.flatnonzero(keep)
+
+
 def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared, prior=None, own=None):
     """diff2 [R, O] from the resident chip op, row r = particle pn[r] at (tx[r], ty[r]). shared: the orientation set
     is the iteration's (a global coarse pass), so the chip keeps its projections; otherwise it is this call's own and
@@ -397,10 +419,15 @@ def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared
     mdlX, mdlY, mdlZ = geom[:3]
     model = [hashlib.sha256(repr(_model_key(mdl_mv)).encode()).hexdigest(), *geom, mdlX * mdlY * mdlZ]
     f32 = lambda a: np.asarray(a, np.float32)  # noqa: E731
+    keep = _support(x, y, corr)
+    if keep is not None:
+        x, y = x[keep], y[keep]
+        img_r, img_i, corr = (np.asarray(a).reshape(-1, a.shape[-1])[:, keep] for a in (img_r, img_i, corr))
     s = _server()
     try:
         return s.d2(mdl_mv, model, eul, x, y, f32(img_r), f32(img_i), f32(corr) * 0.5, f32(tx), f32(ty), f32(pn),
-                    "%s.%s.%d.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size, geom[5]) if shared else None,
+                    "%s.%s.%d.%s.%d" % (model[0], hashlib.sha256(eul.tobytes()).hexdigest(), x.size,
+                                        hashlib.sha256(x.tobytes() + y.tobytes()).hexdigest()[:16], geom[5]) if shared else None,
                     None if prior is None else (f32(prior[0]), f32(prior[1]), float(prior[2]), _CAND_CAP), own)
     finally:
         _free.put(s)

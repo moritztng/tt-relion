@@ -83,7 +83,7 @@ def main():
             if req.get("model_sent"):
                 res.set_model(key, mdl.reshape(nvox, 2), X, Y, Z, initY, initZ, maxR2, pf)
             res.set_radius(maxR2)       # the pass's, not the model's: coarse and fine cut one model at two radii
-            res.set_pixels((P, x.tobytes()), x, y)
+            res.set_pixels((P, x.tobytes(), y.tobytes()), x, y)
             t1 = time.time()
             ncand = None
             if pr:

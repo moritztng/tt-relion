@@ -359,3 +359,61 @@ def test_small_orientation_sets_stay_with_relion():
     finally:
         relion._MIN_ORI = keep
         relion._tl.__dict__.pop("small", None)
+
+
+def test_unweighted_pixels_are_not_handed_over(monkeypatch):
+    """RELION weights 21 % of the pixels it hands over with exactly zero. The resident op gets the weighted ones
+    only, the same pixels for every batch of a grid, and the scores are the ones of the whole image."""
+    import queue
+
+    from tt_relion import relion
+    rng = np.random.default_rng(3)
+    imgX, imgY, N, T, O = 9, 16, 3, 4, 5
+    P = imgX * imgY
+    pix = np.arange(P)
+    x, yi = (pix % imgX).astype(np.float32), pix // imgX
+    y = np.where(yi > 7, yi - imgY, yi).astype(np.float32)
+    inside = (x * x + y * y < 40) & (pix > 0)
+    eul = rng.normal(size=(O, 9)).astype(np.float32)
+    seen = []
+
+    class Stub:
+        def d2(self, mdl_mv, model, eul, x, y, xr, xi, w, tx, ty, pn, key, prior, own):
+            seen.append((x.size, key))
+            ref = np.exp(1j * (np.outer(eul[:, 0], x) + np.outer(eul[:, 1], y)).astype(np.float64))      # [O, P]
+            pn = pn.astype(int)
+            sx = (xr[pn] + 1j * xi[pn]) * np.exp(1j * (np.outer(tx, x) + np.outer(ty, y)).astype(np.float64))
+            return (w[pn][:, None] * np.abs(ref[None] - sx[:, None]) ** 2).sum(-1)
+
+    monkeypatch.setattr(relion, "_server", lambda: Stub())
+    monkeypatch.setattr(relion, "_free", queue.Queue())
+    monkeypatch.setattr(relion, "_support_of", {})
+    mdl = memoryview(np.arange(64, dtype=np.float32).tobytes())
+    geom = (4, 4, 2, -2, -2, 9, 1)
+
+    def batch(mask, drop, shared=True):
+        monkeypatch.setattr(relion, "_PIX_DROP", drop)
+        r = np.random.default_rng(5)
+        xr, xi = r.normal(size=(2, N, P)).astype(np.float32)
+        w = (r.uniform(0.5, 2, (N, P)) * mask).astype(np.float32)
+        tx, ty = r.normal(size=(2, N * T)).astype(np.float32) * 0.1
+        return relion._resident_d2(mdl, eul, x, y, xr, xi, w, tx, ty, np.repeat(np.arange(N), T), geom, shared)
+
+    full = batch(inside, False)
+    part = batch(inside, True)
+    assert seen[0][0] == P and seen[1][0] == inside.sum() < P
+    assert seen[0][1] != seen[1][1]                 # the projections kept on the chip belong to one pixel set
+    np.testing.assert_allclose(part, full, rtol=1e-12)
+    assert batch(inside, True)[0, 0] == part[0, 0] and seen[2] == seen[1]
+    # one particle of a later batch weights a pixel outside the set: the set widens, nothing is lost
+    wider = inside.copy()
+    wider[np.flatnonzero(~inside)[3]] = True
+    one = np.stack([wider, inside, inside])
+    np.testing.assert_allclose(batch(one, True), batch(one, False), rtol=1e-12)
+    assert seen[3][0] == inside.sum() + 1 and seen[3][1] != seen[1][1]
+    assert batch(inside, True, shared=False).shape == (N * T, O) and seen[5] == (inside.sum() + 1, None)
+    # every pixel weighted, or none: the image goes as it is
+    monkeypatch.setattr(relion, "_support_of", {})
+    for mask in (np.ones(P, bool), np.zeros(P, bool)):
+        batch(mask, True)
+        assert seen[-1][0] == P
