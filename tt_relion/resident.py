@@ -29,6 +29,11 @@ RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a n
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 
 
+def _amax(a, axis):
+    """max |a| along an axis, without the |a| temporary."""
+    return np.maximum(a.max(axis), -a.min(axis)).astype(np.float64)
+
+
 def _exp(m):
     """Exponent e with |x| <= 2^e for the maxima m (0 for an all-zero row)."""
     return np.where(m > 0, np.floor(np.log2(np.maximum(m, 1e-300))) + 1, 0).astype(np.int32)
@@ -121,12 +126,11 @@ class Resident:
         self.refs, self.bal, self.ref_key = [], None, None
 
     # ---- reference side ------------------------------------------------------------------------------------
-    def _kchip(self, re, im, at=slice(None), n=None):
-        """[m, P] real and imaginary parts -> [n, K] in the chip's K order: per 1024-pixel chunk, re then im. Input
-        row i lands on row at[i]; the other rows are zero."""
-        n = re.shape[0] if n is None else n
+    def _kchip(self, re, im):
+        """[n, P] real and imaginary parts -> [n, K] in the chip's K order: per 1024-pixel chunk, re then im."""
+        n = re.shape[0]
         z = np.zeros((2, n, self.NC * 1024), np.float32)
-        z[0, at, :self.P], z[1, at, :self.P] = re, im
+        z[0, :, :self.P], z[1, :, :self.P] = re, im
         return z.reshape(2, n, self.NC, 1024).transpose(1, 2, 0, 3).reshape(n, self.K)
 
     def _colmax(self, t):
@@ -203,24 +207,30 @@ class Resident:
         slot = np.arange(R) - np.searchsorted(pn, pn)       # a row's place among the rows of its particle
         nb = blk(N) if N > RBLK else 32 << int(np.ceil(np.log2(max(N, 32) / 32)))    # a row block oz_fused has
         rows = blk((int(slot.max()) + 1) * nb)
-        if rows + nb < 2 * blk(R):
+        if rows < 2 * blk(R):                   # both sides whole 512-row blocks; the norm block is a fraction of one
             return slot * nb + pn, np.arange(N), nb, rows
         return np.arange(R), pn, blk(R), blk(R)
 
-    def _operands(self, xr, xi, w, tx, ty, pn, x, y, dr=None, sel=None):
-        """Particle side in float64. Row r is particle pn[r] at translation (tx[r], ty[r]) and sits on device row
-        dr[r]: A [U, K] = w S_t X and nx [U] = sum w |X|^2. A2 = w on both parts, one row per particle in sel."""
+    def _operands(self, xr, xi, w, tx, ty, pn, x, y, dr=None, sel=None, n=None):
+        """Particle side, fp32 in the chip's K order. Row r is particle pn[r] at translation (tx[r], ty[r]) and sits
+        on device row dr[r] of n: A [n, K] = w S_t X and nx [n] = sum w |X|^2 (float64). A2 = w on both parts, one
+        row per particle in sel. The products are float64 and rounded once; the phase is separable in x and y, so the
+        sines are taken per distinct coordinate, and a 1024-pixel chunk at a time keeps the temporaries in cache."""
         dr, sel = np.arange(len(pn)) if dr is None else dr, pn if sel is None else sel
-        U = int(dr.max()) + 1
+        n = int(dr.max()) + 1 if n is None else n
         w = w.astype(np.float64)
-        ph = tx[:, None].astype(np.float64) * x + ty[:, None].astype(np.float64) * y            # [R, P]
-        c, s = np.cos(ph), np.sin(ph)
-        wr = w[pn]
-        A = self._kchip((c * xr[pn] - s * xi[pn]) * wr, (c * xi[pn] + s * xr[pn]) * wr, dr, U).astype(np.float64)
-        A2 = self._kchip(w, w)[sel].astype(np.float64)
-        nx = np.zeros(U)
+        xw = (xr + 1j * xi) * w                                                              # [N, P] complex128
+        (xu, xj), (yu, yj) = np.unique(x, return_inverse=True), np.unique(y, return_inverse=True)
+        ex = np.exp(1j * tx[:, None].astype(np.float64) * xu)                                # [R, distinct x]
+        ey = np.exp(1j * ty[:, None].astype(np.float64) * yu)
+        A = np.zeros((n, self.NC, 2, 1024), np.float32)
+        for c in range(self.NC):
+            p = slice(c * 1024, min(c * 1024 + 1024, self.P))
+            z = ex[:, xj[p]] * ey[:, yj[p]] * xw[pn, p]
+            A[dr, c, 0, :p.stop - p.start], A[dr, c, 1, :p.stop - p.start] = z.real, z.imag
+        nx = np.zeros(n)
         nx[dr] = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)[pn]
-        return A, A2, nx
+        return A.reshape(n, self.K), self._kchip(w, w)[sel], nx
 
     def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None):
         """float32 [R, O]. eul [O, 9]; xr, xi, w [N, P]; tx, ty, pn [R]: row r scores particle pn[r] at translation
@@ -233,7 +243,8 @@ class Resident:
         R = len(tx)
         t0 = time.time()
         dr, sel, nb, rows = self._layout(pn, len(xr))
-        A, A2, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, dr, sel)
+        up = min(-(-(int(dr.max()) + 1) // RUP) * RUP, rows)
+        A, A2, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, dr, sel, up)
         t0 = t1 = self._mark("host_s", t0)
 
         held = ref_key is not None and ref_key == self.ref_key
@@ -242,15 +253,14 @@ class Resident:
         else:
             refs = self._project(np.asarray(eul, np.float32).reshape(-1, 9))
             t0 = self._mark("proj_s", t0)
-            e, e2 = self._balance(refs, np.abs(A).max(0), np.abs(A2).max(0))
+            e, e2 = self._balance(refs, _amax(A, 0), _amax(A2, 0))
             t0 = self._mark("refdig_s", t0)
             if ref_key is not None:
                 self._drop_refs()
                 self.refs, self.bal, self.ref_key = refs, (e, e2), ref_key
-        A, A2 = np.ldexp(A, e), np.ldexp(A2, e2)
-        ea, ea2 = _exp(np.abs(A).max(1)), _exp(np.abs(A2).max(1))
-        up = lambda v, m: np.pad(v, ((0, min(-len(v) % RUP, m - len(v))), (0, 0)))  # noqa: E731
-        tA, tA2 = self._put(up(A, rows)), self._put(up(A2, nb))
+        A, A2 = np.ldexp(A, e, out=A), np.ldexp(A2, e2)        # exact in fp32
+        ea, ea2 = _exp(_amax(A, 1)), _exp(_amax(A2, 1))
+        tA, tA2 = self._put(A), self._put(np.pad(A2, ((0, min(-len(A2) % RUP, nb - len(A2))), (0, 0))))
         Ad, A2d = self._digits(tA, ea, rows), self._digits(tA2, ea2, nb)
         nxh = (nx / 2).astype(np.float32)
         nxl = (nx / 2 - nxh).astype(np.float32)
