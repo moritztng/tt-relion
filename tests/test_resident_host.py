@@ -229,6 +229,37 @@ def test_own_form_scores_each_particle_on_its_own_set():
             assert np.abs(got[i] - d).max() < 2e-6 * np.abs(d).max(), (N, i, np.abs(got[i] - d).max())
 
 
+def test_own_block_from_the_rows_in_use_has_the_bits_of_the_whole_block():
+    """The own form balances a program's image block on the rows in use. The block, its balance and its row
+    exponents are those of the block built whole (zero rows included), also when a padded program repeats a
+    particle and when a column or a row is all zero."""
+    from tt_relion.resident import _amax, _exp
+    rng = np.random.default_rng(7)
+    K, rr, nt = 4096, 32, np.array([9, 1, 32, 5])
+    idx = np.array([0, 1, 2, 3, 0, 0, 0, 0])            # a program of 8 padded with its first particle
+    r0 = np.concatenate([[0], np.cumsum(nt)])
+    src = (rng.standard_normal((int(nt.sum()), K)) * np.exp2(rng.integers(-20, 20, K))).astype(np.float32)
+    src[:, 100:140] = 0
+    src[r0[1]] = 0
+    mbx = np.exp2(rng.integers(-30, 30, K).astype(np.float64)) * (rng.uniform(size=K) > 0.1)
+    A = np.zeros((len(idx), rr, K), np.float32)
+    for j, i in enumerate(idx):
+        A[j, :nt[i]] = src[r0[i]:r0[i + 1]]
+    A = A.reshape(-1, K)
+    ma = _amax(A, 0)
+    ok = (ma > 0) & (mbx > 0)
+    e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mbx, 1)) - np.log2(np.where(ok, ma, 1)))), 0).astype(int)
+    A *= (np.ldexp(1.0, e) * (mbx > 0)).astype(np.float32)
+    ea = _exp(_amax(A, 1))
+    take = np.concatenate([np.arange(r0[i], r0[i + 1]) for i in idx])
+    at = np.concatenate([j * rr + np.arange(nt[i]) for j, i in enumerate(idx)])
+    keep = src.copy()
+    A_, e_, ea_ = Resident._own_block(src, take, at, len(idx) * rr, mbx)
+    assert np.array_equal(src, keep)
+    assert np.array_equal(A_.view(np.uint32), A.view(np.uint32)) and np.array_equal(e_, e) and np.array_equal(ea_, ea)
+    assert ea_.dtype == ea.dtype and A_.dtype == A.dtype and A_.flags.c_contiguous
+
+
 def test_operand_runs_and_threads_give_the_same_bits(monkeypatch):
     import tt_relion.resident as rs
     rng = np.random.default_rng(11)

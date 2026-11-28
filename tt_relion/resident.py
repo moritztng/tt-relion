@@ -493,6 +493,24 @@ class Resident:
         c["batches"], c["rows"], c["rows_padded"] = c["batches"] + 1, c["rows"] + R, c["rows_padded"] + rows
         return out
 
+    @staticmethod
+    def _own_block(src, take, at, rows, mbx):
+        """A program's image operand in the own form, balanced against its references: (A [rows, K] fp32, the
+        balance exponents e [K], the row exponents ea [rows]). Rows `take` of src go to device rows `at`, the rest
+        of the block is zero. A particle brings 9 translations to a block of 32 rows, so the maxima and the scaling
+        run on the rows in use only: a zero row adds nothing to a column's maximum and its own exponent is 0."""
+        U = src[take]
+        ma = _amax(U, 0)
+        ok = (ma > 0) & (mbx > 0)
+        e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mbx, 1)) - np.log2(np.where(ok, ma, 1)))), 0).astype(int)
+        # a pixel no reference of the program reaches adds nothing, but would set its row's exponent: zero it
+        U *= (np.ldexp(1.0, e) * (mbx > 0)).astype(np.float32)
+        ea = np.zeros(rows, np.int32)
+        ea[at] = _exp(_amax(U, 1))
+        A = np.zeros((rows, src.shape[1]), np.float32)
+        A[at] = U
+        return A, e, ea
+
     def d2_own(self, eul, on, xr, xi, w, tx, ty, pn, x, y):
         """Every particle against its own orientations: a list of float32 [T_i, on_i]. eul [sum(on), 9] in particle
         order, on [N] the particles' set sizes; xr, xi, w, tx, ty, pn as in d2.
@@ -543,19 +561,12 @@ class Resident:
             # program (the product d2 runs), and a particle reads its row at its own columns.
             for X, mbx, norm, n in ((B, mb, False, self.n), (B2, mb * mb, True, self.n2)):
                 rr, nq = (32, 1) if norm else (R1, q)
-                A = np.zeros((nq, rr, self.K), np.float32)
-                for j, i in enumerate(idx):     # a particle's rows lead its block
-                    if norm:
-                        A[0, j] = A20[i]
-                    else:
-                        A[j, :nt[i]] = A0[r0[i]:r0[i + 1]]
-                A = A.reshape(nq * rr, self.K)
-                ma = _amax(A, 0)
-                ok = (ma > 0) & (mbx > 0)
-                e = np.where(ok, np.round(0.5 * (np.log2(np.where(ok, mbx, 1)) - np.log2(np.where(ok, ma, 1)))), 0).astype(int)
-                # a pixel no reference of the program reaches adds nothing, but would set its row's exponent: zero it
-                A *= (np.ldexp(1.0, e) * (mbx > 0)).astype(np.float32)
-                ea = _exp(_amax(A, 1))
+                if norm:
+                    take, at = idx, np.arange(q)
+                else:                           # a particle's rows lead its block
+                    take = np.concatenate([np.arange(r0[i], r0[i + 1]) for i in idx])
+                    at = np.concatenate([j * rr + np.arange(nt[i]) for j, i in enumerate(idx)])
+                A, e, ea = self._own_block(A20 if norm else A0, take, at, nq * rr, mbx)
                 t0 = self._mark("host_s", t0)
                 ts = self._put(np.ldexp(1.0, -e).reshape(1, -1))
                 Xb = ttnn.multiply(X, ts)
