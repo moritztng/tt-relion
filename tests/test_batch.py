@@ -187,3 +187,22 @@ def test_batch_is_cut_by_rows():
         rel = np.abs(outs[p] - refs[p]).max() / np.abs(refs[p]).max()
         assert rel < 1e-5, (p, rel)
         assert outs[p].argmin() == refs[p].argmin()
+
+
+def test_window_keeps_the_samples_near_each_particles_best():
+    """_window on a dense matrix: every sample within the window of its particle's best, priors included, an
+    excluded orientation (infinite prior) never."""
+    rng = np.random.default_rng(5)
+    pn = np.repeat(np.arange(4), [3, 5, 1, 4])
+    d = (rng.gamma(2.0, 20.0, (len(pn), 60)) + 900).astype(np.float32)
+    lo, lt = rng.uniform(0, 4, 60), rng.uniform(0, 6, len(pn))
+    lo[7] = np.inf
+    r, o, dl, best = relion._window(d, lo, lt, pn, 4, 30.0)
+    e = d.astype(np.float64) + lo[None] + lt[:, None]
+    for p in range(4):
+        rows = np.flatnonzero(pn == p)
+        assert best[p] == e[rows].min()
+        want = {(int(a), int(b)) for a in rows for b in np.flatnonzero(e[a] - best[p] < 30.0)}
+        got = {(int(a), int(b)) for a, b in zip(r, o) if pn[a] == p}
+        assert got == want and 7 not in {b for _, b in got}
+    assert np.abs(dl - (e[r, o] - best[pn[r]])).max() < 1e-5 and (np.diff(r) >= 0).all()

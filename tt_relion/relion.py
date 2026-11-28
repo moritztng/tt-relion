@@ -362,6 +362,18 @@ def _device_cross(t, ref, shw, ref_key=None):
     return t.from_numpy(out).double().sum(0).reshape(-1, k, n).sum(1)
 
 
+def _window(d2, lo, lt, pn, n, window):
+    """The candidate form from a dense diff2 [R, O] (backends that hold the matrix on the host): the samples whose
+    d2 + lo[o] + lt[r] lies within window of their particle's best, as (row int32, orientation int32, delta float32,
+    best float64 [n]) in row order. Same contract as the chip's Resident.d2(prior=)."""
+    e = d2.astype(np.float64) + np.asarray(lo, np.float64)[None, :] + np.asarray(lt, np.float64)[:, None]
+    best = np.full(n, np.inf)
+    np.minimum.at(best, pn, e.min(1))
+    dl = e - best[pn][:, None]
+    r, o = np.nonzero(dl < window)
+    return r.astype(np.int32), o.astype(np.int32), dl[r, o].astype(np.float32), best
+
+
 def _resident_d2(mdl_mv, eul, x, y, img_r, img_i, corr, tx, ty, pn, geom, shared):
     """diff2 [R, O] from the resident chip op, row r = particle pn[r] at (tx[r], ty[r]). shared: the orientation set
     is the iteration's (a global coarse pass), so the chip keeps its projections; otherwise it is this call's own and
