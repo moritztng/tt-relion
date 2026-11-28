@@ -7,7 +7,7 @@ import numpy as np
 
 sys.modules.setdefault("ttnn", types.SimpleNamespace(TILE_LAYOUT=0, ROW_MAJOR_LAYOUT=1, Tensor=object))
 for m in ("tt_relion.oz_fused", "tt_relion.proj_lerp"):
-    sys.modules.setdefault(m, types.SimpleNamespace(oz_combine=None, oz_cut=None, oz_fused=None, proj_rot=None))
+    sys.modules.setdefault(m, types.SimpleNamespace(cand_compact=None, oz_combine=None, oz_cut=None, oz_fused=None, proj_rot=None))
 from tt_relion.resident import Resident  # noqa: E402
 
 

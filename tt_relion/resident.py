@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import ttnn
 
-from .oz_fused import oz_combine, oz_cut, oz_fused
+from .oz_fused import cand_compact, oz_combine, oz_cut, oz_fused
 from .proj_lerp import proj_rot
 
 KC = 480        # K run of the digit product (oz_fused KR = 15 tiles)
@@ -27,6 +27,7 @@ OCH = 4096      # orientations per product
 RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a new row count on every call, and
                 # each new shape costs seconds of program builds
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
+FARP = 1e30     # -log prior / 2 of an excluded orientation and of a pad column: never inside a window
 
 
 def _amax(a, axis):
@@ -201,6 +202,44 @@ class Resident:
         ttnn.deallocate(S)
         return hi, lo
 
+    def _candidates(self, kept, rmin, plt, window, dr, pn, N, rows):
+        """The samples within window of each particle's best, from the matrices kept on the chip (value = d2 / 2 +
+        orientation prior / 2). rmin [R]: each row's minimum as the chip reduced it, which is not exact (measured
+        bf16-class in the cell), so the chip window is wider by that much and the exact window is cut here."""
+        best = np.full(N, np.inf)
+        np.minimum.at(best, pn, 2.0 * rmin + plt)
+        marg = 1.0 + float(np.abs(rmin[np.abs(rmin) < FARP / 2]).max()) * 2.0 ** -6
+        thr = np.full(rows, -np.inf)
+        thr[dr] = (best[pn] + window - plt) / 2 + marg
+        t_thr = ttnn.from_torch(torch.from_numpy(thr.astype(np.float32).reshape(rows // 32, 32)), dtype=ttnn.float32,
+                                layout=ttnn.ROW_MAJOR_LAYOUT, device=self.dev)
+        row_of = np.full(rows, -1, np.int64)
+        row_of[dr] = np.arange(len(dr))
+        rr, oo, vv = [], [], []
+        for D, o0, O in kept:
+            res = cand_compact(D, t_thr, rows, O)
+            if res is None:                     # more candidates than the kernel's buffers: this chunk comes back whole
+                d = ttnn.to_torch(D).numpy()[dr, :O]
+                r_, c_ = np.nonzero(d < thr[dr].astype(np.float32)[:, None])
+                v_ = d[r_, c_]
+                self.c["cand_dense"] = self.c.get("cand_dense", 0) + 1
+            else:
+                r_, c_ = np.divmod(res[0], O)
+                r_, v_ = row_of[r_], res[1]
+            ttnn.deallocate(D)
+            rr.append(r_), oo.append(c_ + o0), vv.append(2.0 * v_.astype(np.float64) + plt[r_])
+        ttnn.deallocate(t_thr)
+        rr, oo, vv = np.concatenate(rr), np.concatenate(oo), np.concatenate(vv)
+        assert (rr >= 0).all()
+        best = np.full(N, np.inf)
+        np.minimum.at(best, pn[rr], vv)
+        assert np.isfinite(best).all(), "a particle's window missed its own best sample"
+        dl = vv - best[pn[rr]]
+        k = np.flatnonzero(dl < window)
+        k = k[np.lexsort((oo[k], rr[k]))]
+        self.c["cand"] = self.c.get("cand", 0) + len(k)
+        return rr[k].astype(np.int32), oo[k].astype(np.int32), dl[k].astype(np.float32), best
+
     @staticmethod
     def _layout(pn, N):
         """Where the rows go on the chip: (device row of each row, particle of each norm row, norm rows, rows).
@@ -239,13 +278,18 @@ class Resident:
         nx = (w * (xr.astype(np.float64) ** 2 + xi.astype(np.float64) ** 2)).sum(1)
         return A.reshape(n, self.K), self._kchip(w, w)[sel], nx[sel]
 
-    def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None, out=None):
+    def d2(self, eul, xr, xi, w, tx, ty, pn, x, y, ref_key=None, out=None, prior=None):
         """float32 [R, O]. eul [O, 9]; xr, xi, w [N, P]; tx, ty, pn [R]: row r scores particle pn[r] at translation
         (tx[r], ty[r]) (phase = x tx + y ty, RELION's units), so particles may bring different numbers of translations.
 
         ref_key names an orientation set shared by many batches (a global pass): its projections and digits stay on
         the chip until another key or model arrives, so the key must also identify the pixel set. Without it the set
         is used once. out: where to write the result (the server passes the shared segment).
+
+        prior = (lo [O], lt [R], window), float64: -log of RELION's orientation prior per orientation (inf = excluded)
+        and of its offset prior per row. Then the dense matrix stays on the chip and the call returns the candidates
+        instead, (row [n] int32, orientation [n] int32, delta [n] float32, best [N] float64): every sample whose
+        d2 + lo + lt lies within window of its particle's best, delta = that distance, in row order.
         """
         R = len(tx)
         t0 = time.time()
@@ -280,7 +324,12 @@ class Resident:
             bp = ttnn.subtract(s_, a)
             return s_, ttnn.add(ttnn.subtract(a, ttnn.subtract(s_, bp)), ttnn.subtract(b, bp))
 
-        out = np.empty((R, len(eul)), np.float32) if out is None else out
+        if prior is None:
+            out = np.empty((R, len(eul)), np.float32) if out is None else out
+        else:
+            plo, plt, window = np.asarray(prior[0], np.float64) / 2, np.asarray(prior[1], np.float64), float(prior[2])
+            plo = np.where(np.isfinite(plo), plo, FARP)
+            kept, rmin = [], []
         o0 = 0
         for r in refs:
             Ch, Cl = self._product(Ad, ea, rows, r, "B")
@@ -291,15 +340,35 @@ class Resident:
             lo = ttnn.add(ttnn.add(se, ttnn.multiply(Nl, 0.5)), t_nxl)
             for t in (Nh, Nl):
                 ttnn.deallocate(t)
+            if prior is not None:               # the orientation prior belongs to the column: one more TwoSum here
+                Op = int(sh.shape[1])
+                ph = np.full(Op, FARP, np.float32)
+                ph[:r["O"]] = plo[o0:o0 + r["O"]]
+                pl = np.zeros(Op, np.float32)
+                pl[:r["O"]] = plo[o0:o0 + r["O"]] - ph[:r["O"]].astype(np.float64)
+                t_ph, t_pl = self._put(ph[None]), self._put(pl[None])
+                sh, sp = tsum(sh, ttnn.add(ttnn.multiply(sh, 0.0), t_ph))
+                lo = ttnn.add(ttnn.add(lo, sp), t_pl)
+                for t in (t_ph, t_pl):
+                    ttnn.deallocate(t)
             sh, lo = _rep(sh, rows // nb), _rep(lo, rows // nb)
             dh, de = tsum(sh, ttnn.neg(Ch))
             D = ttnn.add(dh, ttnn.subtract(ttnn.add(de, lo), Cl))
             t0 = self._mark("prod_s", t0)
-            np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, o0:o0 + r["O"]])     # the chip holds d2 / 2
+            if prior is None:
+                np.multiply(ttnn.to_torch(D).numpy()[dr, :r["O"]], 2.0, out=out[:, o0:o0 + r["O"]])     # the chip holds d2 / 2
+            else:                               # the row minima come back; the matrix waits for its window
+                m = ttnn.min(D, dim=-1, keepdim=True)
+                rmin.append(ttnn.to_torch(m).double().numpy().reshape(-1)[dr])
+                ttnn.deallocate(m)
+                kept.append((D, o0, r["O"]))
             t0 = self._mark("read_s", t0)
             o0 += r["O"]
-            for t in (Ch, Cl, sh, lo, D):
+            for t in (Ch, Cl, sh, lo) + ((D,) if prior is None else ()):
                 ttnn.deallocate(t)
+        if prior is not None:
+            out = self._candidates(kept, np.min(rmin, 0), plt, window, dr, pn, len(xr), rows)
+            self._mark("read_s", t0)
         for t in (tA, tA2, Ad, A2d, t_nxh, t_nxl):
             ttnn.deallocate(t)
         if not held and ref_key is None:
