@@ -319,6 +319,21 @@ def test_rows_cut_does_not_open_a_tile_for_a_remainder():
         relion._BATCH, relion._BATCH_ROWS = keep
 
 
+def test_own_orientation_sets_take_their_own_rows_cut():
+    """TT_RELION_OWN_ROWS cuts a batch of particles with different orientation sets; a shared set keeps the batch cut."""
+    q = lambda n, t, own: [{"tx": np.zeros(t, np.float32), "eh": i if own else 0} for i in range(n)]     # noqa: E731
+    keep = relion._BATCH, relion._BATCH_ROWS, relion._OWN_ROWS
+    try:
+        relion._BATCH, relion._BATCH_ROWS, relion._OWN_ROWS = 96, 3328, 512
+        assert relion._take(q(96, 9, True)) == (56, True)       # 504 rows: one tile
+        assert relion._take(q(40, 9, True)) == (40, False)
+        assert relion._take(q(96, 37, False)) == (89, True)     # the shared set fills 3,293 of 3,328 rows
+        relion._OWN_ROWS = 0
+        assert relion._take(q(96, 9, True)) == (96, True)
+    finally:
+        relion._BATCH, relion._BATCH_ROWS, relion._OWN_ROWS = keep
+
+
 def test_small_orientation_sets_stay_with_relion():
     """TT_RELION_MIN_ORI: a coarse call under the threshold is declined untouched, and so is the fine call after it
     on the same thread; a call at or over the threshold is handled, and its fine call too."""

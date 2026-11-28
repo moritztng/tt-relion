@@ -775,22 +775,28 @@ _BATCH_WAIT = float(os.environ.get("TT_RELION_BATCH_WAIT_MS", "20")) / 1e3
 # scores rows in tiles of 512, so 512 (or a multiple) fills the tile whatever each particle's translation count is.
 # A batch that would open another tile and leave it more than a quarter of the batch empty is trimmed to whole
 # tiles: 14 particles of 37 rows are 518 rows, two tiles for the price of one particle; 13 go now, one waits.
+# TT_RELION_OWN_ROWS=<n>: the rows cut for particles that bring their own orientation sets (the fine pass, local
+# searches). Such a batch scores the union of its sets for every row, so its product grows with the square of the
+# batch while a shared set grows linearly. Unset or 0: the same cut as TT_RELION_BATCH_ROWS.
 _BATCH_ROWS = int(os.environ.get("TT_RELION_BATCH_ROWS", "0"))
+_OWN_ROWS = int(os.environ.get("TT_RELION_OWN_ROWS", "0"))
 _TILE_ROWS = 512
 
 
 def _take(q):
     """How many particles from the head of the queue make the next batch, and whether that batch is full."""
     n, rows, cum, full = 0, 0, [], False
+    own = _OWN_ROWS and len(q) > 1 and q[0].get("eh") != q[1].get("eh")
+    cap = _OWN_ROWS if own else _BATCH_ROWS
     for it in q[:_BATCH]:
-        if n and _BATCH_ROWS and rows + it["tx"].size > _BATCH_ROWS:
+        if n and cap and rows + it["tx"].size > cap:
             full = True
             break
         rows += it["tx"].size
         n += 1
         cum.append(rows)
-    full = full or n >= _BATCH or bool(_BATCH_ROWS) and rows >= _BATCH_ROWS
-    if _BATCH_ROWS and rows > _TILE_ROWS:
+    full = full or n >= _BATCH or bool(cap) and rows >= cap
+    if cap and rows > _TILE_ROWS:
         whole = rows // _TILE_ROWS * _TILE_ROWS
         if rows < 0.75 * (whole + _TILE_ROWS):
             m = sum(1 for c in cum if c <= whole)
