@@ -173,24 +173,29 @@ class _Server:
         self.model_key = None               # key of the model volume it holds (resident diff2)
         self.c = {"calls": 0, "bytes": 0, "rt_s": 0.0, "copy_s": 0.0}   # echoed into the server's exit line
 
+    def _segment(self, need):
+        """float32 view of this server's shared segment, at least need bytes. A segment has a name only until the
+        server attaches (it unlinks it), so a rank that is stopped or killed leaves nothing in /dev/shm."""
+        from multiprocessing import resource_tracker, shared_memory
+        if self.shm is None or self.shm.size < need:
+            if self.shm is not None:
+                self.shm.close()
+            self.shm = shared_memory.SharedMemory(create=True, size=need)
+            resource_tracker.unregister(self.shm._name, "shared_memory")
+        return np.ndarray((need // 4,), np.float32, self.shm.buf)
+
     def matmul(self, lhs, rhs, lhs_key=None, sum0=False):
         """lhs [nc, m, kc] @ rhs [nc, kc, n] -> [nc, m, n], float32, on the chip.
 
         lhs_key: keep lhs on the chip under this key; a later call with the same key skips the upload.
         sum0: add the nc products on the chip and return [1, m, n].
         """
-        from multiprocessing import shared_memory
         nc, m, kc = lhs.shape
         n = rhs.shape[2]
         need = 4 * (lhs.size + rhs.size + nc * m * n)
         with self.lock:
-            if self.shm is None or self.shm.size < need:
-                if self.shm is not None:
-                    self.shm.close()
-                    self.shm.unlink()
-                self.shm = shared_memory.SharedMemory(create=True, size=need)
             t0 = time.time()
-            buf = np.ndarray((need // 4,), np.float32, self.shm.buf)
+            buf = self._segment(need)
             if lhs_key is None or lhs_key != self.lhs_key:
                 buf[:lhs.size] = lhs.reshape(-1)
             buf[lhs.size:lhs.size + rhs.size] = rhs.reshape(-1)
@@ -229,7 +234,6 @@ class _Server:
 
         own = [on_1 .. on_N]: eul holds the particles' own orientation sets one after the other, and the result is the
         list of their float32 [T_i, on_i] blocks: each particle is scored on its own set only."""
-        from multiprocessing import shared_memory
         N, R = xr.shape[0], tx.size
         O, P = eul.shape[0], x.shape[0]
         with self.lock:
@@ -242,13 +246,8 @@ class _Server:
                 nt = np.bincount(pn.astype(np.int64), minlength=N)
                 nout = int((nt * np.asarray(own)).sum())
             need = 4 * (sum(a.size for a in parts) + ((R * O if own is None else nout) if prior is None else 3 * cap + 2 * N))
-            if self.shm is None or self.shm.size < need:
-                if self.shm is not None:
-                    self.shm.close()
-                    self.shm.unlink()
-                self.shm = shared_memory.SharedMemory(create=True, size=need)
             t0 = time.time()
-            buf = np.ndarray((need // 4,), np.float32, self.shm.buf)
+            buf = self._segment(need)
             o = 0
             for a in parts:
                 buf[o:o + a.size] = a.reshape(-1)

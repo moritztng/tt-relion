@@ -159,9 +159,6 @@ up to the seed pair's own resolution is more than 0.02 under the pair.
 it on the same thread, so RELION's own kernel does that particle. A local search brings a few hundred orientations
 per particle and cannot fill a chip tile. Off by default (0).
 
-`TT_RELION_NORM_DIGITS=<n>` gives the norm product alone more digits than the cross product. Off by default: with
-the balance fix the norm term needs none.
-
 ### The last iteration
 
 An auto-refinement ends with one iteration at the full image size. For a 360-pixel box that is 65,160 pixels per
@@ -177,3 +174,6 @@ The table passes through host memory on its way to the chip, about 26 GB per chi
 wants it at the start of that iteration. `TT_RELION_TABLE_TURNS=<n>` (default 4) is how many chips of a host upload at
 once; the others wait their turn. `--preread_images` also counts here: RELION keeps the whole particle set in every
 MPI rank, so with one rank per chip the host holds as many copies as it has chips.
+
+`TT_RELION_NORM_DIGITS=<n>` gives the norm product alone more digits than the cross product. Off by default: with
+the balance fix the norm term needs none.

@@ -31,9 +31,9 @@ OCH = max(OBLK, int(os.environ.get("TT_RELION_OCH", "4096")) // OBLK * OBLK)    
                 # its own run of programs, so a small batch (one 512-row tile) may be cheaper on fewer, wider chunks
 RUP = 64        # uploaded rows come in whole steps of this: a fine pass has a new row count on every call, and
                 # each new shape costs seconds of program builds
-SUB = os.environ.get("TT_RELION_SUBPHASE", "") not in ("", "0")   # split prod_s (a device sync per step: a profile, not a rate)
 TBLK = 1 << 14  # voxels per block of the table build (1 MB of table)
 TURNS = int(os.environ.get("TT_RELION_TABLE_TURNS", "4"))   # chips of a host that upload a large table at once
+SUB = os.environ.get("TT_RELION_SUBPHASE", "") not in ("", "0")   # split prod_s (a device sync per step: a profile, not a rate)
 FAR = 3000.0    # pixel coordinate of a pad pixel: outside every radius, so it projects to zero
 FARP = 1e30     # -log prior / 2 of an excluded orientation and of a pad column: never inside a window
 
@@ -356,6 +356,12 @@ class Resident:
         nxl = (nx / 2 - nxh).astype(np.float32)
         pad = lambda v: np.pad(v, (0, nb - len(v)))[:, None]    # noqa: E731
         eul = np.asarray(eul, np.float32).reshape(-1, 9)
+        if prior is None:
+            out = np.empty((R, len(eul)), np.float32) if out is None else out
+        else:
+            plo, plt, window = np.asarray(prior[0], np.float64) / 2, np.asarray(prior[1], np.float64), float(prior[2])
+            plo = np.where(np.isfinite(plo), plo, FARP)
+            kept, rmin = [], []
         t0 = t1 = self._mark("host_s", t0)
         t_nxh, t_nxl = self._put(pad(nxh)), self._put(pad(nxl))
 
@@ -364,16 +370,10 @@ class Resident:
             bp = ttnn.subtract(s_, a)
             return s_, ttnn.add(ttnn.subtract(a, ttnn.subtract(s_, bp)), ttnn.subtract(b, bp))
 
-        if prior is None:
-            out = np.empty((R, len(eul)), np.float32) if out is None else out
-        else:
-            plo, plt, window = np.asarray(prior[0], np.float64) / 2, np.asarray(prior[1], np.float64), float(prior[2])
-            plo = np.where(np.isfinite(plo), plo, FARP)
-            kept, rmin = [], []
-        # The digit planes of a reference set (two products, n bf16 planes each) get a third of the memory the
-        # model's table left. At full image size that is about 1,000 orientations and a call brings more: it is
-        # then projected, scored and dropped a piece at a time, each piece with its own balance, and never held.
-        omax = max(OBLK, self.free // 3 // (4 * self.n * self.Kp) // OBLK * OBLK)
+        # The digit planes of a reference set (two products, bf16 planes) get a third of the memory the model's
+        # table left. At full image size that is about 1,000 orientations and a call brings more: it is then
+        # projected, scored and dropped a piece at a time, each piece with its own balance, and never held.
+        omax = max(OBLK, self.free // 3 // (2 * (self.n + self.n2) * self.Kp) // OBLK * OBLK)
         if len(eul) > omax:
             ref_key = None
         held = ref_key is not None and ref_key == self.ref_key
@@ -472,7 +472,7 @@ class Resident:
         On = On if On <= OBLK else -(-On // OBLK) * OBLK       # one column block, or whole ones
         # particles per program: the digit planes of both products get a third of what the table left (as in d2),
         # and a projection call takes OCH orientations. A power of two, so a rank compiles few shapes.
-        qmax = max(1, min(self.free // 3 // (4 * self.n * self.Kp), OCH) // On)
+        qmax = max(1, min(self.free // 3 // (2 * (self.n + self.n2) * self.Kp), OCH) // On)
         qmax = 1 << (qmax.bit_length() - 1)
         eul = np.asarray(eul, np.float32).reshape(-1, 9)
         A0, A20, nx = self._operands(xr, xi, w, tx, ty, pn, x, y, sel=np.arange(N))     # [R, K], [N, K], [N]

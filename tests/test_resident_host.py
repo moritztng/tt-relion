@@ -65,6 +65,42 @@ def test_layout_spreads_the_particle_norm_over_its_rows():
         assert err < 1e-6, (counts[:3], err)
 
 
+def test_corner_table_matches_the_direct_form():
+    from tt_relion.resident import TBLK, _corner_table
+    X, Y, Z = 20, 37, 37
+    nvox = X * Y * Z
+    assert nvox > TBLK and nvox % TBLK
+    mdl = np.random.default_rng(3).standard_normal((nvox, 2)).astype(np.float32)
+    mp = np.concatenate([mdl, np.zeros((X * Y + X + 2, 2), np.float32)])
+    ref = np.empty((nvox, 16), np.float32)
+    for dz in (0, 1):
+        for dy in (0, 1):
+            for dx in (0, 1):
+                o, c = dx + dy * X + dz * X * Y, 4 * dz + 2 * dy + dx
+                ref[:, 2 * c:2 * c + 2] = mp[o:o + nvox]
+    assert np.array_equal(_corner_table(mdl, X, Y), ref)
+
+
+def test_table_turns_are_host_wide_and_counted(monkeypatch, tmp_path):
+    import threading
+
+    from tt_relion import resident
+    monkeypatch.setattr(resident, "TURNS", 2)
+    monkeypatch.setattr(resident.tempfile, "gettempdir", lambda: str(tmp_path))
+    got = threading.Event()
+
+    def third():
+        with resident._turn():
+            got.set()
+    with resident._turn():
+        with resident._turn():
+            t = threading.Thread(target=third)
+            t.start()
+            assert not got.wait(0.5)        # both places taken
+        assert got.wait(5)                  # one given back
+    t.join()
+
+
 def test_candidates_are_the_window_of_each_particle():
     """The candidate form on stand-in chip pieces: an inexact row minimum, a compaction that emits exactly the
     elements under each row's threshold, device rows permuted. Every sample within the window of its particle's best
@@ -103,42 +139,6 @@ def test_candidates_are_the_window_of_each_particle():
         want_r, want_o = np.nonzero(E - b[pn][:, None] < 40.0)
         assert np.array_equal(rr, want_r) and np.array_equal(oo, want_o) and np.array_equal(best, b)
         assert np.abs(dl - (E - b[pn][:, None])[want_r, want_o]).max() < 1e-4
-
-
-def test_corner_table_matches_the_direct_form():
-    from tt_relion.resident import TBLK, _corner_table
-    X, Y, Z = 20, 37, 37
-    nvox = X * Y * Z
-    assert nvox > TBLK and nvox % TBLK
-    mdl = np.random.default_rng(3).standard_normal((nvox, 2)).astype(np.float32)
-    mp = np.concatenate([mdl, np.zeros((X * Y + X + 2, 2), np.float32)])
-    ref = np.empty((nvox, 16), np.float32)
-    for dz in (0, 1):
-        for dy in (0, 1):
-            for dx in (0, 1):
-                o, c = dx + dy * X + dz * X * Y, 4 * dz + 2 * dy + dx
-                ref[:, 2 * c:2 * c + 2] = mp[o:o + nvox]
-    assert np.array_equal(_corner_table(mdl, X, Y), ref)
-
-
-def test_table_turns_are_host_wide_and_counted(monkeypatch, tmp_path):
-    import threading
-
-    from tt_relion import resident
-    monkeypatch.setattr(resident, "TURNS", 2)
-    monkeypatch.setattr(resident.tempfile, "gettempdir", lambda: str(tmp_path))
-    got = threading.Event()
-
-    def third():
-        with resident._turn():
-            got.set()
-    with resident._turn():
-        with resident._turn():
-            t = threading.Thread(target=third)
-            t.start()
-            assert not got.wait(0.5)        # both places taken
-        assert got.wait(5)                  # one given back
-    t.join()
 
 
 def test_own_form_scores_each_particle_on_its_own_set():
